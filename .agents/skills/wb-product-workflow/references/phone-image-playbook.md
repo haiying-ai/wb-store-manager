@@ -60,6 +60,19 @@ The main image is the buyer's first decision point. It should include:
 
 Do not overload the main image. Avoid a wall of small text, competing product renders, misleading accessories, fake app screens, manufacturer logos, EAC/official-store claims, or free-gift claims unless confirmed and permitted.
 
+#### Main-image composition safety (mandatory)
+
+Treat text/product occlusion as a release blocker. A visually attractive image still fails this gate if the buyer cannot see the complete phone immediately.
+
+- Reserve a fixed product-safe zone on the right: the phone (or foldable-phone pair) should occupy roughly 55–60% of the canvas height/visual weight, be fully visible, and never sit behind a text box, card, banner, or dark overlay.
+- Reserve the left 35–40% for hierarchy: exact model name, refurbished-condition label, then three equal-sized cards for the SKU storage, pre-dispatch inspection, and only a confirmed warranty term.
+- Keep text cards entirely inside the left zone. Do not allow a long configuration line to extend into the product zone; shorten or wrap within the card instead.
+- Use a restrained dark gradient and one subtle halo/light trail behind the product. Reject shards, explosions, heavy fog, busy particles, or background panels that cut through the handset edge or make the product look cropped/covered.
+- Do not add a fourth/fifth claim merely to fill space. In particular, do not introduce battery, accessories, color lists, capacity alternatives, certifications, or guarantees that are not verified for the exact SKU.
+- The product must be recognizable at a small marketplace thumbnail: correct color, camera island, display/notch/hole, hinge where relevant, and no accidental extra device or accessory.
+
+When adapting an approved style to another SKU, keep this layout contract fixed and substitute only model, storage, truthful color rendering, and approved seller facts. Do not let generative variation move the product into the text/card area.
+
 ### Shared Model Detail Pack
 
 Create these ten shared pages per model. Rename/omit a page only where it is not factual for the model; keep the sequence and tracker slot stable.
@@ -149,5 +162,33 @@ Review at least one full representative pack for every product family and inspec
 - variants are not confused and shared images do not state a configuration unavailable to one of their linked SKUs.
 
 Only move approved assets into the SKU `images/` staging directory. Upload to WB only after explicit user approval, then read back image count and order.
+
+### Main-image visual QA checklist
+
+For every SKU main image, inspect the actual full-resolution output and a compact contact sheet before upload. Record `APPROVED` only when all checks pass:
+
+1. The exact handset is completely visible and unobscured; text, cards, gradients, and background effects do not cover the phone.
+2. The product occupies the intended right-side safe zone; all left-side copy/cards remain outside the handset silhouette.
+3. Model, condition, storage, inspection, and warranty copy is readable, spelled correctly in Russian, and does not overflow, clip, or merge with the product.
+4. No unapproved fourth claim, alternate storage/color list, battery fact, accessory, logo, fake badge, watermark, or unsupported promise appears.
+5. Hardware identity and selected color match the SKU, including camera layout, front design, hinge, and foldable state when applicable.
+6. The image preserves the intended WB main-image role: one clear buyer benefit hierarchy rather than a detail-page composition.
+
+If any check fails, regenerate only that deterministic SKU main-image path, repeat the visual QA, and replace only photo position `1` after a dry run. Do not compensate by deleting or reordering detail images.
+
+## Card-quality score diagnosis and remediation
+
+WB's seller-portal card-quality score is a portal-derived result, not a field that can be inferred reliably from a successful media API response. Use the portal improvement view as the authoritative diagnosis and treat image/layout correlation as a tested hypothesis until a score refresh proves it.
+
+When a phone card remains below 10 after a normal upload, diagnose in this order:
+
+1. Capture the current below-10 SKU/nmID list and score; do not assume every SKU in a model family has the same issue.
+2. Compare the card with same-model sibling cards that have already reached 10: required characteristic IDs/counts, non-variant values, price/dimension gates, and live image count/order.
+3. Verify the expected image package count for that batch. For the current phone program it is 11 images per SKU (main image + 10 detail pages); use the batch manifest rather than assuming 11 for future programs.
+4. Inspect main image #1 at full size for visual-quality defects: text over product, cropped/covered handset, unreadable/tiny Russian copy, wrong hardware/color, busy background, missing buyer-benefit hierarchy, or a main image that is only a bare product render.
+5. If characteristics and image count/order match good siblings, treat the main-image visual defect as the leading remediation path. First run a single-SKU pilot: regenerate and QA the main image, dry-run upload position `1`, upload it, wait for portal propagation, then confirm that SKU's portal score changed before rolling out.
+6. If the score does not improve after propagation, return to the portal's stated improvement reasons and compare all live fields again; do not repeatedly overwrite images without a new diagnosis.
+
+For a confirmed visual-layout issue affecting multiple cards, generate and visually approve every replacement first, use a manifest that targets only photo `1`, dry-run the whole batch, upload, read back mapping/error status and package count/order, then recheck portal scores after propagation. Never declare the score fixed based solely on HTTP 200 or an unchanged cached portal view.
 
 For the executable audit, package, resumable upload, recovery, and live verification sequence, follow `phone-image-operations.md`.

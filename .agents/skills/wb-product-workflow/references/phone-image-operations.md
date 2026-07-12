@@ -11,6 +11,7 @@ Run the stages in this order:
    - Verify that files are readable, record dimensions, byte size, SHA-256, missing files, and exact duplicate groups.
    - Generate compact contact sheets for visual review.
    - Do not continue while the audit reports missing, unreadable, wrongly mapped, rejected, or unexplained duplicate assets.
+   - For main-image remediation, add a manual composition review for every affected main image: handset fully visible, no text/card/background overlay crossing the product, truthful hardware/color, readable Russian copy, and no unapproved claims. A contact sheet is a triage aid; inspect each individual output at full resolution before approval.
 
 2. `python tools/build_phone_image_upload_packages.py`
    - Resolve each seller SKU to one unique live WB `nmID`.
@@ -30,6 +31,7 @@ Run the stages in this order:
    - Verify every requested SKU maps to exactly one `nmID`, the error list has no matching card, and live photo count matches the package manifest.
    - Inspect order when the main image or page sequence changed; photo count alone cannot prove order.
    - Mark tracker rows `UPLOADED` only after successful live readback.
+   - When replacing only a main image, verify that photo position `1` changed as planned and that the existing detail-page positions/count were preserved. Do not use an API success response as evidence of visual correctness or portal-score improvement.
 
 ## Completion Contract
 
@@ -41,6 +43,13 @@ Do not report a batch complete until all of the following agree:
 - unique live `nmID` count;
 - live card photo count/order and zero matching error cards;
 - final tracker status `UPLOADED` for every SKU.
+
+For a card-quality-score remediation batch, append two more gates:
+
+- a per-SKU visual-QA record for the regenerated main image; and
+- a delayed seller-portal score check after propagation, with the old/new score and any remaining portal improvement reason.
+
+Do not infer that a card reached 10 from matching characteristics, an 11-image package, or a successful upload. Those checks narrow the cause; the portal score is the final confirmation.
 
 Read the expected SKU count and images-per-SKU from the local batch manifest. Treat those values as batch-specific expectations, not universal defaults.
 

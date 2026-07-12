@@ -38,9 +38,12 @@ Read `references/live-state-sync.md` before or immediately after any WB live wri
    - One independently sellable configuration needs one barcode.
 
 4. Review pricing and profitability.
+   - Read `references/pricing-rules.md` before creating or changing a category pricing model.
    - Run `python -m wb_manager pricing review --category <category> --sku <SKU> --input-file <pricing.json>` when pricing input is external.
    - Profitability is a hard gate.
    - Source-material price is not sale price unless the user explicitly confirms it.
+   - Separate percentage-of-sale costs, fixed per-unit costs, product cost, and target profit. Solve for the minimum buyer-paid price first, then derive any WB list price and discount.
+   - For the current phone category, the confirmed working formula is documented in `references/pricing-rules.md`; do not silently restore older tax, exchange-loss, or fixed-cost assumptions.
 
 5. Stage images.
    - Create/confirm main image first.
@@ -49,6 +52,7 @@ Read `references/live-state-sync.md` before or immediately after any WB live wri
    - Reject unconfirmed colors.
    - For mobile phones, also read `references/phone-image-playbook.md` before planning, generating, reviewing, or reporting image progress. It defines the required model-first workflow, image-set structure, factual guardrails, and resumable batch protocol.
    - Before auditing, packaging, uploading, or verifying a phone image batch, also read `references/phone-image-operations.md`. Use its four-stage tool chain and completion gates instead of ad hoc upload loops.
+   - If a phone card-quality score is below 10, use the portal-led diagnostic and single-SKU pilot/remediation rules in `references/phone-image-playbook.md`; do not assume that an HTTP-successful image upload or a complete image count has resolved the score.
 
 6. Validate listing package.
    - Run `python -m wb_manager listing validate --category <category> --sku <SKU>`.
