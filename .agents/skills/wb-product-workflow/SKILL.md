@@ -19,6 +19,7 @@ Each category uses:
 
 Read `references/directory-protocol.md` before changing folder behavior.
 Read `references/live-state-sync.md` before or immediately after any WB live write, readback, or follow-up operation that depends on live identifiers.
+For this workspace's GitHub publication, read `references/github-ssh.md` before committing or pushing.
 
 ## Default Workflow
 
@@ -145,3 +146,4 @@ Before saying a product is sellable, verify:
 - `references/directory-protocol.md`
 - `references/live-state-sync.md`
 - `references/operations-analytics.md`
+- `references/github-ssh.md`
