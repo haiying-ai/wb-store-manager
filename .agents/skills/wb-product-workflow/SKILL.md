@@ -78,7 +78,7 @@ For this workspace's GitHub publication, read `references/github-ssh.md` before 
    - Wait for portal/front-end propagation before declaring buyer-visible sale status.
 
 9. Analyze operations and sale readiness.
-   - For store metrics, traffic, add-to-cart, conversion, product-problem, or sale-readiness requests, read `references/operations-analytics.md` first.
+   - For store metrics, traffic, add-to-cart, conversion, product-problem, or sale-readiness requests, read `references/operations-analytics.md` and `references/daily-report-template.md` first.
    - Use the WB Analytics v3 sales-funnel endpoint for card totals and funnel data; do not use a single Content page or price-goods count as the total number of cards.
    - Treat cards listed for only 1–2 days as cold-start candidates unless other hard blockers are found. Use search-query analysis only when diagnosing search relevance or parameter matching.
    - For a card with add-to-cart but no order, verify the complete read-only chain: card errors, media, dimensions, price, active FBS warehouse, per-barcode stock readback, and public product-page buy controls plus delivery date.
@@ -146,4 +146,5 @@ Before saying a product is sellable, verify:
 - `references/directory-protocol.md`
 - `references/live-state-sync.md`
 - `references/operations-analytics.md`
+- `references/daily-report-template.md`
 - `references/github-ssh.md`
