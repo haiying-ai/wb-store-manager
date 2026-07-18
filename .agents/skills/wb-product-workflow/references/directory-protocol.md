@@ -1,6 +1,8 @@
 # Directory Protocol
 
-WB category folders live under `E:\WB\<category>`.
+`E:\电商运营` is the cross-platform materials root. WB category folders live under `E:\电商运营\01平台资料\01WB\<category>`.
+
+At the `E:\电商运营` root, use `00共享资料` for cross-platform product facts/assets, `01平台资料\02OZON` for Ozon materials, `02店铺资料` for store assets, and `03运营数据` for normalized multi-store reports. Do not place new WB categories directly under `E:\电商运营`.
 
 Required folders:
 

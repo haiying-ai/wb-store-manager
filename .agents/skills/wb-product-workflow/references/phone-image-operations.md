@@ -55,7 +55,7 @@ Read the expected SKU count and images-per-SKU from the local batch manifest. Tr
 
 ## Operational Records
 
-Keep these artifacts together and sync the verified copy into `E:\WB\手机\03上线资料`:
+Keep these artifacts together and sync the verified copy into `E:\电商运营\01平台资料\01WB\手机\03上线资料`:
 
 - image audit report and contact-sheet location;
 - batch upload manifest and per-SKU manifests;

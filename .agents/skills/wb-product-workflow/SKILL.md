@@ -1,11 +1,13 @@
 ---
 name: wb-product-workflow
-description: End-to-end Wildberries/WB product and operations workflow for E:\WB category folders, including source-material sync, pricing, image staging, listing publish, FBS sale-readiness, store metrics, sales-funnel analysis, and operational diagnosis.
+description: End-to-end Wildberries/WB product and operations workflow for E:\电商运营\01平台资料\01WB category folders, including source-material sync, pricing, image staging, listing publish, FBS sale-readiness, store metrics, sales-funnel analysis, and operational diagnosis.
 ---
 
 # WB Product Workflow
 
-Use this skill for Wildberries/WB product work rooted at `E:\WB\<category>` and implemented by `E:\CodexWorks\WB`.
+Use this skill for Wildberries/WB product work rooted at `E:\电商运营\01平台资料\01WB\<category>` and implemented by `E:\CodexWorks\WB`.
+
+`E:\电商运营` is the cross-platform materials root. Never create a WB category directly under it. Shared product facts and assets belong in `E:\电商运营\00共享资料`; Ozon work belongs in `E:\电商运营\01平台资料\02OZON`.
 
 ## Directory Protocol
 
@@ -20,6 +22,7 @@ Each category uses:
 Read `references/directory-protocol.md` before changing folder behavior.
 Read `references/live-state-sync.md` before or immediately after any WB live write, readback, or follow-up operation that depends on live identifiers.
 For this workspace's GitHub publication, read `references/github-ssh.md` before committing or pushing.
+Before publishing any reusable WB platform-logic change, read `references/dual-repository-sync.md` and update both `wb-store-manager` and `store-manager-ru` in the same work session.
 
 ## Default Workflow
 
@@ -28,17 +31,23 @@ For this workspace's GitHub publication, read `references/github-ssh.md` before 
    - Review source manifest, product facts, asset index, missing facts, and change log.
    - If source files changed, trust regenerated facts over older generated packages.
 
-2. Confirm product details.
+2. Qualify a new category template before rollout.
+   - Read `references/category-template-benchmark-gate.md` whenever adding a category or materially changing a category template.
+   - Require one timestamped competitor record and one complete representative prototype covering main image, gallery, title, characteristics, description, trust/fulfilment and compliance.
+   - Score both with the same rubric. The prototype must have zero hard fails, a higher total, and a strictly higher score in every template-controlled dimension; ties do not pass.
+   - Do not generate or publish the category-wide SKU batch until the user explicitly approves the passing prototype.
+
+3. Confirm product details.
    - Run `python -m wb_manager product review --category <category> --sku <SKU>`.
    - Block progression if required fields are missing.
    - Record color, barcode, package dimensions, package gross weight, warehouse, certifications, and WB subject.
 
-3. Generate official barcode when needed.
+4. Generate official barcode when needed.
    - Use `python -m wb_manager barcode generate --category <category> --sku <SKU>`.
    - Never fabricate barcodes.
    - One independently sellable configuration needs one barcode.
 
-4. Review pricing and profitability.
+5. Review pricing and profitability.
    - Read `references/pricing-rules.md` before creating or changing a category pricing model.
    - Run `python -m wb_manager pricing review --category <category> --sku <SKU> --input-file <pricing.json>` when pricing input is external.
    - Profitability is a hard gate.
@@ -46,26 +55,36 @@ For this workspace's GitHub publication, read `references/github-ssh.md` before 
    - Separate percentage-of-sale costs, fixed per-unit costs, product cost, and target profit. Solve for the minimum buyer-paid price first, then derive any WB list price and discount.
    - For the current phone category, the confirmed working formula is documented in `references/pricing-rules.md`; do not silently restore older tax, exchange-loss, or fixed-cost assumptions.
 
-5. Stage images.
+6. Stage images.
    - Create/confirm main image first.
    - Then generate prompts or inspect external inboxes.
    - Lock product color before selecting or generating images.
    - Reject unconfirmed colors.
+   - For IPL hair-removal devices / 脱毛仪, read `references/hair-removal-main-image.md` before planning, prompting, generating, scoring, approving, uploading, or verifying a main image. Treat its SKU-truth, Russian-copy, prompt-template, scoring, and WB readback gates as mandatory.
    - For mobile phones, also read `references/phone-image-playbook.md` before planning, generating, reviewing, or reporting image progress. It defines the required model-first workflow, image-set structure, factual guardrails, and resumable batch protocol.
+   - Before producing a phone main image, read `references/phone-main-image-production-workflow.md`. Generate a new product-first base without AI text, add Russian copy deterministically afterward, enforce product-safe zones, inspect full size and 320 px, and regenerate every failed SKU.
+   - Before generating or approving any phone main image, read `references/phone-main-image-sales-score.md`. Require a score of at least 93/100, zero hard-fail defects, and a score above the active competitor/reference benchmark before presenting it as upload-ready.
    - Before auditing, packaging, uploading, or verifying a phone image batch, also read `references/phone-image-operations.md`. Use its four-stage tool chain and completion gates instead of ad hoc upload loops.
    - If a phone card-quality score is below 10, use the portal-led diagnostic and single-SKU pilot/remediation rules in `references/phone-image-playbook.md`; do not assume that an HTTP-successful image upload or a complete image count has resolved the score.
 
-6. Validate listing package.
+7. Validate listing package.
    - Run `python -m wb_manager listing validate --category <category> --sku <SKU>`.
    - Required files in `03上线资料\<SKU>`: `listing_manifest.json`, passing `pricing_review.json`, complete product review, and confirmed `images/`.
 
-7. Publish or discover live WB card.
+8. Produce product-promotion video when requested.
+   - Read `references/product-video-workflow.md` before selecting reference media, writing a storyboard, generating video, or accepting a render.
+   - Treat a video as a separate marketing asset: it must use approved final product images and verified product facts; it does not replace the WB image package or its validation gates.
+   - Use Dreamina/即梦 only when the user explicitly asks for it. Follow the `dreamina-cli` skill for login, credit-consuming submissions, task IDs, polling, and downloads.
+   - For a multi-beat product story, default to short independently generated clips (about 4–6 seconds each), inspect each clip, then concatenate approved clips locally. Do not attempt the whole story as one long multi-image generation unless the user explicitly requests it.
+   - Keep generated clips, review frames, prompts, and the final render under `E:\CodexWorks\WB\videos\<product-slug>\` or the category's video work folder. Never overwrite an approved final render.
+
+9. Publish or discover live WB card.
    - Prefer dry-run until the user explicitly approves live writes.
    - When the user manually created or edited a card, treat WB live data as source of truth and do not recreate the card.
    - Record live `nmID`, `imtID`, `chrtID`, `vendorCode`, barcode, title, dimensions, and photo count.
    - After any successful live publish or readback-confirmed live update, sync the confirmed WB payload, response, readback, mapping, and status summary into `03涓婄嚎璧勬枡` promptly. Do not leave live platform state only in `02鐢熸垚璧勬枡` or `data/operations/`.
 
-8. Complete card-to-sale gates.
+10. Complete card-to-sale gates.
    - Upload approved images and verify count/order.
    - For phone batches, image upload is complete only when the package manifest, resumable upload state, live card readback, and tracker all agree. A successful HTTP response alone is not completion.
    - Set price/discount and read back.
@@ -77,12 +96,12 @@ For this workspace's GitHub publication, read `references/github-ssh.md` before 
    - Read stock back from the same warehouse and barcode.
    - Wait for portal/front-end propagation before declaring buyer-visible sale status.
 
-9. Analyze operations and sale readiness.
+11. Analyze operations and sale readiness.
    - For store metrics, traffic, add-to-cart, conversion, product-problem, or sale-readiness requests, read `references/operations-analytics.md` and `references/daily-report-template.md` first.
    - Use the WB Analytics v3 sales-funnel endpoint for card totals and funnel data; do not use a single Content page or price-goods count as the total number of cards.
    - Treat cards listed for only 1–2 days as cold-start candidates unless other hard blockers are found. Use search-query analysis only when diagnosing search relevance or parameter matching.
    - For a card with add-to-cart but no order, verify the complete read-only chain: card errors, media, dimensions, price, active FBS warehouse, per-barcode stock readback, and public product-page buy controls plus delivery date.
-   - Save a timestamped evidence report to `E:\WB\<category>\04运营资料\`; include data period, currency/region, source status, facts, inferences, and proposed actions. Never include tokens.
+   - Save a timestamped evidence report to `E:\电商运营\01平台资料\01WB\<category>\04运营资料\`; include data period, currency/region, source status, facts, inferences, and proposed actions. Never include tokens.
 
 ## Variant And Inventory Rules
 
@@ -141,10 +160,16 @@ Before saying a product is sellable, verify:
 - `references/wb-listing-safety.md`
 - `references/pricing-rules.md`
 - `references/image-workflow.md`
+- `references/category-template-benchmark-gate.md`
+- `references/hair-removal-main-image.md`
+- `references/product-video-workflow.md`
 - `references/phone-image-playbook.md`
+- `references/phone-main-image-sales-score.md`
+- `references/phone-main-image-production-workflow.md`
 - `references/phone-image-operations.md`
 - `references/directory-protocol.md`
 - `references/live-state-sync.md`
 - `references/operations-analytics.md`
 - `references/daily-report-template.md`
 - `references/github-ssh.md`
+- `references/dual-repository-sync.md`

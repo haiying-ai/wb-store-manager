@@ -11,6 +11,8 @@ The project is intentionally conservative:
 
 ## Quick Start
 
+Before the first API call, create a store-scoped WB Token with the minimum required categories and configure it as an environment variable. See [WB API Token 配置](docs/wb-token-setup.md) for the exact WB Partners path, permission choices, storage location, 180-day validity and rotation procedure.
+
 ```powershell
 $env:WB_API_TOKEN = "your_rotated_token"
 python -m wb_manager ping

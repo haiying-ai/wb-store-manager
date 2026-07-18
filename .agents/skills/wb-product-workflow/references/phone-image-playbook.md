@@ -50,6 +50,8 @@ Use a vertical marketplace canvas unless WB requirements for the target card dif
 
 ### SKU Main Image
 
+Follow the complete generation, deterministic-copy and review sequence in `phone-main-image-production-workflow.md`, then apply the mandatory commercial scoring gate in `phone-main-image-sales-score.md`. A technically valid image is not approved unless it reaches at least 93/100, has zero hard-fail defects, and beats the active benchmark. Use the approved iPhone 14 V5 reference asset as the minimum density, hierarchy, and sales-readiness standard; adapt model facts and color treatment without cloning its exact composition.
+
 The main image is the buyer's first decision point. It should include:
 
 - exact model name and the confirmed condition label, such as `Восстановленный`;
@@ -112,6 +114,8 @@ Before generation, create a compact review package for one representative model 
 - explicit prohibited claims list.
 
 Ask the user to approve the visual direction and first representative pack. Once a direction has been approved, reuse the approved structure across models while substituting only confirmed model facts. Return to the user for approval when the product family, condition, visual style, or evidence claims materially change.
+
+For a newly added category, approval of visual direction alone is insufficient. Complete the side-by-side listing comparison in `category-template-benchmark-gate.md`; require the prototype to beat the competitor in every scored dimension and total before setting the template to `APPROVED_FOR_ROLLOUT`.
 
 ## Batch Generation And Resumability
 
