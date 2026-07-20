@@ -1,6 +1,6 @@
 ---
 name: wb-product-workflow
-description: End-to-end Wildberries/WB product and operations workflow for E:\电商运营\01平台资料\01WB category folders, including source-material sync, pricing, image staging, listing publish, FBS sale-readiness, store metrics, sales-funnel analysis, and operational diagnosis.
+description: End-to-end Wildberries/WB product and operations workflow for E:\电商运营\01平台资料\01WB category folders, including source-material sync, pricing, image staging, listing publish, post-publish buyer-perspective audits, FBS sale-readiness, store metrics, sales-funnel analysis, and operational diagnosis.
 ---
 
 # WB Product Workflow
@@ -96,7 +96,16 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
    - Read stock back from the same warehouse and barcode.
    - Wait for portal/front-end propagation before declaring buyer-visible sale status.
 
-11. Analyze operations and sale readiness.
+11. Run the mandatory post-publish buyer-perspective audit.
+   - Read `references/buyer-perspective-post-publish-audit.md` after a new listing or material listing update is live and readable.
+   - Audit the complete live buyer experience, not only the upload payload: title, attributes, description, every image position, configuration selectors, condition, included items, delivery promises, warranty, and model-specific claims.
+   - Check each sellable SKU against its exact model, color, capacity, condition, and confirmed facts. Deduplicate shared images for efficiency, but map every finding back to all affected SKUs.
+   - Separate common-sense contradictions from purchase doubts and backend-only risks. Treat buyer confusion or reasonable misinterpretation as a defect even when the API accepts the card.
+   - Require human visual review of full-size assets and marketplace-size thumbnails. Automated hashes, OCR, image counts, and HTTP success are evidence aids, not substitutes for human judgment.
+   - Save a timestamped report and affected-SKU list under the category `04运营资料`; sync any confirmed live remediation into `03上线资料`.
+   - Do not declare final listing completion while an unresolved hard contradiction remains. Present proposed image/content fixes for user approval before any live write.
+
+12. Analyze operations and sale readiness.
    - For store metrics, traffic, add-to-cart, conversion, product-problem, or sale-readiness requests, read `references/operations-analytics.md` and `references/daily-report-template.md` first.
    - Use the WB Analytics v3 sales-funnel endpoint for card totals and funnel data; do not use a single Content page or price-goods count as the total number of cards.
    - Treat cards listed for only 1–2 days as cold-start candidates unless other hard blockers are found. Use search-query analysis only when diagnosing search relevance or parameter matching.
@@ -147,6 +156,9 @@ Before saying a product is sellable, verify:
 - FBS warehouse exists and is not deleting/processing.
 - Stock readback returns the barcode with `amount > 0`.
 - Portal/front-end propagation is checked or explicitly marked pending.
+- The post-publish buyer-perspective audit has been completed against the live card.
+- No unresolved hard contradiction exists across SKU, title, attributes, description, images, condition, configuration, included items, or delivery/warranty promises.
+- Purchase-doubt findings are documented with severity, affected SKU count, evidence, and a proposed minimal remediation.
 
 ## Encoding Rules
 
@@ -171,5 +183,6 @@ Before saying a product is sellable, verify:
 - `references/live-state-sync.md`
 - `references/operations-analytics.md`
 - `references/daily-report-template.md`
+- `references/buyer-perspective-post-publish-audit.md`
 - `references/github-ssh.md`
 - `references/dual-repository-sync.md`
