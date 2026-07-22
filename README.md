@@ -23,6 +23,31 @@ WB Store Manager provides:
 - a reusable `wb-product-workflow` Codex Skill with four fixed workflows;
 - local audit artifacts without committing tokens or private business data.
 
+## Workflow architecture
+
+```mermaid
+flowchart LR
+    U["Operator request"] --> W["WB workflow router"]
+    W --> D["Daily operations"]
+    W --> P["Listing and optimization"]
+    W --> M["Images and video"]
+    W --> R["Periodic review"]
+
+    D --> A["API and portal evidence"]
+    P --> A
+    M --> C["Media generation and review"]
+    R --> N["Analysis and reports"]
+
+    A --> G["Explicit approval gate"]
+    C --> G
+    N --> G
+    G --> L["Approved WB mutation"]
+    L --> Q["Live readback and audit"]
+    Q --> X["Evidence archive"]
+```
+
+Every path converges on the same safety contract: prepare evidence, stop for approval before a marketplace mutation, then read back the affected live identity and archive the result.
+
 ## Fixed workflows
 
 | Workflow | Stages | Typical result |
