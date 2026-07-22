@@ -12,8 +12,9 @@ from .config import ConfigError, load_settings
 from .image_workflow import create_image_prompts, create_main_image_workspace, inspect_external_inbox
 from .kb import sync_knowledge_base
 from .listing import publish_listing, validate_listing
+from .live_price import read_price_quarantine, read_price_task, read_prices, set_prices
 from .ops import write_daily_report
-from .paths import category_paths, ensure_category_dirs
+from .paths import DEFAULT_BUSINESS_ROOT, category_paths, ensure_category_dirs
 from .pricing import create_pricing_review
 from .product import create_product_review
 from .reporting import build_summary
@@ -24,7 +25,11 @@ from .storage import latest_snapshot, read_json, write_snapshot
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="wbm", description="Wildberries store management toolkit")
-    parser.add_argument("--business-root", default="E:/WB", help="Business data root, default: E:/WB")
+    parser.add_argument(
+        "--business-root",
+        default=str(DEFAULT_BUSINESS_ROOT),
+        help=f"WB category root, default: {DEFAULT_BUSINESS_ROOT}",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("ping", help="Check API domain connectivity")
@@ -51,6 +56,20 @@ def main(argv: list[str] | None = None) -> int:
     _add_category(pricing_review)
     _add_sku(pricing_review)
     pricing_review.add_argument("--input-file", help="JSON file containing pricing inputs")
+    pricing_set = pricing_sub.add_parser("set", help="Set live WB prices and read back")
+    pricing_set.add_argument("--nm-id", action="append", type=int, required=True, help="WB nmID to update; repeat for multiple goods")
+    pricing_set.add_argument("--price", type=int, required=True, help="WB account-currency price")
+    pricing_set.add_argument("--discount", type=int, required=True, help="Seller discount percent")
+    pricing_set.add_argument("--operation-name", default="price_update", help="Operation name for saved audit file")
+    pricing_set.add_argument("--output-dir", default="data/operations", help="Directory for saved request/response/readback")
+    pricing_set.add_argument("--readback-delay", type=float, default=5.0, help="Seconds to wait before price readback")
+    pricing_set.add_argument("--confirm-live", action="store_true", help="Required for the live price write; otherwise print a dry run")
+    pricing_read = pricing_sub.add_parser("read", help="Read live WB prices")
+    pricing_read.add_argument("--nm-id", action="append", type=int, required=True, help="WB nmID to read; repeat for multiple goods")
+    pricing_task = pricing_sub.add_parser("task", help="Read a WB price upload task")
+    pricing_task.add_argument("--upload-id", type=int, required=True, help="WB price upload task id")
+    pricing_quarantine = pricing_sub.add_parser("quarantine", help="Read WB price quarantine goods")
+    pricing_quarantine.add_argument("--nm-id", action="append", type=int, required=True, help="WB nmID to filter; repeat for multiple goods")
 
     barcode = sub.add_parser("barcode", help="WB official barcode commands")
     barcode_sub = barcode.add_subparsers(dest="barcode_command", required=True)
@@ -146,6 +165,63 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(f"Wrote pricing review: {out}")
         return 0
 
+    if args.command == "pricing" and args.pricing_command == "set":
+        items = [{"nmID": nm_id, "price": args.price, "discount": args.discount} for nm_id in args.nm_id]
+        if not args.confirm_live:
+            print(
+                json.dumps(
+                    {
+                        "status": "dry_run",
+                        "live": False,
+                        "operationName": args.operation_name,
+                        "items": items,
+                        "nextStep": "Review the exact nmIDs, price, discount and store, then repeat with --confirm-live.",
+                    },
+                    ensure_ascii=True,
+                    indent=2,
+                )
+            )
+            return 0
+        settings = load_settings()
+        client = WbClient(settings.token, verify_tls=settings.verify_tls)
+        report = set_prices(
+            client,
+            items,
+            operation_name=args.operation_name,
+            output_dir=Path(args.output_dir),
+            readback_delay=args.readback_delay,
+        )
+        print(
+            json.dumps(
+                {
+                    "path": report["path"],
+                    "response": report["response"],
+                    "readback": report["readback"],
+                },
+                ensure_ascii=True,
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "pricing" and args.pricing_command == "read":
+        settings = load_settings()
+        client = WbClient(settings.token, verify_tls=settings.verify_tls)
+        print(json.dumps(read_prices(client, args.nm_id), ensure_ascii=True, indent=2))
+        return 0
+
+    if args.command == "pricing" and args.pricing_command == "task":
+        settings = load_settings()
+        client = WbClient(settings.token, verify_tls=settings.verify_tls)
+        print(json.dumps(read_price_task(client, args.upload_id), ensure_ascii=True, indent=2))
+        return 0
+
+    if args.command == "pricing" and args.pricing_command == "quarantine":
+        settings = load_settings()
+        client = WbClient(settings.token, verify_tls=settings.verify_tls)
+        print(json.dumps(read_price_quarantine(client, args.nm_id), ensure_ascii=True, indent=2))
+        return 0
+
     if args.command == "barcode" and args.barcode_command == "generate":
         settings = load_settings()
         client = WbClient(settings.token, verify_tls=settings.verify_tls)
@@ -191,11 +267,11 @@ def _dispatch(args: argparse.Namespace) -> int:
 
 
 def _add_category(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--category", required=True, help="Business category folder name, e.g. electronics")
+    parser.add_argument("--category", required=True, help="Business category folder name, e.g. 脱毛仪")
 
 
 def _add_sku(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--sku", required=True, help="SKU/model, e.g. EXAMPLE-001")
+    parser.add_argument("--sku", required=True, help="SKU/model, e.g. AI22")
 
 
 def _generated_batch_path(paths, sku: str, batch_name: str) -> Path:

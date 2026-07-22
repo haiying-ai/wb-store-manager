@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_BUSINESS_ROOT = Path("E:/WB")
+# WB is one platform under the shared commerce-material root.  Keep category
+# folders here so the existing 00知识库–04运营资料 protocol stays unchanged.
+DEFAULT_BUSINESS_ROOT = Path("E:/电商运营/01平台资料/01WB")
 
 
 @dataclass(frozen=True)

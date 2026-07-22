@@ -149,7 +149,19 @@ def _extract_product_facts(source: Path, manifest: dict[str, Any]) -> dict[str, 
             if text:
                 facts["sourceNotes"].append({"path": item["path"], "text": text[:6000]})
         elif ext in {".xlsx", ".xlsm"}:
-            facts["sourceNotes"].append({"path": item["path"], "note": "Workbook detected; run product review to inspect SKU rows if needed."})
+            extracted = _extract_workbook_product_rows(path, item["path"])
+            if extracted:
+                facts["sourceNotes"].append(
+                    {
+                        "path": item["path"],
+                        "note": f"Workbook product rows extracted: {len(extracted)}",
+                        "fields": ["model", "memory", "color", "specification", "costPrice"],
+                    }
+                )
+                for product in extracted:
+                    facts["products"][product["sku"]] = product
+            else:
+                facts["sourceNotes"].append({"path": item["path"], "note": "Workbook detected; run product review to inspect SKU rows if needed."})
 
     _infer_prices_from_notes(facts)
     return facts
@@ -177,6 +189,167 @@ def _infer_prices_from_notes(facts: dict[str, Any]) -> None:
                 if product["sku"].upper() == canonical.upper() or product["sourceFolder"].upper() == sku.upper():
                     product.setdefault("pricing", {})["plannedSalePriceRub"] = float(price)
                     product.setdefault("sources", []).append({"field": "plannedSalePriceRub", "path": note.get("path")})
+
+
+def _extract_workbook_product_rows(path: Path, source_path: str) -> list[dict[str, Any]]:
+    rows = _read_xlsx_rows(path)
+    if not rows:
+        return []
+
+    header_index = None
+    headers: list[str] = []
+    for index, row in enumerate(rows[:20]):
+        normalized = [_normalize_cell(value) for value in row]
+        if {"型号", "内存", "颜色", "规格", "成本价格"}.issubset(set(normalized)):
+            header_index = index
+            headers = normalized
+            break
+    if header_index is None:
+        return []
+
+    header_map = {name: idx for idx, name in enumerate(headers) if name}
+    products: list[dict[str, Any]] = []
+    current_model = ""
+    for row_number, row in enumerate(rows[header_index + 1 :], start=header_index + 2):
+        model = _cell_at(row, header_map["型号"])
+        if model:
+            current_model = model
+        memory = _cell_at(row, header_map["内存"])
+        color = _cell_at(row, header_map["颜色"])
+        specification = _cell_at(row, header_map["规格"])
+        cost = _number_at(row, header_map["成本价格"])
+        if not specification or cost is None:
+            continue
+        sku = _canonical_sku(specification)
+        fields = {
+            "brand": "iPhone" if specification.lower().startswith("iphone") else "",
+            "model": current_model,
+            "memory": memory,
+            "color": color,
+            "specs": specification,
+            "condition": "Б/у",
+        }
+        products.append(
+            {
+                "sku": sku,
+                "sourceFolder": "",
+                "images": [],
+                "fields": {key: value for key, value in fields.items() if value},
+                "pricing": {"cost": cost},
+                "sources": [
+                    {
+                        "field": "model/memory/color/specs/cost",
+                        "path": source_path,
+                        "row": row_number,
+                    }
+                ],
+                "missingRequired": [],
+            }
+        )
+    return products
+
+
+def _read_xlsx_rows(path: Path) -> list[list[str]]:
+    with zipfile.ZipFile(path) as archive:
+        shared_strings = _xlsx_shared_strings(archive)
+        workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+        namespace = _xml_namespace(workbook.tag)
+        first_sheet = workbook.find(f"{namespace}sheets/{namespace}sheet")
+        if first_sheet is None:
+            return []
+        relationship_id = first_sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+        if not relationship_id:
+            return []
+        relationships = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        target = None
+        for rel in relationships:
+            if rel.attrib.get("Id") == relationship_id:
+                target = rel.attrib.get("Target")
+                break
+        if not target:
+            return []
+        sheet_path = "xl/" + target.lstrip("/")
+        sheet = ElementTree.fromstring(archive.read(sheet_path))
+        rows: list[list[str]] = []
+        for row in sheet.findall(f".//{namespace}row"):
+            values: list[str] = []
+            for cell in row.findall(f"{namespace}c"):
+                column_index = _xlsx_column_index(cell.attrib.get("r", ""))
+                while len(values) < column_index - 1:
+                    values.append("")
+                values.append(_xlsx_cell_value(cell, namespace, shared_strings))
+            rows.append(values)
+        return rows
+
+
+def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
+    try:
+        root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+    except KeyError:
+        return []
+    namespace = _xml_namespace(root.tag)
+    strings: list[str] = []
+    for item in root.findall(f"{namespace}si"):
+        strings.append("".join(text.text or "" for text in item.findall(f".//{namespace}t")))
+    return strings
+
+
+def _xlsx_cell_value(cell: ElementTree.Element, namespace: str, shared_strings: list[str]) -> str:
+    cell_type = cell.attrib.get("t")
+    if cell_type == "inlineStr":
+        return "".join(text.text or "" for text in cell.findall(f".//{namespace}t")).strip()
+    value = cell.find(f"{namespace}v")
+    if value is None or value.text is None:
+        return ""
+    raw = value.text.strip()
+    if cell_type == "s":
+        try:
+            return shared_strings[int(raw)].strip()
+        except (ValueError, IndexError):
+            return raw
+    return raw
+
+
+def _xlsx_column_index(reference: str) -> int:
+    letters = re.match(r"([A-Z]+)", reference.upper())
+    if not letters:
+        return 1
+    index = 0
+    for char in letters.group(1):
+        index = index * 26 + ord(char) - ord("A") + 1
+    return index
+
+
+def _xml_namespace(tag: str) -> str:
+    if tag.startswith("{"):
+        return tag[: tag.index("}") + 1]
+    return ""
+
+
+def _normalize_cell(value: str) -> str:
+    return str(value or "").strip()
+
+
+def _cell_at(row: list[str], index: int) -> str:
+    if index >= len(row):
+        return ""
+    value = row[index]
+    if value.endswith(".0"):
+        return value[:-2]
+    return value.strip()
+
+
+def _number_at(row: list[str], index: int) -> float | int | None:
+    value = _cell_at(row, index)
+    if not value:
+        return None
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+    if number.is_integer():
+        return int(number)
+    return number
 
 
 def _missing_facts_markdown(product_facts: dict[str, Any]) -> str:

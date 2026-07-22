@@ -38,6 +38,7 @@ class WbClient:
         body: Any = None,
         retries: int = 2,
         retry_sleep: float = 1.5,
+        timeout: int | None = None,
     ) -> ApiResult:
         payload = None
         headers = {
@@ -53,7 +54,7 @@ class WbClient:
         for attempt in range(retries + 1):
             req = urllib.request.Request(url, data=payload, headers=headers, method=method.upper())
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout, context=self.context) as resp:
+                with urllib.request.urlopen(req, timeout=timeout or self.timeout, context=self.context) as resp:
                     return ApiResult(
                         status=resp.status,
                         ok=200 <= resp.status < 300,

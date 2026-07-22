@@ -4,7 +4,7 @@ import time
 from datetime import date, timedelta
 from typing import Any
 
-from .client import WbClient
+from .client import WbApiError, WbClient
 from .endpoints import ApiDomain, PING_DOMAINS
 
 
@@ -12,8 +12,11 @@ def ping_all(client: WbClient) -> list[dict[str, Any]]:
     results = []
     for domain in PING_DOMAINS:
         url = f"{domain}/ping"
-        result = client.request("GET", url)
-        results.append({"domain": domain.value, "status": result.status, "ok": result.ok, "data": result.data})
+        try:
+            result = client.request("GET", url, retries=0, timeout=5)
+            results.append({"domain": domain.value, "status": result.status, "ok": result.ok, "data": result.data})
+        except WbApiError as exc:
+            results.append({"domain": domain.value, "status": None, "ok": False, "error": str(exc)})
     return results
 
 

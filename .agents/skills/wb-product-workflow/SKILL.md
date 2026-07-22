@@ -1,11 +1,23 @@
 ---
 name: wb-product-workflow
-description: End-to-end Wildberries/WB product and operations workflow for E:\电商运营\01平台资料\01WB category folders, including source-material sync, pricing, image staging, listing publish, post-publish buyer-perspective audits, FBS sale-readiness, store metrics, sales-funnel analysis, and operational diagnosis.
+description: Run end-to-end Wildberries/WB product and store operations from local source material through pricing, listing, media, publication readback, buyer audit, daily reporting, and periodic review. Use for WB daily operations, new listings, listing optimization, pricing, FBS sale readiness, images, videos, buyer questions, funnel analysis, and store reports.
 ---
 
 # WB Product Workflow
 
 Use this skill for Wildberries/WB product work rooted at `E:\电商运营\01平台资料\01WB\<category>` and implemented by `E:\CodexWorks\WB`.
+
+## Fixed Workflow Router
+
+Classify each request as `daily`, `listing`, `media`, or `review`. Read `references/fixed-workflows.md`, create or resume its workflow state, and then load only the domain references needed for that flow. Use spreadsheet, document, browser, image, and video skills as execution tools without weakening WB truth, approval, visual-review, or readback gates.
+
+For every flow:
+
+1. Start from manifests, summaries, and the requested SKU files.
+2. Separate platform facts, inferences, recommendations, and proposed mutations.
+3. Stop at `waiting_approval` before any marketplace mutation unless the user explicitly approved the exact action and scope.
+4. After an approved mutation, read back the same live identity and archive the evidence.
+5. Declare completion only when required stages pass and blockers are empty or explicitly accepted.
 
 `E:\电商运营` is the cross-platform materials root. Never create a WB category directly under it. Shared product facts and assets belong in `E:\电商运营\00共享资料`; Ozon work belongs in `E:\电商运营\01平台资料\02OZON`.
 
@@ -169,6 +181,7 @@ Before saying a product is sellable, verify:
 
 ## References
 
+- `references/fixed-workflows.md`
 - `references/wb-listing-safety.md`
 - `references/pricing-rules.md`
 - `references/image-workflow.md`

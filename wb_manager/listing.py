@@ -12,6 +12,9 @@ from .paths import CategoryPaths
 from .sku_alias import canonical_sku
 
 
+WB_PRICE_CURRENCY = "CNY"
+
+
 def validate_listing(paths: CategoryPaths, sku: str) -> dict[str, Any]:
     sku = canonical_sku(sku, category=paths.category)
     sku_listing = paths.listing / sku
@@ -20,12 +23,22 @@ def validate_listing(paths: CategoryPaths, sku: str) -> dict[str, Any]:
     pricing_path = sku_listing / "pricing_review.json"
     detail_path = sku_listing / "product_detail_review.json"
     images_dir = sku_listing / "images"
+    price_readback_path = sku_listing / "wb_price_after_upload.json"
 
     manifest = _read_json(manifest_path, default=None)
     pricing = _read_json(pricing_path, default=None)
     detail = _read_json(detail_path, default=None)
+    price_check: dict[str, Any] | None = None
+    post_publish_price_check: dict[str, Any] | None = None
     if manifest is None:
         issues.append("Missing listing_manifest.json")
+    else:
+        price_check = validate_listing_price_plan(manifest)
+        issues.extend(price_check["issues"])
+        price_readback = _read_json(price_readback_path, default=None)
+        if price_readback is not None:
+            post_publish_price_check = validate_price_readback(manifest, price_readback)
+            issues.extend(post_publish_price_check["issues"])
     if pricing is None:
         issues.append("Missing pricing_review.json")
     elif pricing.get("status") != "ready" or not pricing.get("result", {}).get("passesGate"):
@@ -48,7 +61,10 @@ def validate_listing(paths: CategoryPaths, sku: str) -> dict[str, Any]:
             "pricing": str(pricing_path),
             "detail": str(detail_path),
             "images": str(images_dir),
+            "priceReadback": str(price_readback_path),
         },
+        "priceCheck": price_check,
+        "postPublishPriceCheck": post_publish_price_check,
     }
     sku_listing.mkdir(parents=True, exist_ok=True)
     (sku_listing / "listing_validation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -135,7 +151,7 @@ def build_cards_upload_payload(manifest: dict[str, Any]) -> list[dict[str, Any]]
             {
                 "techSize": "0",
                 "wbSize": "",
-                "price": _price_rub(pricing),
+                "price": _wb_price(pricing),
                 "skus": [str(barcode)],
             }
         ],
@@ -144,6 +160,64 @@ def build_cards_upload_payload(manifest: dict[str, Any]) -> list[dict[str, Any]]
     if characteristics:
         variant["characteristics"] = characteristics
     return [{"subjectID": int(subject_id), "variants": [variant]}]
+
+
+def validate_listing_price_plan(manifest: dict[str, Any]) -> dict[str, Any]:
+    pricing = manifest.get("pricing") or {}
+    issues: list[str] = []
+    expected_price: int | None = None
+    expected_discount: int | None = None
+    try:
+        expected_price = _wb_price(pricing)
+    except (TypeError, ValueError) as exc:
+        issues.append(str(exc))
+    try:
+        expected_discount = _planned_discount_percent(pricing)
+    except (TypeError, ValueError) as exc:
+        issues.append(str(exc))
+    return {
+        "status": "ready" if not issues else "blocked",
+        "expectedCurrency": WB_PRICE_CURRENCY,
+        "expectedPrice": expected_price,
+        "expectedDiscount": expected_discount,
+        "issues": issues,
+    }
+
+
+def validate_price_readback(manifest: dict[str, Any], readback: Any) -> dict[str, Any]:
+    plan = validate_listing_price_plan(manifest)
+    issues = list(plan["issues"])
+    record = _first_price_record(readback)
+    size = _first_price_size(record)
+    actual_currency = record.get("currencyIsoCode4217")
+    actual_price = size.get("price") if size else None
+    actual_discount = record.get("discount")
+    actual_discounted_price = size.get("discountedPrice") if size else None
+    expected_price = plan["expectedPrice"]
+    expected_discount = plan["expectedDiscount"]
+
+    if actual_currency != WB_PRICE_CURRENCY:
+        issues.append(f"WB price currency mismatch: expected {WB_PRICE_CURRENCY}, got {actual_currency!r}")
+    if expected_price is not None and _as_int(actual_price) != expected_price:
+        issues.append(f"WB price mismatch: expected {expected_price}, got {actual_price!r}")
+    if expected_discount is not None and _as_int(actual_discount) != expected_discount:
+        issues.append(f"WB discount mismatch: expected {expected_discount}, got {actual_discount!r}")
+    if expected_price is not None and expected_discount is not None:
+        expected_discounted = int(round(expected_price * (1 - expected_discount / 100)))
+        if _as_int(actual_discounted_price) != expected_discounted:
+            issues.append(f"WB discounted price mismatch: expected {expected_discounted}, got {actual_discounted_price!r}")
+
+    return {
+        "status": "ready" if not issues else "blocked",
+        "expectedCurrency": WB_PRICE_CURRENCY,
+        "expectedPrice": expected_price,
+        "expectedDiscount": expected_discount,
+        "actualCurrency": actual_currency,
+        "actualPrice": actual_price,
+        "actualDiscount": actual_discount,
+        "actualDiscountedPrice": actual_discounted_price,
+        "issues": issues,
+    }
 
 
 def _required_text(source: dict[str, Any], *keys: str) -> str:
@@ -187,10 +261,76 @@ def _characteristics_list(values: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def _price_rub(pricing: dict[str, Any]) -> int:
-    value = pricing.get("plannedSalePriceRub")
+def _wb_price(pricing: dict[str, Any]) -> int:
+    _require_wb_currency(pricing)
+    value = pricing.get("plannedSalePriceCny")
+    if value not in (None, ""):
+        return _positive_int_price(value, "pricing.plannedSalePriceCny")
+
+    value = pricing.get("plannedSalePriceWbCurrency")
+    if value not in (None, ""):
+        return _positive_int_price(value, "pricing.plannedSalePriceWbCurrency")
+
+    rub_value = pricing.get("plannedSalePriceRub")
+    if rub_value in (None, ""):
+        raise ValueError(
+            "listing_manifest.json is missing pricing.plannedSalePriceCny or pricing.plannedSalePriceRub"
+        )
+
+    rate = pricing.get("rubToCnyRate")
+    if rate in (None, ""):
+        raise ValueError("listing_manifest.json is missing pricing.rubToCnyRate for RUB to CNY price upload")
+    return _positive_int_price(float(rub_value) * float(rate), "pricing.plannedSalePriceRub * pricing.rubToCnyRate")
+
+
+def _require_wb_currency(pricing: dict[str, Any]) -> None:
+    target_currency = str(pricing.get("wbPriceCurrency", "")).upper()
+    if target_currency != WB_PRICE_CURRENCY:
+        raise ValueError(f"listing_manifest.json pricing.wbPriceCurrency must be {WB_PRICE_CURRENCY} for this seller account")
+
+
+def _positive_int_price(value: Any, field: str) -> int:
+    price = int(round(float(value)))
+    if price <= 0:
+        raise ValueError(f"listing_manifest.json {field} must be greater than zero")
+    return price
+
+
+def _planned_discount_percent(pricing: dict[str, Any]) -> int:
+    value = pricing.get("plannedDiscount")
+    if value not in (None, ""):
+        return _non_negative_percent(value, "pricing.plannedDiscount")
+    rate = pricing.get("plannedDiscountRate")
+    if rate in (None, ""):
+        raise ValueError("listing_manifest.json is missing pricing.plannedDiscountRate or pricing.plannedDiscount")
+    return _non_negative_percent(float(rate) * 100, "pricing.plannedDiscountRate")
+
+
+def _non_negative_percent(value: Any, field: str) -> int:
+    percent = int(round(float(value)))
+    if percent < 0 or percent > 99:
+        raise ValueError(f"listing_manifest.json {field} must be between 0 and 99")
+    return percent
+
+
+def _first_price_record(readback: Any) -> dict[str, Any]:
+    if isinstance(readback, dict):
+        return readback
+    if isinstance(readback, list):
+        return next((item for item in readback if isinstance(item, dict)), {})
+    return {}
+
+
+def _first_price_size(readback: dict[str, Any]) -> dict[str, Any] | None:
+    sizes = readback.get("sizes")
+    if isinstance(sizes, list) and sizes and isinstance(sizes[0], dict):
+        return sizes[0]
+    return None
+
+
+def _as_int(value: Any) -> int | None:
     if value in (None, ""):
-        raise ValueError("listing_manifest.json is missing pricing.plannedSalePriceRub")
+        return None
     return int(round(float(value)))
 
 
