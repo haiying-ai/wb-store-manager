@@ -118,11 +118,12 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
    - Do not declare final listing completion while an unresolved hard contradiction remains. Present proposed image/content fixes for user approval before any live write.
 
 12. Analyze operations and sale readiness.
-   - For store metrics, traffic, add-to-cart, conversion, product-problem, or sale-readiness requests, read `references/operations-analytics.md` and `references/daily-report-template.md` first.
+   - For store metrics, traffic, add-to-cart, conversion, product-problem, sale-readiness, or a daily report, read `references/operations-analytics.md` and `references/daily-report-template-v2.md` first.
    - Use the WB Analytics v3 sales-funnel endpoint for card totals and funnel data; do not use a single Content page or price-goods count as the total number of cards.
    - Treat cards listed for only 1–2 days as cold-start candidates unless other hard blockers are found. Use search-query analysis only when diagnosing search relevance or parameter matching.
    - For a card with add-to-cart but no order, verify the complete read-only chain: card errors, media, dimensions, price, active FBS warehouse, per-barcode stock readback, and public product-page buy controls plus delivery date.
    - Save a timestamped evidence report to `E:\电商运营\01平台资料\01WB\<category>\04运营资料\`; include data period, currency/region, source status, facts, inferences, and proposed actions. Never include tokens.
+   - The fixed daily report is read-only and must collect the funnel, search, warehouse, price-readback, error-card, feedback/question, order/sale, advertising, promotion, inventory, and history status surfaces. Keep failed or rate-limited sources visible with HTTP status; never replace missing data with zero.
 
 ## Variant And Inventory Rules
 
@@ -195,7 +196,7 @@ Before saying a product is sellable, verify:
 - `references/directory-protocol.md`
 - `references/live-state-sync.md`
 - `references/operations-analytics.md`
-- `references/daily-report-template.md`
+- `references/daily-report-template-v2.md`
 - `references/buyer-perspective-post-publish-audit.md`
 - `references/github-ssh.md`
 - `references/dual-repository-sync.md`

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,15 @@ from wb_manager.config import load_settings
 
 OUT_DIR = ROOT / "data" / "operations"
 TZ = ZoneInfo("Asia/Shanghai")
+SEARCH_REPORT_URL = "https://seller-analytics-api.wildberries.ru/api/v2/search-report/report"
+
+
+def readonly_call(client: WbClient, method: str, url: str, body: dict | None = None) -> dict:
+    """Return a status record instead of failing the entire morning report."""
+    try:
+        return call(client, method, url, body)
+    except Exception as exc:
+        return {"status": 0, "ok": False, "data": {"error": str(exc)}}
 
 
 def call(client: WbClient, method: str, url: str, body: dict | None = None):
@@ -38,6 +48,83 @@ def pick(obj: dict, *keys: str) -> int:
         if key in obj and obj[key] is not None:
             return obj[key]
     return 0
+
+
+def search_performance(client: WbClient, nm_ids: list[int], now: datetime) -> dict:
+    """Return a compact, JSON-safe store search summary for the daily snapshot."""
+    end = now.date()
+    start = end - timedelta(days=29)
+    past_end = start - timedelta(days=1)
+    body = {
+        "currentPeriod": {"start": start.isoformat(), "end": end.isoformat()},
+        "pastPeriod": {"start": (past_end - timedelta(days=29)).isoformat(), "end": past_end.isoformat()},
+        "nmIds": nm_ids, "subjectIds": [], "brandNames": [], "tagIds": [],
+        "positionCluster": "all", "orderBy": {"field": "avgPosition", "mode": "asc"},
+        "includeSubstitutedSKUs": True, "includeSearchTexts": True, "limit": 1000, "offset": 0,
+    }
+    response = call(client, "POST", SEARCH_REPORT_URL, body)
+    result = {"status": response["status"], "ok": response["ok"], "requestedSkuCount": len(nm_ids), "period": body["currentPeriod"]}
+    data = response["data"].get("data", {}) if response["ok"] and isinstance(response["data"], dict) else {}
+    groups = data.get("groups", []) if isinstance(data, dict) else []
+    items = [item for group in groups if isinstance(group, dict) for item in (group.get("items") or []) if isinstance(item, dict)]
+    def value(item: dict, key: str) -> int:
+        field = item.get(key, {})
+        return pick(field, "current") if isinstance(field, dict) else 0
+    rows = [{"nmID": item.get("nmId"), "vendorCode": item.get("vendorCode"), "openCard": value(item, "openCard"), "addToCart": value(item, "addToCart"), "orders": value(item, "orders"), "avgPosition": value(item, "avgPosition"), "visibility": value(item, "visibility")} for item in items]
+    rows.sort(key=lambda row: (row["avgPosition"] or 10**9, -row["openCard"]))
+    result.update({
+        "returnedSkuCount": len(rows), "missingSkuCount": max(0, len(nm_ids) - len(rows)),
+        "totals": {key: sum(row[key] for row in rows) for key in ("openCard", "addToCart", "orders")},
+        "position": {"average": pick(data.get("positionInfo", {}).get("average", {}), "current"), "median": pick(data.get("positionInfo", {}).get("median", {}), "current")},
+        "topBySearchEntries": sorted(rows, key=lambda row: row["openCard"], reverse=True)[:5],
+    })
+    return result
+
+
+def extended_readonly_metrics(client: WbClient, now: datetime, nm_ids: list[int]) -> dict:
+    """Collect every recommended daily read-only source with compact evidence."""
+    today = now.date()
+    history_body = {"selectedPeriod": {"start": (today - timedelta(days=6)).isoformat(), "end": today.isoformat()}, "nmIds": nm_ids, "skipDeletedNm": True, "aggregationLevel": "day"}
+    # Analytics is limited to three calls/minute; the base report already makes two analytics calls.
+    time.sleep(20)
+    product_history = readonly_call(client, "POST", "https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products/history", history_body)
+    time.sleep(20)
+    grouped_history = readonly_call(client, "POST", "https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/grouped/history", {**history_body, "brandNames": [], "subjectIds": [], "tagIds": []})
+    time.sleep(20)
+    stock_report = readonly_call(client, "POST", "https://seller-analytics-api.wildberries.ru/api/v2/stocks-report/products/products", {"currentPeriod": {"start": (today - timedelta(days=6)).isoformat(), "end": today.isoformat()}, "stockType": "", "skipDeletedNm": True, "orderBy": {"field": "avgOrders", "mode": "desc"}, "availabilityFilters": ["deficient", "actual", "balanced", "nonActual", "nonLiquid", "invalidData"], "nmIDs": nm_ids, "limit": 1000, "offset": 0})
+    prices = readonly_call(client, "GET", "https://discounts-prices-api.wildberries.ru/api/v2/list/goods/filter?limit=1000&offset=0")
+    errors = readonly_call(client, "POST", "https://content-api.wildberries.ru/content/v2/cards/error/list?locale=ru", {"cursor": {"limit": 100}, "order": {"ascending": False}})
+    feedbacks = readonly_call(client, "GET", "https://feedbacks-api.wildberries.ru/api/v1/feedbacks?isAnswered=false&take=100&skip=0")
+    questions = readonly_call(client, "GET", "https://feedbacks-api.wildberries.ru/api/v1/questions?isAnswered=false&take=100&skip=0&order=dateDesc")
+    date_from = (today - timedelta(days=7)).isoformat()
+    orders = readonly_call(client, "GET", f"https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom={date_from}&flag=0")
+    sales = readonly_call(client, "GET", f"https://statistics-api.wildberries.ru/api/v1/supplier/sales?dateFrom={date_from}&flag=0")
+    ad_count = readonly_call(client, "GET", "https://advert-api.wildberries.ru/adv/v1/promotion/count")
+    ad_ids = []
+    for group in ((ad_count.get("data") or {}).get("adverts") or []) if isinstance(ad_count.get("data"), dict) else []:
+        for item in group.get("advert_list") or []:
+            if item.get("advert_id"):
+                ad_ids.append(str(item["advert_id"]))
+    ads = readonly_call(client, "GET", f"https://advert-api.wildberries.ru/adv/v3/fullstats?ids={','.join(ad_ids)}&beginDate={(today - timedelta(days=6)).isoformat()}&endDate={today.isoformat()}") if ad_ids else {"status": 200, "ok": True, "data": [], "note": "no active campaigns"}
+    promotions = readonly_call(client, "GET", f"https://dp-calendar-api.wildberries.ru/api/v1/calendar/promotions?startDateTime={today.isoformat()}T00:00:00Z&endDateTime={(today + timedelta(days=7)).isoformat()}T23:59:59Z&allPromo=true")
+    def count_rows(response: dict, *paths: str) -> int | None:
+        value = response.get("data")
+        for key in paths:
+            value = value.get(key) if isinstance(value, dict) else None
+        return len(value) if isinstance(value, list) else None
+    return {
+        "productHistory": {"status": product_history["status"], "ok": product_history["ok"]},
+        "groupedHistory": {"status": grouped_history["status"], "ok": grouped_history["ok"]},
+        "stockReport": {"status": stock_report["status"], "ok": stock_report["ok"]},
+        "prices": {"status": prices["status"], "ok": prices["ok"], "goods": count_rows(prices, "data", "listGoods")},
+        "cardErrors": {"status": errors["status"], "ok": errors["ok"]},
+        "feedbacks": {"status": feedbacks["status"], "ok": feedbacks["ok"], "unanswered": count_rows(feedbacks, "data", "feedbacks")},
+        "questions": {"status": questions["status"], "ok": questions["ok"], "unanswered": count_rows(questions, "data", "questions")},
+        "orders": {"status": orders["status"], "ok": orders["ok"], "rows": len(orders["data"]) if isinstance(orders["data"], list) else None},
+        "sales": {"status": sales["status"], "ok": sales["ok"], "rows": len(sales["data"]) if isinstance(sales["data"], list) else None},
+        "advertising": {"countStatus": ad_count["status"], "statsStatus": ads["status"], "campaigns": len(ad_ids)},
+        "promotions": {"status": promotions["status"], "ok": promotions["ok"], "items": count_rows(promotions, "data", "promotions")},
+    }
 
 
 def previous_daily_snapshot(day: date) -> dict:
@@ -88,6 +175,9 @@ def main() -> None:
             break
         cursor = next_value
 
+    nm_ids = sorted({int(row["nmID"]) for row in content_rows if row.get("nmID")})
+    search = search_performance(client, nm_ids, now)
+    extended = extended_readonly_metrics(client, now, nm_ids)
     products = []
     if funnel["ok"] and isinstance(funnel["data"], dict):
         products = funnel["data"].get("data", {}).get("products", []) or []
@@ -139,6 +229,8 @@ def main() -> None:
         "generatedAt": now.isoformat(timespec="seconds"), "period": {"start": start.isoformat(), "end": end.isoformat(), "timezone": "Asia/Shanghai"},
         "endpoints": {"salesFunnel": {"status": funnel["status"], "ok": funnel["ok"]}, "content": {"status": content_status, "ok": content_status == 200}, "warehouses": {"status": warehouses["status"], "ok": warehouses["ok"]}},
         "cards": len(content_rows), "analyticsCards": len(products), "totals": dict(totals), "categorySummary": {k: dict(v) for k, v in categories.items()},
+        "searchPerformance": search,
+        "extendedReadOnly": extended,
         "focus": focus[:10], "zeroStockSkus": zero_stock, "activeWarehouses": active_warehouses, "sellerStock": stock_total,
     }
     stamp = now.strftime("%Y%m%d_%H%M%S")
@@ -169,6 +261,17 @@ def main() -> None:
         if item["carts"] and not item["orders"]:
             lines.append(f"- {item['vendorCode']}：{item['carts']} 次加购、0 订单；作为优先核验对象。")
     lines += ["", "## 广告与促销状态", "", "- 广告 fullstats：条件模块；仅在存在在投广告时读取并展示曝光、点击、花费、加购、订单与 ROI。", "- 促销日历：条件模块；后续接入后仅展示未来 7 天可报名或临近截止的活动。"]
+    previous_search = previous.get("searchPerformance", {}) if isinstance(previous, dict) else {}
+    previous_search_totals = previous_search.get("totals", {}) if isinstance(previous_search, dict) else {}
+    search_totals = search.get("totals", {})
+    lines += ["", "## Search performance (daily snapshot comparison)", "", f"- Endpoint: POST /api/v2/search-report/report — HTTP {search['status']}", f"- Reporting period: {search['period']['start']} to {search['period']['end']} (30 days)", f"- Returned/requested SKUs: {search.get('returnedSkuCount', 0)}/{search.get('requestedSkuCount', 0)}; missing: {search.get('missingSkuCount', 0)}", "", "| Search metric | Current | Change vs previous daily snapshot |", "|---|---:|---:|"]
+    for key, label in (("openCard", "Search card entries"), ("addToCart", "Search add-to-cart"), ("orders", "Search orders")):
+        current = search_totals.get(key, 0)
+        baseline = previous_search_totals.get(key)
+        delta = "— (first comparable capture)" if baseline is None else f"{current - baseline:+d}"
+        lines.append(f"| {label} | {current} | {delta} |")
+    lines += [f"- Search average / median position: {search.get('position', {}).get('average', 0)} / {search.get('position', {}).get('median', 0)}.", "- Day-over-day values compare the same 30-day rolling search window and therefore indicate directional movement, not single-day demand."]
+    lines += ["", "## 广告与促销状态", "", f"- 广告活动：{extended['advertising']['campaigns']} 个；活动查询 HTTP {extended['advertising']['countStatus']}，统计查询 HTTP {extended['advertising']['statsStatus']}。", f"- 未来 7 天促销：{extended['promotions']['items'] if extended['promotions']['items'] is not None else '不可用'} 个；HTTP {extended['promotions']['status']}。", "", "## 已验证事实、合理推断、待验证项", "", f"- 已验证事实：价格读回 HTTP {extended['prices']['status']}；错误卡 HTTP {extended['cardErrors']['status']}；未回复评价/问题分别为 {extended['feedbacks']['unanswered'] if extended['feedbacks']['unanswered'] is not None else '不可用'} / {extended['questions']['unanswered'] if extended['questions']['unanswered'] is not None else '不可用'}。", f"- 已验证事实：近 7 天订单/销售明细返回行数为 {extended['orders']['rows'] if extended['orders']['rows'] is not None else '不可用'} / {extended['sales']['rows'] if extended['sales']['rows'] is not None else '不可用'}。", "- 合理推断：滚动窗口变化仅表示方向，不等同于当日新增经营结果。", "- 待验证项：若价格、库存、错误卡或履约数据异常，只提出读回核验建议，不在日报中执行修复。", "", "## 数据状态", "", f"- 日趋势接口：商品历史 HTTP {extended['productHistory']['status']}；分组历史 HTTP {extended['groupedHistory']['status']}；库存报告 HTTP {extended['stockReport']['status']}。", "- 本报告只读：未创建或修改商品、价格、库存、广告、促销及买家消息。"]
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(json.dumps({"report": str(report), "snapshot": str(raw), **snapshot}, ensure_ascii=False))
 
