@@ -272,7 +272,64 @@ def main() -> None:
         lines.append(f"| {label} | {current} | {delta} |")
     lines += [f"- Search average / median position: {search.get('position', {}).get('average', 0)} / {search.get('position', {}).get('median', 0)}.", "- Day-over-day values compare the same 30-day rolling search window and therefore indicate directional movement, not single-day demand."]
     lines += ["", "## 广告与促销状态", "", f"- 广告活动：{extended['advertising']['campaigns']} 个；活动查询 HTTP {extended['advertising']['countStatus']}，统计查询 HTTP {extended['advertising']['statsStatus']}。", f"- 未来 7 天促销：{extended['promotions']['items'] if extended['promotions']['items'] is not None else '不可用'} 个；HTTP {extended['promotions']['status']}。", "", "## 已验证事实、合理推断、待验证项", "", f"- 已验证事实：价格读回 HTTP {extended['prices']['status']}；错误卡 HTTP {extended['cardErrors']['status']}；未回复评价/问题分别为 {extended['feedbacks']['unanswered'] if extended['feedbacks']['unanswered'] is not None else '不可用'} / {extended['questions']['unanswered'] if extended['questions']['unanswered'] is not None else '不可用'}。", f"- 已验证事实：近 7 天订单/销售明细返回行数为 {extended['orders']['rows'] if extended['orders']['rows'] is not None else '不可用'} / {extended['sales']['rows'] if extended['sales']['rows'] is not None else '不可用'}。", "- 合理推断：滚动窗口变化仅表示方向，不等同于当日新增经营结果。", "- 待验证项：若价格、库存、错误卡或履约数据异常，只提出读回核验建议，不在日报中执行修复。", "", "## 数据状态", "", f"- 日趋势接口：商品历史 HTTP {extended['productHistory']['status']}；分组历史 HTTP {extended['groupedHistory']['status']}；库存报告 HTTP {extended['stockReport']['status']}。", "- 本报告只读：未创建或修改商品、价格、库存、广告、促销及买家消息。"]
-    report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # 固定扩展日报合同：章节必须保持顺序，并且中文是交付硬性要求。
+    prior_totals = previous.get("totals", {}) if isinstance(previous, dict) else {}
+    def change(key: str) -> str:
+        before = prior_totals.get(key)
+        return "—（无上次快照）" if before is None else f"{before} / {totals[key] - before:+d}"
+    prior_cards = previous.get("cards") if isinstance(previous, dict) else None
+    cards_change = "—（无上次快照）" if prior_cards is None else f"{prior_cards} / {len(content_rows) - prior_cards:+d}"
+    focus_lines = [
+        f"| {item['vendorCode']} | {item['nmID']} | {item['views']} | {item['carts']} | {item['orders']} |"
+        for item in focus[:10]
+    ] or ["| 无 | — | — | — | — |"]
+    opportunity_lines = [
+        f"- 只读核验优先项：{item['vendorCode']} 有 {item['carts']} 次加购、{item['orders']} 笔订单；提出任何变更前，先核验到手价、配送承诺和前台购买控件。"
+        for item in focus[:3] if item["carts"] and not item["orders"]
+    ] or ["- 今日没有需要单独执行只读核验的“有加购、无订单”SKU。"]
+    report_lines = [
+        f"# WB 固定早间日报（扩展只读版）— {end.isoformat()}", "",
+        "## 1. 快照与口径", "",
+        f"- 采集时间：{now.strftime('%Y-%m-%d %H:%M %Z')}；滚动周期：{start} 至 {end}（30 天，Asia/Shanghai）。",
+        "- 商品卡为 Content 商品卡；漏斗指标为 Analytics v3 所选周期汇总；卖家库存为 Marketplace 卖家库存。",
+        "- 本日报仅只读：未修改价格、库存、广告、商品卡、促销或买家消息。", "",
+        "## 2. 店铺总览（本次 / 上次 / 变化）", "",
+        "| 指标 | 本次 | 上次 / 变化 |", "|---|---:|---:|",
+        f"| Content 商品卡 | {len(content_rows)} | {cards_change} |",
+        f"| Analytics 漏斗商品卡 | {len(products)} | {previous.get('analyticsCards', '—') if isinstance(previous, dict) else '—'} / — |",
+        f"| 浏览 | {totals['views']} | {change('views')} |",
+        f"| 加购 | {totals['carts']} | {change('carts')} |",
+        f"| 订单 | {totals['orders']} | {change('orders')} |",
+        f"| 收藏 | {totals['wish']} | {change('wish')} |",
+        f"| 卖家库存 | {stock_total} | {previous.get('sellerStock', '—') if isinstance(previous, dict) else '—'} / {'—' if not isinstance(previous, dict) or 'sellerStock' not in previous else f'{stock_total - previous['sellerStock']:+d}'} |", "",
+        "## 3. 类目", "",
+        "| 类目 | Content 商品卡 | 漏斗商品卡 | 浏览 | 加购 | 订单 | 收藏 | 卖家库存 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for category, values in sorted(snapshot["categorySummary"].items()):
+        report_lines.append("| " + category + " | " + " | ".join(str(values.get(key, 0)) for key in ("contentCards", "analyticsCards", "views", "carts", "orders", "wish", "sellerStock")) + " |")
+    report_lines += ["", "## 4. 重点 SKU", "", "| SKU | nmID | 浏览 | 加购 | 订单 |", "|---|---:|---:|---:|---:|", *focus_lines,
+        "", "## 5. 搜索表现", "", f"- HTTP {search['status']}；已返回 {search.get('returnedSkuCount', 0)}/{search.get('requestedSkuCount', 0)} 个请求 SKU，缺失 {search.get('missingSkuCount', 0)} 个。",
+        f"- 搜索进卡 / 加购 / 订单：{search_totals.get('openCard', 0)} / {search_totals.get('addToCart', 0)} / {search_totals.get('orders', 0)}。平均 / 中位位置：{search.get('position', {}).get('average', 0)} / {search.get('position', {}).get('median', 0)}。",
+        "- 搜索变化比较相同的 30 天滚动窗口，仅反映方向，不能视为单日需求。", "",
+        "## 6. 异常", "",
+        f"- 零库存 SKU：{len(zero_stock)} 个；示例：{', '.join(str(item['vendorCode']) for item in zero_stock[:5]) or '无'}。",
+        f"- 商品历史接口：HTTP {extended['productHistory']['status']}（保留失败状态，不以零值替代）。",
+        f"- 错误卡 HTTP {extended['cardErrors']['status']}；未回复评价 / 问题：{extended['feedbacks']['unanswered']} / {extended['questions']['unanswered']}。", "",
+        "## 7. 只读行动机会", "", *opportunity_lines, "",
+        "## 8. 广告与促销", "",
+        f"- 广告活动：{extended['advertising']['campaigns']} 个；活动计数 HTTP {extended['advertising']['countStatus']}，统计 HTTP {extended['advertising']['statsStatus']}。",
+        f"- 未来 7 天促销：{extended['promotions']['items'] if extended['promotions']['items'] is not None else '不可用'} 个；HTTP {extended['promotions']['status']}。", "",
+        "## 9. 事实 / 推断 / 待验证", "",
+        f"- 事实：价格 HTTP {extended['prices']['status']}（{extended['prices']['goods']} 个商品）；近 7 天订单 / 销售行数 {extended['orders']['rows']} / {extended['sales']['rows']}（均为 HTTP 200）。",
+        "- 推断：有加购、无订单仅说明应优先核验，不能据此证明价格、内容或物流存在缺陷。",
+        "- 待验证：对重点 SKU 读取前台到手价、预计送达日期和购买控件；核验期间不修改店铺数据。", "",
+        "## 10. 数据状态与产物路径", "",
+        f"- 核心接口：Sales Funnel HTTP {funnel['status']}；Content HTTP {content_status}；FBS 仓 HTTP {warehouses['status']}。",
+        f"- 扩展读取：分组历史 HTTP {extended['groupedHistory']['status']}；库存报告 HTTP {extended['stockReport']['status']}；价格 HTTP {extended['prices']['status']}；订单 HTTP {extended['orders']['status']}；销售 HTTP {extended['sales']['status']}。",
+        f"- 快照：{raw}", f"- 日报：{report}",
+    ]
+    report.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
     print(json.dumps({"report": str(report), "snapshot": str(raw), **snapshot}, ensure_ascii=False))
 
 

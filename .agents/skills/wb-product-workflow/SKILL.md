@@ -178,6 +178,8 @@ Before saying a product is sellable, verify:
 - Write JSON/Markdown as UTF-8 without BOM.
 - Read user-supplied JSON with `utf-8-sig` tolerance.
 - Avoid PowerShell `Set-Content` for multilingual JSON/Markdown unless encoding is controlled.
+- **WB fixed morning daily reports must be written in Simplified Chinese.** This applies to every report title, section heading, metric label, status explanation, finding, inference, and recommended read-only action. Preserve only proper nouns, API paths, SKU/vendor codes, HTTP status codes, currencies, and field names where translation would reduce precision.
+- Treat English-only report text or Chinese mojibake as a blocking output defect: correct the report template and regenerate the local report before delivery. Verify generated Markdown is UTF-8 and that its fixed template headings are Chinese.
 - Treat Chinese/Russian mojibake as a workflow blocker before moving materials into `03上线资料`.
 
 ## References
