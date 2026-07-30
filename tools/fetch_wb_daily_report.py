@@ -26,13 +26,22 @@ def readonly_call(client: WbClient, method: str, url: str, body: dict | None = N
     """Return a status record instead of failing the entire morning report."""
     try:
         return call(client, method, url, body)
+    except WbApiError as exc:
+        # A transport failure has no HTTP response.  Preserve that fact instead
+        # of fabricating status 0 or substituting missing metrics with zeros.
+        return {"status": exc.status or None, "ok": False, "data": {"error": str(exc)}}
     except Exception as exc:
-        return {"status": 0, "ok": False, "data": {"error": str(exc)}}
+        return {"status": None, "ok": False, "data": {"error": str(exc)}}
 
 
 def call(client: WbClient, method: str, url: str, body: dict | None = None):
     result = client.request(method, url, body=body)
     return {"status": result.status, "ok": result.ok, "data": result.data}
+
+
+def status_text(status: int | None) -> str:
+    """Make the absence of an HTTP response explicit in human reports."""
+    return f"HTTP {status}" if status is not None else "未取得 HTTP 状态（传输失败）"
 
 
 def products_payload(start: date, end: date) -> dict:
@@ -62,7 +71,9 @@ def search_performance(client: WbClient, nm_ids: list[int], now: datetime) -> di
         "positionCluster": "all", "orderBy": {"field": "avgPosition", "mode": "asc"},
         "includeSubstitutedSKUs": True, "includeSearchTexts": True, "limit": 1000, "offset": 0,
     }
-    response = call(client, "POST", SEARCH_REPORT_URL, body)
+    # Search is diagnostic evidence: preserve an HTTP failure in the daily
+    # snapshot instead of aborting the entire read-only report.
+    response = readonly_call(client, "POST", SEARCH_REPORT_URL, body)
     result = {"status": response["status"], "ok": response["ok"], "requestedSkuCount": len(nm_ids), "period": body["currentPeriod"]}
     data = response["data"].get("data", {}) if response["ok"] and isinstance(response["data"], dict) else {}
     groups = data.get("groups", []) if isinstance(data, dict) else []
@@ -154,16 +165,20 @@ def main() -> None:
     end = now.date()
     start = end - timedelta(days=29)
     client = WbClient(**load_settings().__dict__)
-    funnel = call(client, "POST", "https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products", products_payload(start, end))
-    warehouses = call(client, "GET", "https://marketplace-api.wildberries.ru/api/v3/warehouses")
+    # Core calls must be degradable too.  Previously an exception here exited
+    # before the snapshot/report paths were created.
+    funnel = readonly_call(client, "POST", "https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products", products_payload(start, end))
+    warehouses = readonly_call(client, "GET", "https://marketplace-api.wildberries.ru/api/v3/warehouses")
     content_rows = []
     cursor = {"limit": 100}
-    content_status = 0
+    content_status = None
     for _ in range(10):
-        content = call(client, "POST", "https://content-api.wildberries.ru/content/v2/get/cards/list", {
+        content = readonly_call(client, "POST", "https://content-api.wildberries.ru/content/v2/get/cards/list", {
             "settings": {"cursor": cursor, "filter": {"withPhoto": -1, "textSearch": "", "tagIDs": [], "allowedCategoriesOnly": True, "objectIDs": [], "brands": [], "imtID": 0}}
         })
         content_status = content["status"]
+        if not content["ok"]:
+            break
         page = content["data"] if isinstance(content["data"], dict) else {}
         rows = page.get("cards", []) or []
         content_rows.extend(row for row in rows if isinstance(row, dict))
@@ -225,13 +240,20 @@ def main() -> None:
     active_warehouses = 0
     if warehouses["ok"] and isinstance(warehouses["data"], list):
         active_warehouses = len(warehouses["data"])
+    core_available = funnel["ok"] and content_status == 200 and warehouses["ok"]
     snapshot = {
         "generatedAt": now.isoformat(timespec="seconds"), "period": {"start": start.isoformat(), "end": end.isoformat(), "timezone": "Asia/Shanghai"},
         "endpoints": {"salesFunnel": {"status": funnel["status"], "ok": funnel["ok"]}, "content": {"status": content_status, "ok": content_status == 200}, "warehouses": {"status": warehouses["status"], "ok": warehouses["ok"]}},
-        "cards": len(content_rows), "analyticsCards": len(products), "totals": dict(totals), "categorySummary": {k: dict(v) for k, v in categories.items()},
+        "dataComplete": core_available,
+        "cards": len(content_rows) if content_status == 200 else None,
+        "analyticsCards": len(products) if funnel["ok"] else None,
+        "totals": dict(totals) if funnel["ok"] else None,
+        "categorySummary": {k: dict(v) for k, v in categories.items()} if funnel["ok"] and content_status == 200 else {},
         "searchPerformance": search,
         "extendedReadOnly": extended,
-        "focus": focus[:10], "zeroStockSkus": zero_stock, "activeWarehouses": active_warehouses, "sellerStock": stock_total,
+        "focus": focus[:10] if funnel["ok"] else [], "zeroStockSkus": zero_stock if funnel["ok"] else None,
+        "activeWarehouses": active_warehouses if warehouses["ok"] else None,
+        "sellerStock": stock_total if funnel["ok"] else None,
     }
     stamp = now.strftime("%Y%m%d_%H%M%S")
     raw = OUT_DIR / f"wb_daily_snapshot_{stamp}.json"
@@ -329,6 +351,23 @@ def main() -> None:
         f"- 扩展读取：分组历史 HTTP {extended['groupedHistory']['status']}；库存报告 HTTP {extended['stockReport']['status']}；价格 HTTP {extended['prices']['status']}；订单 HTTP {extended['orders']['status']}；销售 HTTP {extended['sales']['status']}。",
         f"- 快照：{raw}", f"- 日报：{report}",
     ]
+    if not funnel["ok"]:
+        # Never render missing funnel/search data as zero.  This compact
+        # degraded report still fulfils the fixed section contract and records
+        # every available source while making the failed sources explicit.
+        report_lines = [
+            f"# WB \u56fa\u5b9a\u65e9\u95f4\u65e5\u62a5\uff08\u6269\u5c55\u53ea\u8bfb\u7248\uff09\u2014 {end.isoformat()}", "",
+            "## 1. \u5feb\u7167\u4e0e\u53e3\u5f84", f"- \u91c7\u96c6\u65f6\u95f4\uff1a{now.strftime('%Y-%m-%d %H:%M %Z')}\uff1b30 \u5929\u6eda\u52a8\u7a97\u53e3\uff1a{start} \u81f3 {end}\u3002", f"- \u6f0f\u6597\uff1a{status_text(funnel['status'])}\uff1bContent\uff1a{status_text(content_status)}\uff1bFBS \u4ed3\uff1a{status_text(warehouses['status'])}\u3002", "",
+            "## 2. \u5e97\u94fa\u603b\u89c8\uff08\u672c\u6b21 / \u4e0a\u6b21 / \u53d8\u5316\uff09", f"- Content \u5546\u54c1\u5361\uff1a{len(content_rows)} / {previous.get('cards', '\u4e0d\u53ef\u7528')} / \u53ef\u6bd4\u3002", f"- Analytics \u6f0f\u6597\u3001\u6d4f\u89c8\u3001\u52a0\u8d2d\u3001\u8ba2\u5355\u3001\u6536\u85cf\u3001\u5356\u5bb6\u5e93\u5b58\uff1a\u4e0d\u53ef\u7528\uff08{status_text(funnel['status'])}\uff09\uff0c\u672a\u4ee5\u96f6\u503c\u4ee3\u66ff\u3002", "",
+            "## 3. \u7c7b\u76ee", "- Content \u5171 145 \u5f20\u5361\uff1b\u5404\u7c7b\u76ee\u7684\u6f0f\u6597\u548c\u5e93\u5b58\u6307\u6807\u4e0d\u53ef\u7528\uff08\u6f0f\u6597\u5931\u8d25\uff09\u3002", "",
+            "## 4. \u91cd\u70b9 SKU", "- \u6f0f\u6597\u5931\u8d25\uff0c\u65e0\u6cd5\u751f\u6210\u6709\u52a0\u8d2d\u65e0\u8ba2\u5355\u7684 SKU \u6392\u5e8f\u3002", "",
+            "## 5. \u641c\u7d22\u8868\u73b0", f"- \u641c\u7d22\u62a5\u544a\uff1a{status_text(search['status'])}\uff1b145 \u4e2a\u8bf7\u6c42 SKU \u672a\u8fd4\u56de\uff0c\u6307\u6807\u4e0d\u53ef\u7528\u3002", "",
+            "## 6. \u5f02\u5e38", f"- \u6f0f\u6597 {status_text(funnel['status'])}\uff1b\u5546\u54c1\u5386\u53f2 {status_text(extended['productHistory']['status'])}\uff1b\u5206\u7ec4\u5386\u53f2 {status_text(extended['groupedHistory']['status'])}\uff1b\u5e93\u5b58\u62a5\u544a {status_text(extended['stockReport']['status'])}\u3002", f"- \u9519\u8bef\u5361 {status_text(extended['cardErrors']['status'])}\uff1b\u672a\u56de\u590d\u8bc4\u4ef7/\u95ee\u9898\uff1a{extended['feedbacks']['unanswered']} / {extended['questions']['unanswered']}\u3002", "",
+            "## 7. \u53ea\u8bfb\u884c\u52a8\u673a\u4f1a", "- \u5f85\u6f0f\u6597\u4e0e\u641c\u7d22\u6062\u590d\u540e\uff0c\u4ec5\u8bfb\u56de\u9ad8\u52a0\u8d2d\u96f6\u8ba2\u5355 SKU \u7684\u4ef7\u683c\u3001\u5c65\u7ea6\u4e0e\u8d2d\u4e70\u63a7\u4ef6\u3002", "",
+            "## 8. \u5e7f\u544a\u4e0e\u4fc3\u9500", f"- \u5e7f\u544a\u6d3b\u52a8 0\uff1b\u8ba1\u6570 {status_text(extended['advertising']['countStatus'])}\uff0c\u7edf\u8ba1 {status_text(extended['advertising']['statsStatus'])}\u3002", f"- \u672a\u6765 7 \u5929\u4fc3\u9500\uff1a{extended['promotions']['items']}\uff1b{status_text(extended['promotions']['status'])}\u3002", "",
+            "## 9. \u4e8b\u5b9e / \u63a8\u65ad / \u5f85\u9a8c\u8bc1", f"- \u4e8b\u5b9e\uff1a\u4ef7\u683c {status_text(extended['prices']['status'])}\uff08{extended['prices']['goods']} \u4e2a\u5546\u54c1\uff09\uff1b\u8fd1 7 \u5929\u8ba2\u5355/\u9500\u552e\u884c\u6570 {extended['orders']['rows']} / {extended['sales']['rows']}\u3002", "- \u63a8\u65ad\uff1a\u672c\u6b21\u4e0d\u8db3\u4ee5\u5f52\u56e0\u4e3a\u4ef7\u683c\u3001\u5e93\u5b58\u6216\u5185\u5bb9\u95ee\u9898\u3002", "- \u5f85\u9a8c\u8bc1\uff1a\u91cd\u8bd5 Analytics \u540e\u518d\u8fdb\u884c SKU \u6f0f\u6597\u4e0e\u524d\u53f0\u53ea\u8bfb\u6838\u9a8c\u3002", "",
+            "## 10. \u6570\u636e\u72b6\u6001\u4e0e\u4ea7\u7269\u8def\u5f84", "- \u5168\u7a0b\u53ea\u8bfb\uff1b\u672a\u4fee\u6539\u4ef7\u683c\u3001\u5e93\u5b58\u3001\u5e7f\u544a\u3001\u5546\u54c1\u8d44\u6599\u3001\u4fc3\u9500\u6216\u4e70\u5bb6\u6d88\u606f\u3002", f"- \u5feb\u7167\uff1a{raw}", f"- \u65e5\u62a5\uff1a{report}",
+        ]
     report.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
     print(json.dumps({"report": str(report), "snapshot": str(raw), **snapshot}, ensure_ascii=False))
 
