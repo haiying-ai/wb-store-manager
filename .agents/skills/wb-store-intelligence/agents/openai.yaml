@@ -1,0 +1,4 @@
+interface:
+  display_name: "WB 店铺对标分析"
+  short_description: "严格只读地分析多个 WB 店铺并生成安全的对标行动建议"
+  default_prompt: "Use $wb-store-intelligence to safely compare read-only WB store data and produce an evidence-based action plan."

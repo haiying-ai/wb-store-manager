@@ -23,6 +23,43 @@ WB Store Manager provides:
 - a reusable `wb-product-workflow` Codex Skill with four fixed workflows;
 - local audit artifacts without committing tokens or private business data.
 
+## Multi-store read-only intelligence
+
+The separate `wb-store-intelligence` Skill compares an owner store with reference stores while making marketplace mutations impossible at the application layer. It collects cards and SKU structure, media metadata, prices, warehouses, FBS/WB stock, seven-day sales funnels, search analytics, advertising, promotions, feedbacks, questions and seller metadata when the token categories permit them.
+
+```mermaid
+flowchart LR
+    T["Per-store local tokens"] --> P["Exact method + host + path allowlist"]
+    P --> C["Isolated store snapshots"]
+    C --> N["Normalize comparable SKU and period metrics"]
+    N --> B["Three-store benchmark"]
+    B --> A["Proposed owner-store experiments"]
+    A --> G["Separate approval-gated WB workflow"]
+```
+
+Tokens may have broader WB permissions, but `wb-intel` accepts only the declared read endpoints. `PUT`, `PATCH`, `DELETE`, unknown hosts, encoded paths, redirects and unlisted `POST` requests are rejected before a token is loaded or a network call begins.
+
+Copy the example registry and create the ignored local token file:
+
+```powershell
+Copy-Item config/store-intelligence.example.json config/store-intelligence.local.json
+
+# config/store-intelligence.tokens.local.env
+WB_INTEL_BENCHMARK_A_TOKEN=replace_with_store_a_token
+WB_INTEL_BENCHMARK_B_TOKEN=replace_with_store_b_token
+
+python -m wb_store_intelligence validate-config `
+  --config config/store-intelligence.local.json `
+  --token-file config/store-intelligence.tokens.local.env
+
+python -m wb_store_intelligence collect-baseline `
+  --config config/store-intelligence.local.json `
+  --token-file config/store-intelligence.tokens.local.env `
+  --output data/store_intelligence/snapshots --days 7
+```
+
+Run `python -m wb_store_intelligence analyze-three-stores --snapshot <snapshot-dir> --output <comparison-dir>` after a three-store collection. Raw snapshots, local registries, token files and generated comparisons stay out of Git. See the canonical Skill at `.agents/skills/wb-store-intelligence/`.
+
 ## Workflow architecture
 
 ```mermaid

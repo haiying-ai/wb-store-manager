@@ -1,0 +1,19 @@
+{
+  "stores": [
+    {
+      "alias": "my-store",
+      "role": "owner_readonly",
+      "token_env": "WB_INTEL_MY_STORE_TOKEN"
+    },
+    {
+      "alias": "benchmark-a",
+      "role": "benchmark_readonly",
+      "token_env": "WB_INTEL_BENCHMARK_A_TOKEN"
+    },
+    {
+      "alias": "benchmark-b",
+      "role": "benchmark_readonly",
+      "token_env": "WB_INTEL_BENCHMARK_B_TOKEN"
+    }
+  ]
+}

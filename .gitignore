@@ -20,6 +20,10 @@ wb_*request.json
 wb_probe_result.json
 wb_*probe.ps1
 *.local.json
+config/store-intelligence.local.json
+config/store-intelligence.tokens.local.env
+data/store_intelligence/
+*.store-intelligence.raw.json
 tmp_*.py
 _patch*.py
 _update*.py
