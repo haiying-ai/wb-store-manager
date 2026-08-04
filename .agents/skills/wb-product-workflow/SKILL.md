@@ -130,6 +130,11 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
 
 When the user requests `按 V2 版本 SKU 逻辑` (or `V2 SKU`), treat it as the validated phone-new-SKU listing path. Read `references/phone-v2-sku-listing-logic.md` before planning, generating, reviewing, or publishing. Reuse its current live template and gates; do not reinterpret it as inspiration or create a new visual style.
 
+
+## V1 SKU Listing Logic
+
+When the user requests `按 V1 版本 SKU 逻辑` (or `V1 SKU`), use the existing original-SKU listing rules for source facts, parameters, prices, and card creation. Read `references/phone-v1-sku-listing-logic.md` for the final V1 phone image-template registry, snapshot, comparison, and fallback rules. Never substitute V2 assets or stale V1 exports.
+
 ## Variant And Inventory Rules
 
 - Separate colors, kits, or package variants that need independent stock must use separate sellable identities.
