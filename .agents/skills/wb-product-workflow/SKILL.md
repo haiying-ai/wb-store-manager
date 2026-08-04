@@ -1,6 +1,6 @@
 ---
 name: wb-product-workflow
-description: Run end-to-end Wildberries/WB product and store operations from local source material through pricing, listing, media, publication readback, buyer audit, daily reporting, and periodic review. Use for WB daily operations, new listings, listing optimization, pricing, FBS sale readiness, images, videos, buyer questions, funnel analysis, and store reports.
+description: Run end-to-end Wildberries/WB product and store operations from local source material through pricing, listing, media, publication readback, buyer audit, daily reporting, and periodic review. Use for WB daily operations, new listings, listing optimization, pricing, FBS sale readiness, images, videos, buyer questions, funnel analysis, store reports, or requests to prepare listings using the verified V2 SKU logic ("V2版本SKU逻辑").
 ---
 
 # WB Product Workflow
@@ -124,6 +124,11 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
    - For a card with add-to-cart but no order, verify the complete read-only chain: card errors, media, dimensions, price, active FBS warehouse, per-barcode stock readback, and public product-page buy controls plus delivery date.
    - Save a timestamped evidence report to `E:\电商运营\01平台资料\01WB\<category>\04运营资料\`; include data period, currency/region, source status, facts, inferences, and proposed actions. Never include tokens.
    - The fixed daily report is read-only and must collect the funnel, search, warehouse, price-readback, error-card, feedback/question, order/sale, advertising, promotion, inventory, and history status surfaces. Keep failed or rate-limited sources visible with HTTP status; never replace missing data with zero.
+
+
+## V2 SKU Listing Logic
+
+When the user requests `按 V2 版本 SKU 逻辑` (or `V2 SKU`), treat it as the validated phone-new-SKU listing path. Read `references/phone-v2-sku-listing-logic.md` before planning, generating, reviewing, or publishing. Reuse its current live template and gates; do not reinterpret it as inspiration or create a new visual style.
 
 ## Variant And Inventory Rules
 
