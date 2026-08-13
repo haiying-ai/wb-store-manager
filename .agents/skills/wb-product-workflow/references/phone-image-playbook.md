@@ -46,6 +46,28 @@ Allowed proof language must be factual and scoped, for example `Проверка
 
 ## Image Architecture
 
+### User-Specified Template Master Gate (mandatory)
+
+When the user supplies image pages or names a template directory, those pages are the only visual master for that request. This requirement overrides the default visual language in this playbook, including its dark technical-background guidance.
+
+Before generating any asset:
+
+1. Create a master register: page number, immutable layout elements, allowed SKU substitutions, source path/attachment ID, and target dimensions.
+2. Separate the user's requirements into `template`, `palette`, `SKU facts`, and `claims`. A palette is not a template and cannot justify a layout redesign.
+3. Freeze one prompt contract for every worker. The contract must state that prior drafts and other references are invalid unless the user explicitly keeps them.
+4. Generate a complete representative pack first. Do not start a parallel batch until the user approves that pack when the request requires an exact or near-exact template match.
+
+For each page, review template consistency before commercial scoring. Reject the page immediately if any of these differ from the master without explicit user approval:
+
+- background system, page hierarchy, module count, card geometry, element positions, margins, icon logic, or information density;
+- title/capacity/status placement or the model of product-versus-text balance;
+- an added/removed banner, card, promise, accessory, graphic motif, or claim;
+- use of an old template, a competitor layout, or a freely invented dark/light design.
+
+Record the rejection as `REJECTED_TEMPLATE_MISMATCH`. It is not a passing image, cannot receive an upload-ready label, and must not be included in completion counts. A high visual score, correct model, correct copy, correct dimensions, or successful image-generation response cannot override this gate.
+
+If the user requires direct image generation with text, state the limitation accurately: direct generation can aim for strong template adherence but cannot promise pixel-identical typography or geometry. Do not describe a visually similar result as template-identical. If that limitation is unacceptable, pause and request permission to use a deterministic layout-preserving method.
+
 Use a vertical marketplace canvas unless WB requirements for the target card differ. Keep the phone large and immediately recognizable. Use a dark graphite/navy/black technical visual language with restrained cyan or electric-blue accents by default. Accent color may follow the phone/model palette, but must not reduce text legibility or conceal phone color.
 
 ### SKU Main Image

@@ -61,6 +61,8 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
 
 5. Review pricing and profitability.
    - Read `references/pricing-rules.md` before creating or changing a category pricing model.
+   - For every phone profit calculation, price recommendation, dry-run, or live price write, first run `python tools/validate_active_pricing_policy.py` and load `config/pricing/active_phone_pricing_policy.json`. Treat that JSON as the only active formula source. Never fall back to constants copied into an older report, script, spreadsheet, or chat.
+   - If the active policy file is missing, invalid, not marked `active`, or disagrees with its component-rate sum, stop with a blocker. Do not infer the latest formula from file timestamps.
    - Run `python -m wb_manager pricing review --category <category> --sku <SKU> --input-file <pricing.json>` when pricing input is external.
    - Profitability is a hard gate.
    - Source-material price is not sale price unless the user explicitly confirms it.
@@ -72,6 +74,11 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
    - Then generate prompts or inspect external inboxes.
    - Lock product color before selecting or generating images.
    - Reject unconfirmed colors.
+   - When the user supplies image attachments or explicitly names a template directory for a phone image pack, treat those pages as the **single visual master**. Before any prompt, generation, batch, score, approval, or upload, read `references/phone-template-master-gate.md`.
+   - A palette instruction (for example, "deep indigo structure + blue-violet electric") changes only the color system inside the approved master. It never authorizes a new layout, dark-theme redesign, different card system, or mixed reference set.
+   - Freeze the master page paths/attachment IDs and a per-page change contract before generation. Every parallel worker must receive the same contract; invalidate all earlier prompts, drafts, and visual references that conflict with it.
+   - Run the template-consistency gate before factual, Russian-copy, dimension, thumbnail, or sales-score gates. Any structural mismatch is `REJECTED_TEMPLATE_MISMATCH`; do not count it as generated, approved, or complete regardless of its visual score.
+   - For a newly confirmed phone template, finish one complete representative pack and obtain user approval before starting a category-wide batch. If the representative pack fails template consistency, stop the batch and do not consume further image-generation capacity until the failure is resolved or the user explicitly changes the standard.
    - For IPL hair-removal devices / 脱毛仪, read `references/hair-removal-main-image.md` before planning, prompting, generating, scoring, approving, uploading, or verifying a main image. Treat its SKU-truth, Russian-copy, prompt-template, scoring, and WB readback gates as mandatory.
    - For mobile phones, also read `references/phone-image-playbook.md` before planning, generating, reviewing, or reporting image progress. It defines the required model-first workflow, image-set structure, factual guardrails, and resumable batch protocol.
    - Before producing a phone main image, read `references/phone-main-image-production-workflow.md`. Generate a new product-first base without AI text, add Russian copy deterministically afterward, enforce product-safe zones, inspect full size and 320 px, and regenerate every failed SKU.
@@ -124,12 +131,10 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
    - For a card with add-to-cart but no order, verify the complete read-only chain: card errors, media, dimensions, price, active FBS warehouse, per-barcode stock readback, and public product-page buy controls plus delivery date.
    - Save a timestamped evidence report to `E:\电商运营\01平台资料\01WB\<category>\04运营资料\`; include data period, currency/region, source status, facts, inferences, and proposed actions. Never include tokens.
    - The fixed daily report is read-only and must collect the funnel, search, warehouse, price-readback, error-card, feedback/question, order/sale, advertising, promotion, inventory, and history status surfaces. Keep failed or rate-limited sources visible with HTTP status; never replace missing data with zero.
-
-
+   - For Analytics Sales Funnel v3, use its current official request contract: `nmIds`, `subjectIds`, `tagIds`, required `orderBy`, `limit`, and `offset`; do not send legacy capitalized filter names or unrelated cursor fields. For per-product history, send `nmIds` in batches of at most 20. Honor the 20-second Analytics interval and do not accept a report as complete unless the core funnel read is HTTP 200.
 ## V2 SKU Listing Logic
 
 When the user requests `按 V2 版本 SKU 逻辑` (or `V2 SKU`), treat it as the validated phone-new-SKU listing path. Read `references/phone-v2-sku-listing-logic.md` before planning, generating, reviewing, or publishing. Reuse its current live template and gates; do not reinterpret it as inspiration or create a new visual style.
-
 
 ## V1 SKU Listing Logic
 
