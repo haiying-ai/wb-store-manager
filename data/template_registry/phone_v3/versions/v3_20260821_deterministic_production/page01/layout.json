@@ -1,0 +1,27 @@
+{
+  "canvas": [900, 1200],
+  "locked_master": "data/template_registry/phone_v3/versions/v3_20260807_benchmark_c_trust_reference/images/01.png",
+  "editable_regions": {
+    "title_clear": [8, 50, 892, 142],
+    "capacity_clear": [340, 140, 565, 218],
+    "status_text_clear": [90, 240, 820, 308]
+  },
+  "text_targets": {
+    "title": [70, 64, 874, 130],
+    "capacity": [367, 150, 538, 207],
+    "status": [77, 238, 837, 314]
+  },
+  "product_lock_from_y": 308,
+  "capacity_badge": {
+    "bbox": [367, 151, 538, 207],
+    "radius": 8
+  },
+  "fixed_status": "НОВЫЙ • ТОЛЬКО АКТИВИРОВАН",
+  "invariants": [
+    "No dynamic text boxes",
+    "No layout reflow",
+    "No edits outside editable_regions",
+    "No pixel changes at or below product_lock_from_y",
+    "Product scene and bottom trust modules remain pixel-identical to the approved SKU scene"
+  ]
+}

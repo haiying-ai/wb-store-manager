@@ -1,0 +1,21 @@
+{
+  "title": {
+    "path": "C:/Windows/Fonts/arialbd.ttf",
+    "preferred_size": 69,
+    "minimum_size": 43,
+    "fill": [4, 4, 4]
+  },
+  "capacity": {
+    "path": "C:/Windows/Fonts/ARIALNB.TTF",
+    "preferred_size": 48,
+    "minimum_size": 38,
+    "fill": [255, 255, 255]
+  },
+  "status": {
+    "path": "C:/Windows/Fonts/impact.ttf",
+    "preferred_size": 52,
+    "minimum_size": 38,
+    "fill": [255, 250, 248]
+  },
+  "fallbackPolicy": "forbidden"
+}

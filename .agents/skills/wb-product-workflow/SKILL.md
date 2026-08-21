@@ -62,6 +62,7 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
 5. Review pricing and profitability.
    - Read `references/pricing-rules.md` before creating or changing a category pricing model.
    - For every phone profit calculation, price recommendation, dry-run, or live price write, first run `python tools/validate_active_pricing_policy.py` and load `config/pricing/active_phone_pricing_policy.json`. Treat that JSON as the only active formula source. Never fall back to constants copied into an older report, script, spreadsheet, or chat.
+   - For every smartphone price-strategy change, also load `config/pricing/active_phone_pricing_store_scope.json`. Treat every store marked `requiredForPriceStrategy` as mandatory: generate a per-store plan with store-specific nmIDs, preflight all stores before writing either one, request one explicit joint approval that lists each store's SKU count, and read back each store independently. Never silently fall back to one store.
    - If the active policy file is missing, invalid, not marked `active`, or disagrees with its component-rate sum, stop with a blocker. Do not infer the latest formula from file timestamps.
    - Run `python -m wb_manager pricing review --category <category> --sku <SKU> --input-file <pricing.json>` when pricing input is external.
    - Profitability is a hard gate.
@@ -81,6 +82,7 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
    - For a newly confirmed phone template, finish one complete representative pack and obtain user approval before starting a category-wide batch. If the representative pack fails template consistency, stop the batch and do not consume further image-generation capacity until the failure is resolved or the user explicitly changes the standard.
    - For IPL hair-removal devices / 脱毛仪, read `references/hair-removal-main-image.md` before planning, prompting, generating, scoring, approving, uploading, or verifying a main image. Treat its SKU-truth, Russian-copy, prompt-template, scoring, and WB readback gates as mandatory.
    - For mobile phones, also read `references/phone-image-playbook.md` before planning, generating, reviewing, or reporting image progress. It defines the required model-first workflow, image-set structure, factual guardrails, and resumable batch protocol.
+   - When the request uses the confirmed eight-page V3 phone master, asks for exact-template batch production, or resumes the 121-SKU V3 work, read `references/phone-v3-deterministic-production-standard.md` before inspecting prompts or images. Resume through its active run pointer and SQLite tracker; do not reconstruct state from chat history or restart completed pages.
    - Before producing a phone main image, read `references/phone-main-image-production-workflow.md`. Generate a new product-first base without AI text, add Russian copy deterministically afterward, enforce product-safe zones, inspect full size and 320 px, and regenerate every failed SKU.
    - Before generating or approving any phone main image, read `references/phone-main-image-sales-score.md`. Require a score of at least 93/100, zero hard-fail defects, and a score above the active competitor/reference benchmark before presenting it as upload-ready.
    - Before auditing, packaging, uploading, or verifying a phone image batch, also read `references/phone-image-operations.md`. Use its four-stage tool chain and completion gates instead of ad hoc upload loops.
@@ -139,6 +141,18 @@ When the user requests `按 V2 版本 SKU 逻辑` (or `V2 SKU`), treat it as the
 ## V1 SKU Listing Logic
 
 When the user requests `按 V1 版本 SKU 逻辑` (or `V1 SKU`), use the existing original-SKU listing rules for source facts, parameters, prices, and card creation. Read `references/phone-v1-sku-listing-logic.md` for the final V1 phone image-template registry, snapshot, comparison, and fallback rules. Never substitute V2 assets or stale V1 exports.
+
+## V3 Deterministic Phone Production
+
+For the confirmed eight-page V3 smartphone system, use the persistent production entrypoint instead of ad hoc image loops:
+
+```powershell
+python .agents/skills/wb-product-workflow/scripts/phone_v3_production.py status
+```
+
+If `data/template_registry/phone_v3/active_production.json` points to a different run directory, use that exact directory. Page 01 uses fixed geometry and controlled fields on an approved SKU scene; pages 02–08 are complete approved model-color pages reused byte-for-byte across capacities. New pages 02–08 may be generated as complete text-bearing pages only before approval; after approval they are atomic and must not receive text boxes, product overlays, or other edits.
+
+The production tool owns the template lock, SKU fact table, claim registry, golden hashes, SQLite task state, dashboard and regression report. `REGRESSION_PASS` proves identity to the frozen local golden asset, not WB upload or buyer-visible completion. Use `mark` with the page score floor and an approver for a new asset; use `approve-run` only after every task passes. Any WB upload remains a separate approval-gated flow with live readback.
 
 ## Variant And Inventory Rules
 
@@ -210,6 +224,7 @@ Before saying a product is sellable, verify:
 - `references/phone-main-image-sales-score.md`
 - `references/phone-main-image-production-workflow.md`
 - `references/phone-image-operations.md`
+- `references/phone-v3-deterministic-production-standard.md`
 - `references/directory-protocol.md`
 - `references/live-state-sync.md`
 - `references/operations-analytics.md`

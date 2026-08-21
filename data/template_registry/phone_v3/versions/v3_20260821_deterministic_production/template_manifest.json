@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "templateFamily": "phone_v3",
+  "version": "v3_20260821_deterministic_production",
+  "status": "regression_candidate",
+  "liveUploadApproved": false,
+  "sourceVisualMaster": "data/template_registry/phone_v3/versions/v3_20260807_benchmark_c_trust_reference",
+  "imageCount": 8,
+  "productionModes": {
+    "01": "controlled_fields_on_approved_sku_scene",
+    "02": "atomic_model_color_page_reuse",
+    "03": "atomic_model_color_page_reuse",
+    "04": "atomic_model_color_page_reuse",
+    "05": "atomic_model_color_page_reuse",
+    "06": "atomic_model_color_page_reuse",
+    "07": "atomic_model_color_page_reuse",
+    "08": "atomic_model_color_page_reuse"
+  },
+  "approvalBoundary": "Local production and regression only. WB upload or other live mutation requires separate explicit approval and readback.",
+  "requiredArtifacts": [
+    "template_lock.json",
+    "sku_facts.csv",
+    "claim_registry.json",
+    "golden_assets.jsonl",
+    "progress.sqlite3",
+    "dashboard.html",
+    "regression_report.json"
+  ]
+}

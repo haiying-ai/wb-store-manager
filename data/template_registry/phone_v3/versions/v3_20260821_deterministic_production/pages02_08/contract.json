@@ -1,0 +1,15 @@
+{
+  "canvas": [900, 1200],
+  "pages": [2, 3, 4, 5, 6, 7, 8],
+  "productionUnit": "model_color",
+  "renderMode": "atomic_approved_page_reuse",
+  "variableFields": [],
+  "overlayOperationsAllowed": 0,
+  "reuseRule": "Every capacity SKU with the same model and color must reuse the exact same approved page hash.",
+  "invariants": [
+    "No text is re-rendered",
+    "No product image is overlaid after page approval",
+    "No dynamic text boxes",
+    "Output SHA-256 equals approved source SHA-256"
+  ]
+}
