@@ -28,8 +28,20 @@ The authoritative pointer is `data/template_registry/phone_new_master/active_tes
 - Multiple references may be combined only when the user explicitly asks for design exploration or synthesis.
 - Never describe a synthesis result as an exact-master reproduction.
 - A synthesis result cannot become the rollout master without a separate user approval and master lock.
+- Use `BASE_PLUS_DETERMINISTIC_COPY` so the visual scene can be explored without trusting generated buyer-facing text.
+- Register the prompt package and page contract with `register-design`, then obtain explicit approval through `approve-design` before any image-generation call.
+- After all expected pages pass design QA and the user approves the complete set, use `promote-design` to hash and register those exact files as a pending `USER_COMPLETE_SET`. The pointer then enters `EXACT_MASTER_TEST` at `WAITING_MASTER_APPROVAL`; a separate `approve-master` action is still required before SKU adaptation.
 
-Never silently switch between these modes.
+Never silently switch between these modes. The supported chain is `DESIGN_SYNTHESIS -> approved complete design set -> EXACT_MASTER_TEST`; the two modes remain mutually exclusive at any point in time.
+
+## Design-synthesis commands
+
+```powershell
+python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py init --mode DESIGN_SYNTHESIS --task-id <TASK> --cohort <COHORT_JSON> --workflow-state <WORKFLOW_JSON> --pilot-vendor-code <SKU> --output-root <OUTPUT> --replace
+python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py register-design --brief-path <BRIEF> --contract-path <CONTRACT> --template-id <TEMPLATE> --example-case <CASE>
+python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py approve-design --approved-by <USER>
+python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py promote-design --master-dir <APPROVED_8_PAGES> --expected-pages 8 --contract-path <CONTRACT>
+```
 
 ## Locked generation method for the active exact-master test
 

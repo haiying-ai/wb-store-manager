@@ -11,7 +11,7 @@ Use this skill for Wildberries/WB product work rooted at `E:\电商运营\01平�
 
 Classify each request as `daily`, `listing`, `media`, or `review`. Read `references/fixed-workflows.md`, create or resume its workflow state, and then load only the domain references needed for that flow. Use spreadsheet, document, browser, image, and video skills as execution tools without weakening WB truth, approval, visual-review, or readback gates.
 
-For every request to test, create, replace, resume, or inspect a **new smartphone image master**, first read `references/phone-new-master-production-standard.md`, then run `python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py status` and `validate`. The active pointer is authoritative across conversations. Resume it before selecting an SKU or creating any workflow. Never silently replace its pilot, source set, production mode, or task ID.
+For every request to test, create, replace, resume, or inspect a **new smartphone image master**, first read `references/phone-new-master-production-standard.md`, then run `python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py status` and `validate`. The active pointer is authoritative across conversations. Resume it before selecting an SKU or creating any workflow. Never silently replace its pilot, source set, production mode, or task ID. When the user asks to design a new master first, use the tracked `DESIGN_SYNTHESIS` brief/approval stage; only a separately approved complete design set may be promoted into `EXACT_MASTER_TEST`.
 
 For every flow:
 

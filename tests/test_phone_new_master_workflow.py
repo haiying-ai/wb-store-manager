@@ -43,6 +43,19 @@ class PhoneNewMasterWorkflowTests(unittest.TestCase):
             "liveUploadAuthorized": False,
         }
 
+    def design_pointer(self):
+        pointer = self.pointer()
+        pointer.update(
+            {
+                "mode": MODULE.DESIGN_MODE,
+                "generationMode": MODULE.DESIGN_GENERATION_MODE,
+                "status": "WAITING_DESIGN_BRIEF",
+                "designLockPath": None,
+                "masterLockPath": None,
+            }
+        )
+        return pointer
+
     def test_waiting_pointer_is_valid(self):
         self.assertEqual([], MODULE.validate_payload(self.root, self.pointer()))
 
@@ -67,6 +80,38 @@ class PhoneNewMasterWorkflowTests(unittest.TestCase):
             with Image.open(path) as image:
                 dimensions.add((image.width, image.height))
         self.assertEqual({(900, 1200)}, dimensions)
+
+    def test_waiting_design_pointer_is_valid(self):
+        self.assertEqual([], MODULE.validate_payload(self.root, self.design_pointer()))
+
+    def test_design_authorization_requires_approved_brief(self):
+        pointer = self.design_pointer()
+        pointer["generationAuthorized"] = True
+        pointer["status"] = "DESIGN_AUTHORIZED"
+        self.assertIn("generationAuthorized requires designLockPath", MODULE.validate_payload(self.root, pointer))
+
+    def test_approved_design_brief_authorizes_generation(self):
+        brief = self.root / "brief.md"
+        contract = self.root / "contract.md"
+        brief.write_text("brief", encoding="utf-8")
+        contract.write_text("contract", encoding="utf-8")
+        lock = {
+            "sourceType": "DESIGN_BRIEF",
+            "briefPath": "brief.md",
+            "contractPath": "contract.md",
+            "expectedPages": 8,
+            "approvedBy": "user",
+        }
+        (self.root / "design-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+        pointer = self.design_pointer()
+        pointer.update(
+            {
+                "status": "DESIGN_AUTHORIZED",
+                "generationAuthorized": True,
+                "designLockPath": "design-lock.json",
+            }
+        )
+        self.assertEqual([], MODULE.validate_payload(self.root, pointer))
 
 
 if __name__ == "__main__":

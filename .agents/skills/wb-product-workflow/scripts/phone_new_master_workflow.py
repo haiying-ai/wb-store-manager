@@ -14,8 +14,18 @@ from pathlib import Path
 from PIL import Image
 
 
-MODE = "EXACT_MASTER_TEST"
-GENERATION_MODE = "DIRECT_FULL_TEXT_IMAGEGEN"
+EXACT_MODE = "EXACT_MASTER_TEST"
+DESIGN_MODE = "DESIGN_SYNTHESIS"
+MODES = {EXACT_MODE, DESIGN_MODE}
+EXACT_GENERATION_MODE = "DIRECT_FULL_TEXT_IMAGEGEN"
+DESIGN_GENERATION_MODE = "BASE_PLUS_DETERMINISTIC_COPY"
+GENERATION_MODES = {
+    EXACT_MODE: EXACT_GENERATION_MODE,
+    DESIGN_MODE: DESIGN_GENERATION_MODE,
+}
+# Backward-compatible aliases for callers/tests that imported the old constants.
+MODE = EXACT_MODE
+GENERATION_MODE = EXACT_GENERATION_MODE
 DEFAULT_POINTER = Path("data/template_registry/phone_new_master/active_test.json")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
@@ -96,10 +106,12 @@ def validate_payload(root: Path, pointer: dict) -> list[str]:
     if missing:
         errors.append("missing pointer fields: " + ", ".join(missing))
         return errors
-    if pointer["mode"] != MODE:
-        errors.append(f"mode must be {MODE}")
-    if pointer["generationMode"] != GENERATION_MODE:
-        errors.append(f"generationMode must be {GENERATION_MODE}")
+    mode = pointer["mode"]
+    if mode not in MODES:
+        errors.append(f"mode must be one of {sorted(MODES)}")
+    expected_generation_mode = GENERATION_MODES.get(mode)
+    if expected_generation_mode and pointer["generationMode"] != expected_generation_mode:
+        errors.append(f"generationMode must be {expected_generation_mode} for {mode}")
     if pointer["liveUploadAuthorized"]:
         errors.append("new-master test cannot authorize live upload")
 
@@ -120,23 +132,46 @@ def validate_payload(root: Path, pointer: dict) -> list[str]:
     except ValueError as exc:
         errors.append(str(exc))
 
-    lock_value = pointer.get("masterLockPath")
-    if pointer["generationAuthorized"]:
-        if not lock_value:
-            errors.append("generationAuthorized requires masterLockPath")
-        else:
-            try:
-                lock = read_json(resolved(root, lock_value))
-                if lock.get("sourceType") != "USER_COMPLETE_SET":
-                    errors.append("master sourceType must be USER_COMPLETE_SET")
-                if not lock.get("approvedBy"):
-                    errors.append("authorized master lock requires approvedBy")
-                if not lock.get("pages"):
-                    errors.append("authorized master lock has no pages")
-            except ValueError as exc:
-                errors.append(str(exc))
-    elif pointer["status"] not in {"WAITING_FOR_USER_MASTER", "WAITING_MASTER_APPROVAL", "PAUSED"}:
-        errors.append("unauthorized pointer has an invalid waiting status")
+    if mode == EXACT_MODE:
+        lock_value = pointer.get("masterLockPath")
+        if pointer["generationAuthorized"]:
+            if not lock_value:
+                errors.append("generationAuthorized requires masterLockPath")
+            else:
+                try:
+                    lock = read_json(resolved(root, lock_value))
+                    if lock.get("sourceType") != "USER_COMPLETE_SET":
+                        errors.append("master sourceType must be USER_COMPLETE_SET")
+                    if not lock.get("approvedBy"):
+                        errors.append("authorized master lock requires approvedBy")
+                    if not lock.get("pages"):
+                        errors.append("authorized master lock has no pages")
+                except ValueError as exc:
+                    errors.append(str(exc))
+        elif pointer["status"] not in {"WAITING_FOR_USER_MASTER", "WAITING_MASTER_APPROVAL", "PAUSED"}:
+            errors.append("unauthorized exact-master pointer has an invalid waiting status")
+    elif mode == DESIGN_MODE:
+        design_lock_value = pointer.get("designLockPath")
+        if pointer.get("masterLockPath"):
+            errors.append("design-synthesis pointer cannot carry masterLockPath")
+        if pointer["generationAuthorized"]:
+            if not design_lock_value:
+                errors.append("generationAuthorized requires designLockPath")
+            else:
+                try:
+                    lock = read_json(resolved(root, design_lock_value))
+                    if lock.get("sourceType") != "DESIGN_BRIEF":
+                        errors.append("design sourceType must be DESIGN_BRIEF")
+                    if not lock.get("approvedBy"):
+                        errors.append("authorized design lock requires approvedBy")
+                    if not lock.get("briefPath") or not lock.get("contractPath"):
+                        errors.append("authorized design lock requires briefPath and contractPath")
+                    if int(lock.get("expectedPages", 0)) < 1:
+                        errors.append("authorized design lock requires expectedPages >= 1")
+                except ValueError as exc:
+                    errors.append(str(exc))
+        elif pointer["status"] not in {"WAITING_DESIGN_BRIEF", "WAITING_DESIGN_APPROVAL", "PAUSED"}:
+            errors.append("unauthorized design-synthesis pointer has an invalid waiting status")
     return errors
 
 
@@ -153,17 +188,19 @@ def cmd_init(args: argparse.Namespace) -> int:
         raise SystemExit("Cohort must contain exactly one role=pilot SKU.")
     if pilots[0].get("vendorCode") != args.pilot_vendor_code:
         raise SystemExit("Requested pilot does not match the cohort role=pilot SKU.")
+    mode = args.mode
     payload = {
         "schemaVersion": 1,
         "taskId": args.task_id,
-        "mode": MODE,
-        "generationMode": GENERATION_MODE,
-        "status": "WAITING_FOR_USER_MASTER",
+        "mode": mode,
+        "generationMode": GENERATION_MODES[mode],
+        "status": "WAITING_FOR_USER_MASTER" if mode == EXACT_MODE else "WAITING_DESIGN_BRIEF",
         "cohortPath": rel(root, resolved(root, args.cohort)),
         "workflowStatePath": rel(root, resolved(root, args.workflow_state)),
         "pilotVendorCode": args.pilot_vendor_code,
         "outputRoot": rel(root, resolved(root, args.output_root)),
         "masterLockPath": None,
+        "designLockPath": None,
         "generationAuthorized": False,
         "liveUploadAuthorized": False,
         "updatedAt": now_iso(),
@@ -180,6 +217,8 @@ def cmd_register_master(args: argparse.Namespace) -> int:
     root = workspace_root(args.workspace_root)
     target = pointer_path(root, args.pointer)
     pointer = read_json(target)
+    if pointer.get("mode") != EXACT_MODE:
+        raise SystemExit("register-master requires EXACT_MASTER_TEST mode; promote an approved design first.")
     master_dir = resolved(root, args.master_dir)
     if not master_dir.is_dir():
         raise SystemExit(f"Master directory does not exist: {master_dir}")
@@ -234,6 +273,8 @@ def cmd_approve_master(args: argparse.Namespace) -> int:
     root = workspace_root(args.workspace_root)
     target = pointer_path(root, args.pointer)
     pointer = read_json(target)
+    if pointer.get("mode") != EXACT_MODE:
+        raise SystemExit("approve-master requires EXACT_MASTER_TEST mode.")
     if not pointer.get("masterLockPath"):
         raise SystemExit("No registered master to approve.")
     lock_path = resolved(root, pointer["masterLockPath"])
@@ -247,6 +288,134 @@ def cmd_approve_master(args: argparse.Namespace) -> int:
         raise SystemExit("; ".join(errors))
     write_json(target, pointer)
     print(json.dumps(pointer, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_register_design(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    pointer = read_json(target)
+    if pointer.get("mode") != DESIGN_MODE:
+        raise SystemExit("register-design requires DESIGN_SYNTHESIS mode.")
+    brief_path = resolved(root, args.brief_path)
+    contract_path = resolved(root, args.contract_path)
+    if not brief_path.is_file():
+        raise SystemExit(f"Design brief does not exist: {brief_path}")
+    if not contract_path.is_file():
+        raise SystemExit(f"Design contract does not exist: {contract_path}")
+    lock_path = resolved(
+        root,
+        args.lock_path or f"data/template_registry/phone_new_master/locks/{pointer['taskId']}_design_lock.json",
+    )
+    lock = {
+        "schemaVersion": 1,
+        "taskId": pointer["taskId"],
+        "sourceType": "DESIGN_BRIEF",
+        "templateId": args.template_id,
+        "exampleCases": args.example_case,
+        "briefPath": rel(root, brief_path),
+        "contractPath": rel(root, contract_path),
+        "expectedPages": args.expected_pages,
+        "approvedBy": None,
+        "registeredAt": now_iso(),
+    }
+    write_json(lock_path, lock)
+    pointer.update(
+        {
+            "status": "WAITING_DESIGN_APPROVAL",
+            "designLockPath": rel(root, lock_path),
+            "generationAuthorized": False,
+            "updatedAt": now_iso(),
+        }
+    )
+    errors = validate_payload(root, pointer)
+    if errors:
+        raise SystemExit("; ".join(errors))
+    write_json(target, pointer)
+    print(json.dumps(lock, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_approve_design(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    pointer = read_json(target)
+    if pointer.get("mode") != DESIGN_MODE:
+        raise SystemExit("approve-design requires DESIGN_SYNTHESIS mode.")
+    if not pointer.get("designLockPath"):
+        raise SystemExit("No registered design brief to approve.")
+    lock_path = resolved(root, pointer["designLockPath"])
+    lock = read_json(lock_path)
+    lock["approvedBy"] = args.approved_by
+    lock["approvedAt"] = now_iso()
+    write_json(lock_path, lock)
+    pointer.update({"status": "DESIGN_AUTHORIZED", "generationAuthorized": True, "updatedAt": now_iso()})
+    errors = validate_payload(root, pointer)
+    if errors:
+        raise SystemExit("; ".join(errors))
+    write_json(target, pointer)
+    print(json.dumps(pointer, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_promote_design(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    pointer = read_json(target)
+    if pointer.get("mode") != DESIGN_MODE or pointer.get("status") != "DESIGN_AUTHORIZED":
+        raise SystemExit("promote-design requires an authorized DESIGN_SYNTHESIS task.")
+    master_dir = resolved(root, args.master_dir)
+    if not master_dir.is_dir():
+        raise SystemExit(f"Design output directory does not exist: {master_dir}")
+    images = sorted(
+        [path for path in master_dir.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES],
+        key=natural_key,
+    )
+    if len(images) != args.expected_pages:
+        raise SystemExit(f"Expected {args.expected_pages} design pages, found {len(images)}.")
+    pages = []
+    dimensions = set()
+    for index, image_path in enumerate(images, start=1):
+        with Image.open(image_path) as image:
+            size = [int(image.width), int(image.height)]
+        dimensions.add(tuple(size))
+        pages.append({"page": index, "path": rel(root, image_path), "dimensions": size, "sha256": digest(image_path)})
+    if len(dimensions) != 1:
+        raise SystemExit("All promoted design pages must use identical canvas dimensions.")
+    lock_path = resolved(
+        root,
+        args.lock_path or f"data/template_registry/phone_new_master/locks/{pointer['taskId']}_master_lock.json",
+    )
+    lock = {
+        "schemaVersion": 1,
+        "taskId": pointer["taskId"],
+        "sourceType": "USER_COMPLETE_SET",
+        "origin": "APPROVED_DESIGN_SYNTHESIS",
+        "masterDirectory": rel(root, master_dir),
+        "pageCount": len(pages),
+        "canvasDimensions": list(next(iter(dimensions))),
+        "pages": pages,
+        "immutableContractPath": args.contract_path,
+        "approvedBy": None,
+        "registeredAt": now_iso(),
+    }
+    write_json(lock_path, lock)
+    pointer.update(
+        {
+            "mode": EXACT_MODE,
+            "generationMode": EXACT_GENERATION_MODE,
+            "status": "WAITING_MASTER_APPROVAL",
+            "masterLockPath": rel(root, lock_path),
+            "designLockPath": pointer.get("designLockPath"),
+            "generationAuthorized": False,
+            "updatedAt": now_iso(),
+        }
+    )
+    errors = validate_payload(root, pointer)
+    if errors:
+        raise SystemExit("; ".join(errors))
+    write_json(target, pointer)
+    print(json.dumps(lock, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -289,6 +458,7 @@ def parser() -> argparse.ArgumentParser:
 
     init = commands.add_parser("init")
     init.add_argument("--task-id", required=True)
+    init.add_argument("--mode", choices=sorted(MODES), default=EXACT_MODE)
     init.add_argument("--cohort", required=True)
     init.add_argument("--workflow-state", required=True)
     init.add_argument("--pilot-vendor-code", required=True)
@@ -306,6 +476,26 @@ def parser() -> argparse.ArgumentParser:
     approve = commands.add_parser("approve-master")
     approve.add_argument("--approved-by", required=True)
     approve.set_defaults(func=cmd_approve_master)
+
+    register_design = commands.add_parser("register-design")
+    register_design.add_argument("--brief-path", required=True)
+    register_design.add_argument("--contract-path", required=True)
+    register_design.add_argument("--template-id", required=True)
+    register_design.add_argument("--example-case", action="append", default=[])
+    register_design.add_argument("--expected-pages", type=int, default=8)
+    register_design.add_argument("--lock-path")
+    register_design.set_defaults(func=cmd_register_design)
+
+    approve_design = commands.add_parser("approve-design")
+    approve_design.add_argument("--approved-by", required=True)
+    approve_design.set_defaults(func=cmd_approve_design)
+
+    promote_design = commands.add_parser("promote-design")
+    promote_design.add_argument("--master-dir", required=True)
+    promote_design.add_argument("--expected-pages", type=int, default=8)
+    promote_design.add_argument("--contract-path", required=True)
+    promote_design.add_argument("--lock-path")
+    promote_design.set_defaults(func=cmd_promote_design)
 
     status = commands.add_parser("status")
     status.set_defaults(func=cmd_status)
