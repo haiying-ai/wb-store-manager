@@ -19,6 +19,9 @@ DESIGN_MODE = "DESIGN_SYNTHESIS"
 MODES = {EXACT_MODE, DESIGN_MODE}
 EXACT_GENERATION_MODE = "DIRECT_FULL_TEXT_IMAGEGEN"
 DESIGN_GENERATION_MODE = "DIRECT_FULL_TEXT_IMAGEGEN"
+DIRECTION_EXPLORATION_STAGE = "DIRECTION_EXPLORATION"
+FULL_PACK_STAGE = "FULL_PACK"
+DESIGN_STAGES = {DIRECTION_EXPLORATION_STAGE, FULL_PACK_STAGE}
 GENERATION_MODES = {
     EXACT_MODE: EXACT_GENERATION_MODE,
     DESIGN_MODE: DESIGN_GENERATION_MODE,
@@ -168,10 +171,29 @@ def validate_payload(root: Path, pointer: dict) -> list[str]:
                         errors.append("authorized design lock requires briefPath and contractPath")
                     if int(lock.get("expectedPages", 0)) < 1:
                         errors.append("authorized design lock requires expectedPages >= 1")
+                    if lock.get("designStage", FULL_PACK_STAGE) not in DESIGN_STAGES:
+                        errors.append(f"designStage must be one of {sorted(DESIGN_STAGES)}")
                 except ValueError as exc:
                     errors.append(str(exc))
-        elif pointer["status"] not in {"WAITING_DESIGN_BRIEF", "WAITING_DESIGN_APPROVAL", "PAUSED"}:
+        elif pointer["status"] not in {
+            "WAITING_DESIGN_BRIEF",
+            "WAITING_DESIGN_APPROVAL",
+            "WAITING_DIRECTION_SELECTION",
+            "PAUSED",
+        }:
             errors.append("unauthorized design-synthesis pointer has an invalid waiting status")
+        elif pointer["status"] == "WAITING_DIRECTION_SELECTION":
+            if not design_lock_value:
+                errors.append("WAITING_DIRECTION_SELECTION requires designLockPath")
+            else:
+                try:
+                    lock = read_json(resolved(root, design_lock_value))
+                    if lock.get("designStage") != DIRECTION_EXPLORATION_STAGE:
+                        errors.append("WAITING_DIRECTION_SELECTION requires a DIRECTION_EXPLORATION lock")
+                    if not lock.get("explorationReportPath") or not lock.get("candidateDirectory"):
+                        errors.append("completed direction exploration requires report and candidate directory")
+                except ValueError as exc:
+                    errors.append(str(exc))
     return errors
 
 
@@ -312,6 +334,7 @@ def cmd_register_design(args: argparse.Namespace) -> int:
         "taskId": pointer["taskId"],
         "sourceType": "DESIGN_BRIEF",
         "templateId": args.template_id,
+        "designStage": args.design_stage,
         "exampleCases": args.example_case,
         "briefPath": rel(root, brief_path),
         "contractPath": rel(root, contract_path),
@@ -359,12 +382,117 @@ def cmd_approve_design(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_complete_exploration(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    pointer = read_json(target)
+    if pointer.get("mode") != DESIGN_MODE or pointer.get("status") != "DESIGN_AUTHORIZED":
+        raise SystemExit("complete-exploration requires an authorized DESIGN_SYNTHESIS task.")
+    if not pointer.get("designLockPath"):
+        raise SystemExit("No authorized design lock exists.")
+    lock_path = resolved(root, pointer["designLockPath"])
+    lock = read_json(lock_path)
+    if lock.get("designStage") != DIRECTION_EXPLORATION_STAGE:
+        raise SystemExit("complete-exploration requires a DIRECTION_EXPLORATION lock.")
+    report_path = resolved(root, args.report_path)
+    candidate_dir = resolved(root, args.candidate_dir)
+    if not report_path.is_file():
+        raise SystemExit(f"Exploration report does not exist: {report_path}")
+    if not candidate_dir.is_dir():
+        raise SystemExit(f"Candidate directory does not exist: {candidate_dir}")
+    images = sorted(
+        [path for path in candidate_dir.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES],
+        key=natural_key,
+    )
+    expected = int(lock.get("expectedPages", 0))
+    if len(images) != expected:
+        raise SystemExit(f"Expected {expected} exploration candidates, found {len(images)}.")
+    candidates = []
+    dimensions = set()
+    for image_path in images:
+        with Image.open(image_path) as image:
+            size = [int(image.width), int(image.height)]
+        dimensions.add(tuple(size))
+        candidates.append({"path": rel(root, image_path), "dimensions": size, "sha256": digest(image_path)})
+    if len(dimensions) != 1:
+        raise SystemExit("All exploration candidates must use identical canvas dimensions.")
+    lock.update(
+        {
+            "explorationReportPath": rel(root, report_path),
+            "candidateDirectory": rel(root, candidate_dir),
+            "candidates": candidates,
+            "explorationCompletedAt": now_iso(),
+        }
+    )
+    write_json(lock_path, lock)
+    pointer.update(
+        {
+            "status": "WAITING_DIRECTION_SELECTION",
+            "generationAuthorized": False,
+            "updatedAt": now_iso(),
+        }
+    )
+    errors = validate_payload(root, pointer)
+    if errors:
+        raise SystemExit("; ".join(errors))
+    write_json(target, pointer)
+    print(json.dumps(pointer, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_select_direction(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    pointer = read_json(target)
+    if pointer.get("mode") != DESIGN_MODE or pointer.get("status") != "WAITING_DIRECTION_SELECTION":
+        raise SystemExit("select-direction requires WAITING_DIRECTION_SELECTION.")
+    candidate_path = resolved(root, args.candidate_path)
+    if not candidate_path.is_file() or candidate_path.suffix.lower() not in IMAGE_SUFFIXES:
+        raise SystemExit(f"Selected direction candidate does not exist: {candidate_path}")
+    selection_path = resolved(
+        root,
+        args.selection_path
+        or f"data/template_registry/phone_new_master/selections/{pointer['taskId']}_direction_selection.json",
+    )
+    selection = {
+        "schemaVersion": 1,
+        "taskId": pointer["taskId"],
+        "directionId": args.direction_id,
+        "candidatePath": rel(root, candidate_path),
+        "selectedBy": args.selected_by,
+        "selectedAt": now_iso(),
+    }
+    write_json(selection_path, selection)
+    previous_lock = pointer.get("designLockPath")
+    pointer.update(
+        {
+            "status": "WAITING_DESIGN_BRIEF",
+            "lastExplorationLockPath": previous_lock,
+            "designLockPath": None,
+            "directionSelectionPath": rel(root, selection_path),
+            "generationAuthorized": False,
+            "updatedAt": now_iso(),
+        }
+    )
+    errors = validate_payload(root, pointer)
+    if errors:
+        raise SystemExit("; ".join(errors))
+    write_json(target, pointer)
+    print(json.dumps(selection, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_promote_design(args: argparse.Namespace) -> int:
     root = workspace_root(args.workspace_root)
     target = pointer_path(root, args.pointer)
     pointer = read_json(target)
     if pointer.get("mode") != DESIGN_MODE or pointer.get("status") != "DESIGN_AUTHORIZED":
         raise SystemExit("promote-design requires an authorized DESIGN_SYNTHESIS task.")
+    if not pointer.get("designLockPath"):
+        raise SystemExit("promote-design requires an authorized design lock.")
+    design_lock = read_json(resolved(root, pointer["designLockPath"]))
+    if design_lock.get("designStage", FULL_PACK_STAGE) != FULL_PACK_STAGE:
+        raise SystemExit("Direction exploration cannot be promoted; select a direction and approve a FULL_PACK contract.")
     master_dir = resolved(root, args.master_dir)
     if not master_dir.is_dir():
         raise SystemExit(f"Design output directory does not exist: {master_dir}")
@@ -424,6 +552,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     root = workspace_root(args.workspace_root)
     target = pointer_path(root, args.pointer)
     pointer = read_json(target)
+    design_stage = None
+    if pointer.get("designLockPath"):
+        try:
+            design_stage = read_json(resolved(root, pointer["designLockPath"])).get("designStage", FULL_PACK_STAGE)
+        except ValueError:
+            design_stage = None
     result = {
         "pointer": rel(root, target),
         "taskId": pointer.get("taskId"),
@@ -434,6 +568,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         "generationAuthorized": pointer.get("generationAuthorized"),
         "liveUploadAuthorized": pointer.get("liveUploadAuthorized"),
         "masterLockPath": pointer.get("masterLockPath"),
+        "designStage": design_stage,
+        "directionSelectionPath": pointer.get("directionSelectionPath"),
         "outputRoot": pointer.get("outputRoot"),
         "updatedAt": pointer.get("updatedAt"),
     }
@@ -484,12 +620,25 @@ def parser() -> argparse.ArgumentParser:
     register_design.add_argument("--template-id", required=True)
     register_design.add_argument("--example-case", action="append", default=[])
     register_design.add_argument("--expected-pages", type=int, default=8)
+    register_design.add_argument("--design-stage", choices=sorted(DESIGN_STAGES), default=FULL_PACK_STAGE)
     register_design.add_argument("--lock-path")
     register_design.set_defaults(func=cmd_register_design)
 
     approve_design = commands.add_parser("approve-design")
     approve_design.add_argument("--approved-by", required=True)
     approve_design.set_defaults(func=cmd_approve_design)
+
+    complete_exploration = commands.add_parser("complete-exploration")
+    complete_exploration.add_argument("--candidate-dir", required=True)
+    complete_exploration.add_argument("--report-path", required=True)
+    complete_exploration.set_defaults(func=cmd_complete_exploration)
+
+    select_direction = commands.add_parser("select-direction")
+    select_direction.add_argument("--direction-id", required=True)
+    select_direction.add_argument("--candidate-path", required=True)
+    select_direction.add_argument("--selected-by", required=True)
+    select_direction.add_argument("--selection-path")
+    select_direction.set_defaults(func=cmd_select_direction)
 
     promote_design = commands.add_parser("promote-design")
     promote_design.add_argument("--master-dir", required=True)

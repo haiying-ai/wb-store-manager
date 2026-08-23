@@ -1,4 +1,5 @@
 import importlib.util
+import argparse
 import json
 import tempfile
 import unittest
@@ -116,6 +117,129 @@ class PhoneNewMasterWorkflowTests(unittest.TestCase):
             }
         )
         self.assertEqual([], MODULE.validate_payload(self.root, pointer))
+
+    def test_completed_exploration_waits_for_direction_selection(self):
+        brief = self.root / "brief.md"
+        contract = self.root / "contract.md"
+        report = self.root / "report.md"
+        candidates = self.root / "candidates"
+        candidates.mkdir()
+        brief.write_text("brief", encoding="utf-8")
+        contract.write_text("contract", encoding="utf-8")
+        report.write_text("report", encoding="utf-8")
+        Image.new("RGB", (1024, 1536)).save(candidates / "B.png")
+        Image.new("RGB", (1024, 1536)).save(candidates / "C.png")
+        lock = {
+            "sourceType": "DESIGN_BRIEF",
+            "designStage": MODULE.DIRECTION_EXPLORATION_STAGE,
+            "briefPath": "brief.md",
+            "contractPath": "contract.md",
+            "expectedPages": 2,
+            "approvedBy": "user",
+            "explorationReportPath": "report.md",
+            "candidateDirectory": "candidates",
+        }
+        (self.root / "design-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+        pointer = self.design_pointer()
+        pointer.update(
+            {
+                "status": "WAITING_DIRECTION_SELECTION",
+                "generationAuthorized": False,
+                "designLockPath": "design-lock.json",
+            }
+        )
+        self.assertEqual([], MODULE.validate_payload(self.root, pointer))
+
+    def test_complete_exploration_disables_generation(self):
+        report = self.root / "report.md"
+        report.write_text("report", encoding="utf-8")
+        candidates = self.root / "candidates"
+        candidates.mkdir()
+        Image.new("RGB", (1024, 1536)).save(candidates / "B.png")
+        Image.new("RGB", (1024, 1536)).save(candidates / "C.png")
+        lock = {
+            "sourceType": "DESIGN_BRIEF",
+            "designStage": MODULE.DIRECTION_EXPLORATION_STAGE,
+            "briefPath": "brief.md",
+            "contractPath": "contract.md",
+            "expectedPages": 2,
+            "approvedBy": "user",
+        }
+        (self.root / "design-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+        pointer = self.design_pointer()
+        pointer.update(
+            {
+                "status": "DESIGN_AUTHORIZED",
+                "generationAuthorized": True,
+                "designLockPath": "design-lock.json",
+            }
+        )
+        (self.root / "pointer.json").write_text(json.dumps(pointer), encoding="utf-8")
+        args = argparse.Namespace(
+            workspace_root=str(self.root),
+            pointer="pointer.json",
+            candidate_dir="candidates",
+            report_path="report.md",
+        )
+        self.assertEqual(0, MODULE.cmd_complete_exploration(args))
+        updated = json.loads((self.root / "pointer.json").read_text(encoding="utf-8"))
+        self.assertEqual("WAITING_DIRECTION_SELECTION", updated["status"])
+        self.assertFalse(updated["generationAuthorized"])
+
+    def test_select_direction_returns_to_full_pack_brief_gate(self):
+        candidate = self.root / "candidate.png"
+        Image.new("RGB", (1024, 1536)).save(candidate)
+        report = self.root / "report.md"
+        report.write_text("report", encoding="utf-8")
+        candidates = self.root / "candidates"
+        candidates.mkdir()
+        lock = {
+            "sourceType": "DESIGN_BRIEF",
+            "designStage": MODULE.DIRECTION_EXPLORATION_STAGE,
+            "briefPath": "brief.md",
+            "contractPath": "contract.md",
+            "expectedPages": 2,
+            "approvedBy": "user",
+            "explorationReportPath": "report.md",
+            "candidateDirectory": "candidates",
+        }
+        (self.root / "design-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+        pointer = self.design_pointer()
+        pointer.update(
+            {
+                "status": "WAITING_DIRECTION_SELECTION",
+                "generationAuthorized": False,
+                "designLockPath": "design-lock.json",
+            }
+        )
+        (self.root / "pointer.json").write_text(json.dumps(pointer), encoding="utf-8")
+        args = argparse.Namespace(
+            workspace_root=str(self.root),
+            pointer="pointer.json",
+            direction_id="B",
+            candidate_path="candidate.png",
+            selected_by="user",
+            selection_path="selection.json",
+        )
+        self.assertEqual(0, MODULE.cmd_select_direction(args))
+        updated = json.loads((self.root / "pointer.json").read_text(encoding="utf-8"))
+        self.assertEqual("WAITING_DESIGN_BRIEF", updated["status"])
+        self.assertFalse(updated["generationAuthorized"])
+        self.assertEqual("selection.json", updated["directionSelectionPath"])
+
+    def test_register_design_defaults_to_full_pack_stage(self):
+        parsed = MODULE.parser().parse_args(
+            [
+                "register-design",
+                "--brief-path",
+                "brief.md",
+                "--contract-path",
+                "contract.md",
+                "--template-id",
+                "product-commerce-visual",
+            ]
+        )
+        self.assertEqual(MODULE.FULL_PACK_STAGE, parsed.design_stage)
 
 
 if __name__ == "__main__":

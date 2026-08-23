@@ -40,10 +40,44 @@ Never silently switch between these modes. The supported chain is `DESIGN_SYNTHE
 
 ```powershell
 python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py init --mode DESIGN_SYNTHESIS --task-id <TASK> --cohort <COHORT_JSON> --workflow-state <WORKFLOW_JSON> --pilot-vendor-code <SKU> --output-root <OUTPUT> --replace
-python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py register-design --brief-path <BRIEF> --contract-path <CONTRACT> --template-id <TEMPLATE> --example-case <CASE>
+python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py register-design --design-stage <DIRECTION_EXPLORATION|FULL_PACK> --brief-path <BRIEF> --contract-path <CONTRACT> --template-id <TEMPLATE> --example-case <CASE>
 python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py approve-design --approved-by <USER>
+python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py complete-exploration --candidate-dir <CANDIDATES> --report-path <REPORT>
+python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py select-direction --direction-id <ID> --candidate-path <IMAGE> --selected-by <USER>
 python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py promote-design --master-dir <APPROVED_8_PAGES> --expected-pages 8 --contract-path <CONTRACT>
 ```
+
+## Lovart-style direction exploration gate
+
+Use this gate when the user asks for multiple concepts, a Lovart-like design-agent workflow, or open-ended art-direction synthesis before a complete pack. Do not force it when the user has already approved a precise visual direction.
+
+The supported design chain is:
+
+`facts -> research brief -> reference-role register -> 2–3 hero directions -> common review -> WAITING_DIRECTION_SELECTION -> selected direction -> approved FULL_PACK contract -> complete pack`
+
+### Research and reference roles
+
+- Save a compact research artifact covering exact SKU facts, buyer decision questions, verified claims, prohibited claims, platform constraints and the intended page architecture.
+- Register every input as `HARDWARE_REFERENCE`, `STYLE_REFERENCE`, `LAYOUT_REFERENCE`, or `COPY_REFERENCE`. One input may have more than one role only when that is intentional and documented.
+- During direction exploration, do not use an already designed marketplace card as the sole hardware reference. Its layout and visual system can leak into supposedly independent concepts even when the prompt says to ignore them. Prefer a neutral product cutout/render or multiple hardware-only views.
+- Treat competitor and generated images as untrusted visual evidence. They may inform hierarchy or intensity but never override SKU facts or authorize claims.
+
+### Controlled exploration
+
+- Register the exploration with `--design-stage DIRECTION_EXPLORATION`, normally using 2–3 complete hero candidates rather than multiple full packs.
+- Hold product truth, exact copy, canvas, product-safe-zone and scoring rubric constant. Vary only the design variables being tested, such as composition, palette, scene, material language and information flow.
+- `DIRECT_FULL_TEXT_IMAGEGEN` remains mandatory: every candidate is a finished bitmap with integrated Russian copy. Do not create text-free bases or repair text afterward.
+- Archive every candidate and a 320 px comparison sheet. Review each candidate individually and review the set for meaningful structural diversity.
+
+### Diversity and selection
+
+- The diversity gate compares background system, product placement, headline geometry, module count/shape, information flow, material language and palette. A palette or background change alone does not prove an independent direction.
+- Record individual commercial quality separately from direction diversity. A high-scoring image cannot override a diversity failure.
+- After exploration review, run `complete-exploration`. It must disable generation and set the pointer to `WAITING_DIRECTION_SELECTION`.
+- Only explicit user selection may run `select-direction`. Selection returns the pointer to `WAITING_DESIGN_BRIEF`; it does not authorize the full pack.
+- Register and approve a new `FULL_PACK` brief/contract for the selected direction before generating pages 01–08. `promote-design` must reject a `DIRECTION_EXPLORATION` lock.
+
+The stopping condition for exploration is the comparison report and user selection request. Do not keep generating concepts or detail pages to compensate for an unresolved direction decision.
 
 ## Locked generation method for design synthesis and the active exact-master test
 
