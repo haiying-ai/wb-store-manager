@@ -7,10 +7,11 @@ Reusable WB platform logic is maintained in two GitHub repositories:
 
 Whenever changing WB authentication, permissions, directory contracts, category onboarding gates, listing/media/price/stock workflows, safety requirements or readback/completion rules:
 
-1. identify the corresponding documentation/Skill surface in both repositories;
-2. update both in the same work session, adapting detail to each repository rather than copying incompatible code;
-3. validate both Skills and run relevant tests;
-4. review and commit only task-related files in each repository;
-5. push both repositories and report both commit IDs.
+1. update the project-level package at `E:\CodexWorks\WB\.agents\skills\wb-product-workflow`;
+2. mirror that complete package to `C:\Users\孙兵\.agents\skills\wb-product-workflow` and run `python .agents/skills/wb-product-workflow/scripts/sync_wb_skill_layers.py check`; zero missing or hash-mismatched project files is a release gate;
+3. identify and update the corresponding documentation/Skill surface in both GitHub repositories, adapting detail rather than copying incompatible code;
+4. validate both repository Skills and run relevant tests;
+5. review and commit only task-related files in each repository;
+6. push both repositories and report both commit IDs and the project/user skill-equivalence result.
 
-Do not treat a change as published when only one repository contains the reusable rule. Store-specific secrets and live artifacts remain local and must not be mirrored.
+Perform this publication sequence after every reusable Skill-logic edit, not only when the user repeats the request. Do not treat a local-only, one-layer, uncommitted, unpushed, or one-repository change as published. Store-specific secrets and live artifacts remain local and must not be mirrored.

@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""Cross-session state and master lock for new WB phone-template tests."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from PIL import Image
+
+
+MODE = "EXACT_MASTER_TEST"
+GENERATION_MODE = "DIRECT_FULL_TEXT_IMAGEGEN"
+DEFAULT_POINTER = Path("data/template_registry/phone_new_master/active_test.json")
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def workspace_root(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit).resolve()
+    cwd = Path.cwd().resolve()
+    if (cwd / ".agents" / "skills" / "wb-product-workflow").exists():
+        return cwd
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / ".agents" / "skills" / "wb-product-workflow").exists():
+            return candidate
+    raise SystemExit("Cannot locate WB workspace root; pass --workspace-root.")
+
+
+def resolved(root: Path, value: str | Path) -> Path:
+    path = Path(value)
+    return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
+def rel(root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(root).as_posix()
+    except ValueError:
+        return str(path.resolve())
+
+
+def read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"Missing file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON: {path}: {exc}") from exc
+
+
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def natural_key(path: Path) -> list[object]:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def pointer_path(root: Path, supplied: str | None) -> Path:
+    return resolved(root, supplied or DEFAULT_POINTER)
+
+
+def validate_payload(root: Path, pointer: dict) -> list[str]:
+    errors: list[str] = []
+    required = {
+        "schemaVersion",
+        "taskId",
+        "mode",
+        "generationMode",
+        "status",
+        "cohortPath",
+        "workflowStatePath",
+        "pilotVendorCode",
+        "generationAuthorized",
+        "liveUploadAuthorized",
+    }
+    missing = sorted(required - pointer.keys())
+    if missing:
+        errors.append("missing pointer fields: " + ", ".join(missing))
+        return errors
+    if pointer["mode"] != MODE:
+        errors.append(f"mode must be {MODE}")
+    if pointer["generationMode"] != GENERATION_MODE:
+        errors.append(f"generationMode must be {GENERATION_MODE}")
+    if pointer["liveUploadAuthorized"]:
+        errors.append("new-master test cannot authorize live upload")
+
+    try:
+        cohort_path = resolved(root, pointer["cohortPath"])
+        workflow_path = resolved(root, pointer["workflowStatePath"])
+        cohort = read_json(cohort_path)
+        workflow = read_json(workflow_path)
+        if cohort.get("taskId") != pointer["taskId"]:
+            errors.append("cohort taskId does not match pointer")
+        if workflow.get("task_id") != pointer["taskId"]:
+            errors.append("workflow task_id does not match pointer")
+        pilots = [sku for sku in cohort.get("skus", []) if sku.get("role") == "pilot"]
+        if len(pilots) != 1:
+            errors.append("cohort must contain exactly one role=pilot SKU")
+        elif pilots[0].get("vendorCode") != pointer["pilotVendorCode"]:
+            errors.append("pointer pilotVendorCode does not match cohort pilot")
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    lock_value = pointer.get("masterLockPath")
+    if pointer["generationAuthorized"]:
+        if not lock_value:
+            errors.append("generationAuthorized requires masterLockPath")
+        else:
+            try:
+                lock = read_json(resolved(root, lock_value))
+                if lock.get("sourceType") != "USER_COMPLETE_SET":
+                    errors.append("master sourceType must be USER_COMPLETE_SET")
+                if not lock.get("approvedBy"):
+                    errors.append("authorized master lock requires approvedBy")
+                if not lock.get("pages"):
+                    errors.append("authorized master lock has no pages")
+            except ValueError as exc:
+                errors.append(str(exc))
+    elif pointer["status"] not in {"WAITING_FOR_USER_MASTER", "WAITING_MASTER_APPROVAL", "PAUSED"}:
+        errors.append("unauthorized pointer has an invalid waiting status")
+    return errors
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    if target.exists():
+        existing = read_json(target)
+        if existing.get("taskId") != args.task_id and not args.replace:
+            raise SystemExit("Active new-master task exists; explicit --replace is required.")
+    cohort = read_json(resolved(root, args.cohort))
+    pilots = [sku for sku in cohort.get("skus", []) if sku.get("role") == "pilot"]
+    if len(pilots) != 1:
+        raise SystemExit("Cohort must contain exactly one role=pilot SKU.")
+    if pilots[0].get("vendorCode") != args.pilot_vendor_code:
+        raise SystemExit("Requested pilot does not match the cohort role=pilot SKU.")
+    payload = {
+        "schemaVersion": 1,
+        "taskId": args.task_id,
+        "mode": MODE,
+        "generationMode": GENERATION_MODE,
+        "status": "WAITING_FOR_USER_MASTER",
+        "cohortPath": rel(root, resolved(root, args.cohort)),
+        "workflowStatePath": rel(root, resolved(root, args.workflow_state)),
+        "pilotVendorCode": args.pilot_vendor_code,
+        "outputRoot": rel(root, resolved(root, args.output_root)),
+        "masterLockPath": None,
+        "generationAuthorized": False,
+        "liveUploadAuthorized": False,
+        "updatedAt": now_iso(),
+    }
+    errors = validate_payload(root, payload)
+    if errors:
+        raise SystemExit("; ".join(errors))
+    write_json(target, payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_register_master(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    pointer = read_json(target)
+    master_dir = resolved(root, args.master_dir)
+    if not master_dir.is_dir():
+        raise SystemExit(f"Master directory does not exist: {master_dir}")
+    images = sorted(
+        [path for path in master_dir.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES],
+        key=natural_key,
+    )
+    if not images:
+        raise SystemExit("Master directory contains no supported images.")
+    pages = []
+    dimensions = set()
+    for index, image_path in enumerate(images, start=1):
+        with Image.open(image_path) as image:
+            size = [int(image.width), int(image.height)]
+        dimensions.add(tuple(size))
+        pages.append({"page": index, "path": rel(root, image_path), "dimensions": size, "sha256": digest(image_path)})
+    if len(dimensions) != 1:
+        raise SystemExit("All master pages must use identical canvas dimensions.")
+    if args.expected_pages and len(pages) != args.expected_pages:
+        raise SystemExit(f"Expected {args.expected_pages} pages, found {len(pages)}.")
+    lock_path = resolved(
+        root,
+        args.lock_path or f"data/template_registry/phone_new_master/locks/{pointer['taskId']}_master_lock.json",
+    )
+    lock = {
+        "schemaVersion": 1,
+        "taskId": pointer["taskId"],
+        "sourceType": "USER_COMPLETE_SET",
+        "masterDirectory": rel(root, master_dir),
+        "pageCount": len(pages),
+        "canvasDimensions": list(next(iter(dimensions))),
+        "pages": pages,
+        "immutableContractPath": args.contract_path,
+        "approvedBy": None,
+        "registeredAt": now_iso(),
+    }
+    write_json(lock_path, lock)
+    pointer.update(
+        {
+            "status": "WAITING_MASTER_APPROVAL",
+            "masterLockPath": rel(root, lock_path),
+            "generationAuthorized": False,
+            "updatedAt": now_iso(),
+        }
+    )
+    write_json(target, pointer)
+    print(json.dumps(lock, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_approve_master(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    pointer = read_json(target)
+    if not pointer.get("masterLockPath"):
+        raise SystemExit("No registered master to approve.")
+    lock_path = resolved(root, pointer["masterLockPath"])
+    lock = read_json(lock_path)
+    lock["approvedBy"] = args.approved_by
+    lock["approvedAt"] = now_iso()
+    write_json(lock_path, lock)
+    pointer.update({"status": "MASTER_LOCKED", "generationAuthorized": True, "updatedAt": now_iso()})
+    errors = validate_payload(root, pointer)
+    if errors:
+        raise SystemExit("; ".join(errors))
+    write_json(target, pointer)
+    print(json.dumps(pointer, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    pointer = read_json(target)
+    result = {
+        "pointer": rel(root, target),
+        "taskId": pointer.get("taskId"),
+        "mode": pointer.get("mode"),
+        "generationMode": pointer.get("generationMode"),
+        "status": pointer.get("status"),
+        "pilotVendorCode": pointer.get("pilotVendorCode"),
+        "generationAuthorized": pointer.get("generationAuthorized"),
+        "liveUploadAuthorized": pointer.get("liveUploadAuthorized"),
+        "masterLockPath": pointer.get("masterLockPath"),
+        "outputRoot": pointer.get("outputRoot"),
+        "updatedAt": pointer.get("updatedAt"),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    root = workspace_root(args.workspace_root)
+    target = pointer_path(root, args.pointer)
+    pointer = read_json(target)
+    errors = validate_payload(root, pointer)
+    result = {"valid": not errors, "pointer": rel(root, target), "errors": errors}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if not errors else 1
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--workspace-root")
+    result.add_argument("--pointer")
+    commands = result.add_subparsers(dest="command", required=True)
+
+    init = commands.add_parser("init")
+    init.add_argument("--task-id", required=True)
+    init.add_argument("--cohort", required=True)
+    init.add_argument("--workflow-state", required=True)
+    init.add_argument("--pilot-vendor-code", required=True)
+    init.add_argument("--output-root", required=True)
+    init.add_argument("--replace", action="store_true")
+    init.set_defaults(func=cmd_init)
+
+    register = commands.add_parser("register-master")
+    register.add_argument("--master-dir", required=True)
+    register.add_argument("--expected-pages", type=int, default=8)
+    register.add_argument("--contract-path", required=True)
+    register.add_argument("--lock-path")
+    register.set_defaults(func=cmd_register_master)
+
+    approve = commands.add_parser("approve-master")
+    approve.add_argument("--approved-by", required=True)
+    approve.set_defaults(func=cmd_approve_master)
+
+    status = commands.add_parser("status")
+    status.set_defaults(func=cmd_status)
+    validate = commands.add_parser("validate")
+    validate.set_defaults(func=cmd_validate)
+    return result
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        return args.func(args)
+    except ValueError as exc:
+        print(json.dumps({"valid": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

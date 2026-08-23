@@ -28,7 +28,8 @@ Use one of four resumable flows. Keep the state file with the task artifacts and
 `facts -> brief -> generate -> review -> approve -> upload -> readback -> archive`
 
 - Lock model, color, capacity, condition, included items, and verified claims.
-- Generate product-first media and add copy deterministically when required.
+- For a new phone master, resolve `data/template_registry/phone_new_master/active_test.json` before creating any state. Resume the named task, pilot, source contract and production mode; create a replacement only after explicit user direction.
+- Generate product-first media and add copy deterministically when that is the active mode. If an approved workflow locks direct complete text-bearing generation, follow that mutually exclusive mode instead.
 - Inspect full-size assets and marketplace-size thumbnails.
 - Record explicit approval before upload. Never overwrite an approved final asset.
 - Read back count, order, and buyer-visible rendering after upload.

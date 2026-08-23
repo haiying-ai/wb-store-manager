@@ -50,6 +50,8 @@ Allowed proof language must be factual and scoped, for example `Проверка
 
 When the user supplies image pages or names a template directory, those pages are the only visual master for that request. This requirement overrides the default visual language in this playbook, including its dark technical-background guidance.
 
+If the request is a new-master test, first read `phone-new-master-production-standard.md` and run its status/validation commands. Resume the active pointer; do not choose another SKU, create another workflow, or combine multiple template sets. `EXACT_MASTER_TEST` and `DESIGN_SYNTHESIS` are mutually exclusive.
+
 Before generating any asset:
 
 1. Create a master register: page number, immutable layout elements, allowed SKU substitutions, source path/attachment ID, and target dimensions.
@@ -68,11 +70,13 @@ Record the rejection as `REJECTED_TEMPLATE_MISMATCH`. It is not a passing image,
 
 If the user requires direct image generation with text, state the limitation accurately: direct generation can aim for strong template adherence but cannot promise pixel-identical typography or geometry. Do not describe a visually similar result as template-identical. If that limitation is unacceptable, pause and request permission to use a deterministic layout-preserving method.
 
+When the active new-master pointer locks `DIRECT_FULL_TEXT_IMAGEGEN`, direct complete text-bearing generation is required and overrides the deterministic-copy default below. Do not create semi-finished bases or fill text after generation.
+
 Use a vertical marketplace canvas unless WB requirements for the target card differ. Keep the phone large and immediately recognizable. Use a dark graphite/navy/black technical visual language with restrained cyan or electric-blue accents by default. Accent color may follow the phone/model palette, but must not reduce text legibility or conceal phone color.
 
 ### SKU Main Image
 
-Follow the complete generation, deterministic-copy and review sequence in `phone-main-image-production-workflow.md`, then apply the mandatory commercial scoring gate in `phone-main-image-sales-score.md`. A technically valid image is not approved unless it reaches at least 93/100, has zero hard-fail defects, and beats the active benchmark. Use the approved iPhone 14 V5 reference asset as the minimum density, hierarchy, and sales-readiness standard; adapt model facts and color treatment without cloning its exact composition.
+Follow the active production mode and review sequence in `phone-main-image-production-workflow.md`, then apply the mandatory commercial scoring gate in `phone-main-image-sales-score.md`. A technically valid image is not approved unless it reaches at least 93/100, has zero hard-fail defects, and beats the active benchmark. Use the approved iPhone 14 V5 reference asset as the minimum density, hierarchy, and sales-readiness standard only when the user has not locked another exact master; adapt model facts and color treatment without cloning its exact composition.
 
 The main image is the buyer's first decision point. It should include:
 

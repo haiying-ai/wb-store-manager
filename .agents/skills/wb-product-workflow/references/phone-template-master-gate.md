@@ -2,6 +2,8 @@
 
 Use this gate whenever a user provides phone-image references or explicitly names a template directory.
 
+For a new-master test, also read `phone-new-master-production-standard.md` and resolve its active pointer first. `EXACT_MASTER_TEST` accepts one complete `USER_COMPLETE_SET`; it forbids composite references, earlier drafts, competitor pages and a worker-selected pilot. Multiple references are permitted only in an explicitly named `DESIGN_SYNTHESIS` task, which is not an exact-master test.
+
 ## Rule hierarchy
 
 1. Exact user-provided master pages and explicit page-by-page requirements.
@@ -23,6 +25,8 @@ Create a compact page register with:
 
 Give the same frozen register to every parallel worker. Old prompts, earlier drafts, competing images, and generic dark-tech styles are invalid unless the user explicitly retains them.
 
+Do not authorize generation until the register is represented by an approved immutable master lock containing ordered page paths or attachment IDs, dimensions and hashes. A waiting task must remain `generationAuthorized=false`.
+
 ## Acceptance sequence
 
 1. Template-consistency review.
@@ -40,3 +44,5 @@ For a new master, generate and review one representative complete pack before ca
 ## Direct image-generation limitation
 
 Direct image generation can produce a complete text-bearing image and target close adherence, but it can redraw typography, icons, and geometry. It must not be represented as pixel-identical template preservation. If the user requires pixel-level preservation, request approval for a deterministic layout-preserving process instead.
+
+When the active pointer locks `DIRECT_FULL_TEXT_IMAGEGEN`, generate every final text-bearing page in one image-generation call. Do not substitute a text-free base, blank boxes, post-generation text overlays, or deterministic copy composition. Report structural fidelity honestly rather than claiming pixel identity.

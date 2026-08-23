@@ -11,6 +11,8 @@ Use this skill for Wildberries/WB product work rooted at `E:\电商运营\01平�
 
 Classify each request as `daily`, `listing`, `media`, or `review`. Read `references/fixed-workflows.md`, create or resume its workflow state, and then load only the domain references needed for that flow. Use spreadsheet, document, browser, image, and video skills as execution tools without weakening WB truth, approval, visual-review, or readback gates.
 
+For every request to test, create, replace, resume, or inspect a **new smartphone image master**, first read `references/phone-new-master-production-standard.md`, then run `python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py status` and `validate`. The active pointer is authoritative across conversations. Resume it before selecting an SKU or creating any workflow. Never silently replace its pilot, source set, production mode, or task ID.
+
 For every flow:
 
 1. Start from manifests, summaries, and the requested SKU files.
@@ -35,6 +37,7 @@ Read `references/directory-protocol.md` before changing folder behavior.
 Read `references/live-state-sync.md` before or immediately after any WB live write, readback, or follow-up operation that depends on live identifiers.
 For this workspace's GitHub publication, read `references/github-ssh.md` before committing or pushing.
 Before publishing any reusable WB platform-logic change, read `references/dual-repository-sync.md` and update both `wb-store-manager` and `store-manager-ru` in the same work session.
+For every change to this Skill package, also mirror the complete project package to `C:\Users\孙兵\.agents\skills\wb-product-workflow`, run `scripts/sync_wb_skill_layers.py check`, and require zero missing or hash-mismatched project files before Git publication.
 
 ## Default Workflow
 
@@ -82,8 +85,9 @@ Before publishing any reusable WB platform-logic change, read `references/dual-r
    - For a newly confirmed phone template, finish one complete representative pack and obtain user approval before starting a category-wide batch. If the representative pack fails template consistency, stop the batch and do not consume further image-generation capacity until the failure is resolved or the user explicitly changes the standard.
    - For IPL hair-removal devices / 脱毛仪, read `references/hair-removal-main-image.md` before planning, prompting, generating, scoring, approving, uploading, or verifying a main image. Treat its SKU-truth, Russian-copy, prompt-template, scoring, and WB readback gates as mandatory.
    - For mobile phones, also read `references/phone-image-playbook.md` before planning, generating, reviewing, or reporting image progress. It defines the required model-first workflow, image-set structure, factual guardrails, and resumable batch protocol.
+   - For a new phone master or exact-master test, `references/phone-new-master-production-standard.md` takes precedence over generic phone-image guidance. In `EXACT_MASTER_TEST`, use only the locked complete user master, the pointer-selected pilot, and `DIRECT_FULL_TEXT_IMAGEGEN`; do not create text-free bases, post-fill text, mix references, or open a second workflow.
    - When the request uses the confirmed eight-page V3 phone master, asks for exact-template batch production, or resumes the 121-SKU V3 work, read `references/phone-v3-deterministic-production-standard.md` before inspecting prompts or images. Resume through its active run pointer and SQLite tracker; do not reconstruct state from chat history or restart completed pages.
-   - Before producing a phone main image, read `references/phone-main-image-production-workflow.md`. Generate a new product-first base without AI text, add Russian copy deterministically afterward, enforce product-safe zones, inspect full size and 320 px, and regenerate every failed SKU.
+   - Before producing a phone main image, read `references/phone-main-image-production-workflow.md`. Its text-free-base plus deterministic-copy method is the default only when no more specific approved production mode overrides it. The active new-master exact-test mode explicitly overrides it with direct complete text-bearing generation.
    - Before generating or approving any phone main image, read `references/phone-main-image-sales-score.md`. Require a score of at least 93/100, zero hard-fail defects, and a score above the active competitor/reference benchmark before presenting it as upload-ready.
    - Before auditing, packaging, uploading, or verifying a phone image batch, also read `references/phone-image-operations.md`. Use its four-stage tool chain and completion gates instead of ad hoc upload loops.
    - If a phone card-quality score is below 10, use the portal-led diagnostic and single-SKU pilot/remediation rules in `references/phone-image-playbook.md`; do not assume that an HTTP-successful image upload or a complete image count has resolved the score.
@@ -221,6 +225,7 @@ Before saying a product is sellable, verify:
 - `references/hair-removal-main-image.md`
 - `references/product-video-workflow.md`
 - `references/phone-image-playbook.md`
+- `references/phone-new-master-production-standard.md`
 - `references/phone-main-image-sales-score.md`
 - `references/phone-main-image-production-workflow.md`
 - `references/phone-image-operations.md`

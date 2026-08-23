@@ -1,6 +1,8 @@
 # Phone Main-Image Production Workflow
 
-Use this workflow for every WB phone main image. It defines the reusable generation prompt, deterministic Russian copy composition, visual review and rollout gate. Pair it with `phone-main-image-sales-score.md` and `category-template-benchmark-gate.md`.
+Use this workflow as the default for WB phone main images. It defines the reusable generation prompt, deterministic Russian copy composition, visual review and rollout gate. Pair it with `phone-main-image-sales-score.md` and `category-template-benchmark-gate.md`.
+
+Exception: when `phone-new-master-production-standard.md` and the active pointer lock `EXACT_MASTER_TEST` plus `DIRECT_FULL_TEXT_IMAGEGEN`, that mode overrides sections 2 and 3. Generate each complete text-bearing page directly from the single approved master; do not produce a text-free base or add copy afterward.
 
 ## 1. Lock SKU truth and benchmark
 
@@ -11,6 +13,8 @@ For the current seller-refurbished phone program, `24-hour dispatch` and the inc
 Capture the active competitor/reference main image and score it with the same 100-point rubric. A new-category prototype must also pass `category-template-benchmark-gate.md` before batch use.
 
 ## 2. Generate a clean product-first base
+
+This section applies only when no approved, more-specific production mode overrides it.
 
 Generate a new commercial base rather than placing a few boxes over the old main image. Use the latest online-matching source image only to identify the correct hardware/color; do not use an intermediate rejected version.
 
@@ -33,6 +37,8 @@ thumbnail must recognize the exact model and color immediately.
 Adapt the palette to the handset color so the batch has variation while retaining one visual system. Do not let blue, purple, magenta and red compete at equal strength. Dark phones require a controlled bright edge/halo.
 
 ## 3. Add copy deterministically after generation
+
+This section applies only when no approved, more-specific production mode overrides it.
 
 Treat AI-generated text as unusable. Add all Russian copy, icons and cards with deterministic layout/compositing tools after the base image is accepted.
 
