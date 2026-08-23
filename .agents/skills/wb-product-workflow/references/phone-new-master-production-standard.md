@@ -28,7 +28,9 @@ The authoritative pointer is `data/template_registry/phone_new_master/active_tes
 - Multiple references may be combined only when the user explicitly asks for design exploration or synthesis.
 - Never describe a synthesis result as an exact-master reproduction.
 - A synthesis result cannot become the rollout master without a separate user approval and master lock.
-- Use `BASE_PLUS_DETERMINISTIC_COPY` so the visual scene can be explored without trusting generated buyer-facing text.
+- Use `DIRECT_FULL_TEXT_IMAGEGEN` for every page. The generator must create the product, scene, typography, labels and buyer-facing Russian copy as one finished bitmap request.
+- Do not create text-free bases, blank information cards, semi-finished compositions, deterministic text overlays, or a post-generation typography pass during `DESIGN_SYNTHESIS`. Cropping/resizing for technical validation may not change the composition or add content.
+- Treat image quality, art direction, integrated typography and product truth as the primary synthesis criteria. If generated copy is malformed, regenerate only that complete page with a targeted correction; never repair the text by compositing over the image.
 - Register the prompt package and page contract with `register-design`, then obtain explicit approval through `approve-design` before any image-generation call.
 - After all expected pages pass design QA and the user approves the complete set, use `promote-design` to hash and register those exact files as a pending `USER_COMPLETE_SET`. The pointer then enters `EXACT_MASTER_TEST` at `WAITING_MASTER_APPROVAL`; a separate `approve-master` action is still required before SKU adaptation.
 
@@ -43,7 +45,7 @@ python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py a
 python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py promote-design --master-dir <APPROVED_8_PAGES> --expected-pages 8 --contract-path <CONTRACT>
 ```
 
-## Locked generation method for the active exact-master test
+## Locked generation method for design synthesis and the active exact-master test
 
 Use `DIRECT_FULL_TEXT_IMAGEGEN`. Generate each final page, including its complete Russian copy, as one image-generation request. Do not generate text-free bases, blank text boxes, or semi-finished pages; do not add text afterward with overlays or deterministic copy composition. This rule overrides the default base-plus-copy method in `phone-main-image-production-workflow.md` for this mode.
 

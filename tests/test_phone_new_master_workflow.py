@@ -84,6 +84,10 @@ class PhoneNewMasterWorkflowTests(unittest.TestCase):
     def test_waiting_design_pointer_is_valid(self):
         self.assertEqual([], MODULE.validate_payload(self.root, self.design_pointer()))
 
+    def test_design_synthesis_uses_direct_full_text_generation(self):
+        self.assertEqual(MODULE.EXACT_GENERATION_MODE, MODULE.DESIGN_GENERATION_MODE)
+        self.assertEqual("DIRECT_FULL_TEXT_IMAGEGEN", self.design_pointer()["generationMode"])
+
     def test_design_authorization_requires_approved_brief(self):
         pointer = self.design_pointer()
         pointer["generationAuthorized"] = True

@@ -18,7 +18,7 @@ EXACT_MODE = "EXACT_MASTER_TEST"
 DESIGN_MODE = "DESIGN_SYNTHESIS"
 MODES = {EXACT_MODE, DESIGN_MODE}
 EXACT_GENERATION_MODE = "DIRECT_FULL_TEXT_IMAGEGEN"
-DESIGN_GENERATION_MODE = "BASE_PLUS_DETERMINISTIC_COPY"
+DESIGN_GENERATION_MODE = "DIRECT_FULL_TEXT_IMAGEGEN"
 GENERATION_MODES = {
     EXACT_MODE: EXACT_GENERATION_MODE,
     DESIGN_MODE: DESIGN_GENERATION_MODE,
@@ -322,6 +322,7 @@ def cmd_register_design(args: argparse.Namespace) -> int:
     write_json(lock_path, lock)
     pointer.update(
         {
+            "generationMode": DESIGN_GENERATION_MODE,
             "status": "WAITING_DESIGN_APPROVAL",
             "designLockPath": rel(root, lock_path),
             "generationAuthorized": False,
