@@ -20,7 +20,7 @@ WB Store Manager provides:
 - dry-run-first listing, price, media, warehouse, and stock operations;
 - live readback and buyer-perspective audits after publication;
 - daily snapshots, funnel analysis, question review, and evidence reports;
-- a reusable `wb-product-workflow` Codex Skill with four fixed workflows;
+- a reusable `wb-product-workflow` Codex Skill with six fixed workflows;
 - local audit artifacts without committing tokens or private business data.
 
 ## Multi-store read-only intelligence
@@ -69,11 +69,15 @@ flowchart LR
     W --> P["Listing and optimization"]
     W --> M["Images and video"]
     W --> R["Periodic review"]
+    W --> FN["Financial reporting"]
+    W --> FD["Funding actions"]
 
     D --> A["API and portal evidence"]
     P --> A
     M --> C["Media generation and review"]
     R --> N["Analysis and reports"]
+    FN --> N
+    FD --> G
 
     A --> G["Explicit approval gate"]
     C --> G
@@ -93,6 +97,8 @@ Every path converges on the same safety contract: prepare evidence, stop for app
 | Listing and optimization | sync, confirm, pricing, media, validate, approve, publish, readback, buyer audit, archive | Validated and readback-confirmed sellable SKU |
 | Media | facts, brief, generate, review, approve, upload, readback, archive | Approved image/video package with live verification |
 | Periodic review | collect, compare, diagnose, recommend, report, archive | SKU/store decisions with confidence and next actions |
+| Financial reporting | collect, backfill, reconcile, calculate, verify, report, archive | Completed-order report with explicit data-completeness status |
+| Funding actions | preflight, plan, approve, execute, readback, archive | Exact approved advertising funding action with balance readback |
 
 The workflow state tool makes long tasks resumable and blocks out-of-order completion:
 
@@ -146,12 +152,55 @@ python -m wb_manager pricing quarantine --nm-id 123456789
 
 Live write commands must be reviewed as dry runs and approved for exact SKUs/nmIDs, values, and stores. After execution, keep the request, response, delayed readback, and final status together.
 
+## Completed-order finance
+
+The finance module maintains one local, append-only ledger for every enabled owner store. Its credential-free registry is [`config/finance/stores.json`](config/finance/stores.json): the current `owner-store` and `new-store` entries are both enabled, and every future store is included automatically after adding a unique `alias`, opening date, credential **variable names**, local token-file path, and currency. Never put a token value in the registry or Git.
+
+The six finance commands are:
+
+```powershell
+# First run: all available history from each store opening through yesterday
+python -m wb_manager finance bootstrap
+
+# Daily repair/sync; the local schedule runs this at 09:30 Asia/Shanghai
+python -m wb_manager finance daily
+
+# Append an approved historical cost version; a date starts at Moscow 00:00
+python -m wb_manager finance cost-import --quote "E:\path\approved-quote.xlsx" --effective-from 2026-07-04 --approved-by "operator-name" --rub-per-cny 11.5
+
+# Create or restate a bootstrap, weekly, or monthly report
+python -m wb_manager finance report --kind weekly --period auto
+
+# Plan-only calculation from a FINAL or RESTATED weekly report
+python -m wb_manager finance funds-plan --report-id "weekly-report-id"
+
+# Record the exact immutable advertising-deposit plan as a dry-run proposal
+python -m wb_manager finance ads-deposit --plan "E:\path\approved-plan.json" --approved-by "operator-name"
+
+# After reviewing that recorded proposal, approve and execute the exact same fingerprint
+python -m wb_manager finance ads-deposit --plan "E:\path\approved-plan.json" --approved-by "operator-name" --confirm-live
+```
+
+The 09:30 daily run backfills missed dates before syncing yesterday. The first report is cumulative from store opening; ordinary weekly reports cover the prior Monday through Sunday, and ordinary monthly reports cover the prior calendar month. `PENDING_DATA` means required settlement or store evidence is still incomplete, `FINAL` means every completeness gate passed, and `RESTATED` is a new immutable correction linked to an earlier final report. A report is delivered as three matching artifacts: canonical JSON, Simplified-Chinese Markdown, and a verified XLSX workbook.
+
+Financial calculation is fail-closed:
+
+- purchase cost uses the cost version effective when the order was created;
+- return logistics comes from actual linked WB finance rows—there is no fixed 8/16 CNY fallback;
+- the managed-operations fee is 2% and the combined advertising-and-return pool is 3%; return logistics consumes the pool first and actual campaign spend is reconciliation-only, never a second deduction;
+- the first cumulative history is informational and creates no retroactive funding obligation; afterward `suggested withdrawal = max(0, platform available balance - post-activation unallocated advertising accrual - approved/executing unread advertising deposits - other locked funds)`;
+- withdrawal is a plan-only amount and remains a manual seller-portal action because WB has no supported public withdrawal API;
+- advertising funding is the only supported money write. The immutable plan freezes store, campaign, CNY amount, source balance and evidence time, the ledger-derived advertising reserve, approver, approval time, and expiry. `policyCapCny` is not self-declared: it must exactly equal that current ledger-derived reserve under the active finance policy;
+- the first command records a `proposed` ledger event and never writes to WB. `--confirm-live` requires that exact prior proposal, records the approval transition under the store funds lock, then rechecks campaign ownership/status, campaign budget, same-token seller-balance currency, source balance, policy cap, and reserve before the single non-retried POST;
+- an unknown POST outcome triggers one immediate read-only campaign-budget check. Later calls with the same fingerprint remain readback-only—never another POST—until the expected budget delta is confirmed or the action remains `unknown`.
+
 ## What it covers
 
 - Content: cards, trash, errors, tags, limits, characteristics, listing packages.
 - Prices: live reads, upload tasks, quarantine, account-currency validation, delayed readback.
 - Marketplace: warehouses, FBS orders, stock planning, exact-barcode verification.
 - Analytics and statistics: stock, orders, sales, sales funnel, store snapshots.
+- Finance: multi-store completed-order ledger, historical costs, return reconciliation, weekly/monthly owner reports, withdrawal plans, and approval-gated advertising funding.
 - Customer experience: unanswered questions, buyer-risk review, post-publish audit.
 - Media: staged image sets, ordering, scoring, upload planning, live verification, promo video workflow.
 - Codex operations: fixed workflow routing, approval gates, resumable state, evidence archiving.

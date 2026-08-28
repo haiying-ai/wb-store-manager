@@ -9,6 +9,7 @@ from pathlib import Path
 from .barcode import generate_and_attach_barcode
 from .client import WbApiError, WbClient
 from .config import ConfigError, load_settings
+from .finance_cli import add_finance_parser, dispatch_finance
 from .image_workflow import create_image_prompts, create_main_image_workspace, inspect_external_inbox
 from .kb import sync_knowledge_base
 from .listing import publish_listing, validate_listing
@@ -108,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     ops_daily.add_argument("--date", default="today", help="YYYY-MM-DD or today")
     ops_daily.add_argument("--snapshot-file", help="Optional snapshot JSON to summarize")
 
+    add_finance_parser(sub)
+
     args = parser.parse_args(argv)
 
     try:
@@ -124,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _dispatch(args: argparse.Namespace) -> int:
+    if args.command == "finance":
+        return dispatch_finance(args)
+
     if args.command == "summary":
         path = latest_snapshot() if not args.file else Path(args.file)
         if path is None:

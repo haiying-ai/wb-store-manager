@@ -1,6 +1,6 @@
 ---
 name: wb-product-workflow
-description: Run end-to-end Wildberries/WB product and store operations from local source material through pricing, listing, media, publication readback, buyer audit, daily reporting, and periodic review. Use for WB daily operations, new listings, listing optimization, pricing, FBS sale readiness, images, videos, buyer questions, funnel analysis, store reports, or requests to prepare listings using the verified V2 SKU logic ("V2版本SKU逻辑").
+description: Run end-to-end Wildberries/WB product and store operations from local source material through pricing, listing, media, publication readback, buyer audit, daily reporting, financial reporting, funding actions, and periodic review. Use for WB daily operations, new listings, listing optimization, pricing, FBS sale readiness, images, videos, buyer questions, funnel analysis, store or financial reports, withdrawals, advertising top-ups, or requests to prepare listings using the verified V2 SKU logic ("V2版本SKU逻辑").
 ---
 
 # WB Product Workflow
@@ -9,7 +9,9 @@ Use this skill for Wildberries/WB product work rooted at `E:\电商运营\01平�
 
 ## Fixed Workflow Router
 
-Classify each request as `daily`, `listing`, `media`, or `review`. Read `references/fixed-workflows.md`, create or resume its workflow state, and then load only the domain references needed for that flow. Use spreadsheet, document, browser, image, and video skills as execution tools without weakening WB truth, approval, visual-review, or readback gates.
+Classify each request as `daily`, `listing`, `media`, `review`, `finance`, or `funding`. Read `references/fixed-workflows.md`, create or resume its workflow state, and then load only the domain references needed for that flow. Use spreadsheet, document, browser, image, and video skills as execution tools without weakening WB truth, approval, visual-review, financial-completeness, or readback gates.
+
+For completed-order profit, weekly or monthly finance reports, return-charge reconciliation, managed-operations fees, withdrawals, or advertising funding, first read `references/financial-reporting.md`. Keep the read-only `finance` flow separate from the side-effecting `funding` flow. A finance report may propose a withdrawal or advertising top-up, but it must never execute either action implicitly.
 
 For every request to test, create, replace, resume, or inspect a **new smartphone image master**, first read `references/phone-new-master-production-standard.md`, then run `python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py status` and `validate`. The active pointer is authoritative across conversations. Resume it before selecting an SKU or creating any workflow. Never silently replace its pilot, source set, production mode, or task ID. When the user asks to design a new master first, use the tracked `DESIGN_SYNTHESIS` brief/approval stage; only a separately approved complete design set may be promoted into `EXACT_MASTER_TEST`.
 
@@ -32,6 +34,8 @@ Each category uses:
 - `02生成资料`: working reviews, pricing, prompts, image batches, and inboxes.
 - `03上线资料`: confirmed listing package and WB audit responses.
 - `04运营资料`: operations snapshots and reports.
+
+Store-wide and multi-store finance ledgers and reports belong under `E:\电商运营\03运营数据\WB财务`; do not place them inside one SKU or category package.
 
 Read `references/directory-protocol.md` before changing folder behavior.
 Read `references/live-state-sync.md` before or immediately after any WB live write, readback, or follow-up operation that depends on live identifiers.
@@ -138,6 +142,14 @@ For every change to this Skill package, also mirror the complete project package
    - Save a timestamped evidence report to `E:\电商运营\01平台资料\01WB\<category>\04运营资料\`; include data period, currency/region, source status, facts, inferences, and proposed actions. Never include tokens.
    - The fixed daily report is read-only and must collect the funnel, search, warehouse, price-readback, error-card, feedback/question, order/sale, advertising, promotion, inventory, and history status surfaces. Keep failed or rate-limited sources visible with HTTP status; never replace missing data with zero.
    - For Analytics Sales Funnel v3, use its current official request contract: `nmIds`, `subjectIds`, `tagIds`, required `orderBy`, `limit`, and `offset`; do not send legacy capitalized filter names or unrelated cursor fields. For per-product history, send `nmIds` in batches of at most 20. Honor the 20-second Analytics interval and do not accept a report as complete unless the core funnel read is HTTP 200.
+
+13. Reconcile completed-order finances.
+   - Read `references/financial-reporting.md` and use the `finance` flow for daily ingestion, first-run bootstrap, weekly reports, and monthly reports.
+   - Apply the purchase-cost version effective at the order creation timestamp. Never value an old order with today's cost merely because it completed or settled later.
+   - Read actual return-logistics deductions from WB financial rows linked to the order. Never assume that a return costs 8 CNY, 16 CNY, or any other fixed amount.
+   - Calculate the managed-operations fee at 2% and the combined advertising-and-return pool at 3% under the active financial policy. Allocate `advertisingBudget = max(0, combinedPool - actualReturnLogistics)`; actual campaign spend is reconciliation evidence and must not be deducted a second time.
+   - Cover every enabled WB owner store. A missing required store, unresolved order identity, missing historical cost, unsettled financial row, or unmatched return keeps the affected period `PENDING_DATA`; never label it `FINAL`. Record a genuinely new refund as a signed negative delta in the reporting week when that refund occurs, even when the original sale belongs to an earlier week. Use `RESTATED` only when WB corrects or rewrites a financial period that was already reported, producing a new complete version of that historical period.
+   - Start a separate `funding` flow for any proposed withdrawal or advertising top-up. Require approval of the exact store/account, amount, currency, source balance, destination or campaign, and evidence timestamp, then read back the resulting balance. WB withdrawal has no supported public API and remains a manual seller-portal action.
 ## V2 SKU Listing Logic
 
 When the user requests `按 V2 版本 SKU 逻辑` (or `V2 SKU`), treat it as the validated phone-new-SKU listing path. Read `references/phone-v2-sku-listing-logic.md` before planning, generating, reviewing, or publishing. Reuse its current live template and gates; do not reinterpret it as inspiration or create a new visual style.
@@ -234,6 +246,7 @@ Before saying a product is sellable, verify:
 - `references/live-state-sync.md`
 - `references/operations-analytics.md`
 - `references/daily-report-template-v2.md`
+- `references/financial-reporting.md`
 - `references/buyer-perspective-post-publish-audit.md`
 - `references/github-ssh.md`
 - `references/dual-repository-sync.md`

@@ -1,6 +1,6 @@
 # Fixed WB Workflows
 
-Use one of four resumable flows. Keep the state file with the task artifacts and update it after every material stage.
+Use one of six resumable flows. Keep the state file with the task artifacts and update it after every material stage.
 
 ## Daily operations (`daily`)
 
@@ -43,6 +43,26 @@ Use one of four resumable flows. Keep the state file with the task artifacts and
 - Identify cold-start products before diagnosing low conversion.
 - Produce SKU/store decisions, owners, target dates, and evidence paths.
 - Start a separate approval-gated task for every recommended mutation.
+
+## Financial reporting (`finance`)
+
+`collect -> backfill -> reconcile -> calculate -> verify -> report -> archive`
+
+- This flow is read-only. It may ingest and normalize financial evidence but must not withdraw money, fund advertising, or mutate a campaign.
+- On the first run, backfill every enabled store from its opening date through the reporting cutoff. Later runs resume from the durable watermark and recover every missed day before processing the nominal period.
+- Reconcile completed orders, financial settlements, returns, actual return-logistics deductions, purchase-cost versions, and advertising evidence before calculating profit.
+- Mark a period `PENDING_DATA`, never `FINAL`, while a required store, order identity, historical cost, return charge, or settlement row is unresolved. Use `RESTATED` only for a later complete replacement version after all completeness gates pass.
+- A weekly report may produce a funding plan; execution always starts a separate `funding` flow.
+
+## Funding actions (`funding`)
+
+`preflight -> plan -> approve -> execute -> readback -> archive`
+
+- Treat withdrawals and advertising top-ups as money-moving mutations, never as an automatic continuation of a report.
+- Freeze the exact store/account, currency, amount, source balance, destination or campaign, policy caps, and preflight evidence before approval.
+- Record the approving actor before passing `approve`; reject stale balances, changed scope, or an amount outside the approved plan.
+- Execute only a currently supported route. WB withdrawal has no supported public API and must remain a manual seller-portal step.
+- Read back the account or campaign balance and archive request, response, manual evidence, and any discrepancy before completion.
 
 ## State commands
 

@@ -7,7 +7,7 @@ Profitability is a hard gate. Do not treat a source-material price as a planned 
 For each category, keep four groups separate:
 
 1. Product cost: confirmed purchase cost in one settlement currency.
-2. Variable sale costs: each percentage of the buyer-paid price, such as WB commission, managed-operations commission, advertising reserve, return-risk reserve, payment fee, and taxes only when actually applicable.
+2. Variable sale costs: each percentage of the buyer-paid price, such as WB commission, managed-operations commission, one combined advertising-and-return pool, payment fee, and taxes only when actually applicable.
 3. Fixed per-unit costs: logistics, packaging, inspection, storage, or one consolidated amount. Never count an item both as a fixed cost and a percentage reserve.
 4. Profit target: fixed profit per unit or target net-margin rate. Record whose profit it is; a managed-operations commission is revenue to the operator but a cost in the product owner's profit calculation.
 
@@ -38,19 +38,37 @@ Use account-specific portal tariffs and actual settlement reports over generic A
 
 The current phone model is owner-profit accounting for WB FBS smartphones under the Hong Kong seller account.
 
+Active policy ID: `phone-hk-fbs-20260828-v5`
+
+Canonical machine-readable source: `config/pricing/active_phone_pricing_policy.json`.
+
+Active multi-store pricing scope ID: `phone-wb-two-store-20260821-v1`.
+
+Canonical store-scope source: `config/pricing/active_phone_pricing_store_scope.json`.
+
+From 2026-08-21 onward, every smartphone price-strategy change applies to both required WB stores: `owner-store` and `new-store`. Each store has its own SKU catalog and nmIDs, so one formula/strategy change must produce separate per-store plans rather than reuse one store's upload payload. Preflight both stores before any write, present per-store SKU counts in one approval request, include zero-stock phone SKUs by default, block and report unmatched SKUs, and read back both stores independently. WB has no cross-account transaction, so a partial write failure must be reported immediately and never described as two-store completion.
+
+Before any phone profit calculation, recommendation, dry-run, or live write, run `python tools/validate_active_pricing_policy.py` and load the canonical JSON through `wb_manager.pricing_policy.load_active_phone_policy()`. Values written in older scripts, spreadsheets, reports, chats, or archived run folders are historical evidence only and must never override the active policy. If validation fails, stop; there is no fallback formula.
+
 Variable costs based on buyer-paid price:
 
-- WB FBS smartphone commission: 5%
+- WB FBS smartphone commission: 15%
 - managed-operations commission: 2%
-- advertising reserve: 2%
-- return-risk reserve: 2%
+- advertising-and-return combined pool: 3%
 - payment/withdrawal reserve: 0.8%
-- total variable rate: 11.8%
-- retained-price factor: 88.2% (`0.882`)
+- total variable rate: 20.8%
+- retained-price factor: 79.2% (`0.792`)
 
 Fixed cost:
 
 - 12 CNY per unit, represented as 138 RUB at the template rate of 11.5 RUB/CNY.
+
+Advertising and return allocation:
+
+- do not display or calculate a separate return-risk percentage line;
+- every returned/cancelled order consumes the actual signed return-logistics charge read from its WB finance rows; never assume 8 or 16 CNY;
+- the remaining pool is the advertising expense;
+- deduct the combined 3% pool once only: never add the same 8 CNY return logistics again outside the pool or inside fixed operations.
 
 Explicit exclusions:
 
@@ -60,13 +78,15 @@ Explicit exclusions:
 
 Profit target:
 
-- 220 CNY per unit for the product owner;
+- 80 CNY per unit for the product owner;
 - the 2% managed-operations commission is separately retained as operator service revenue.
 
 Final phone equations:
 
-- `ownerNetProfitCny = buyerPriceCny * 0.882 - purchaseCostCny - 12`
-- `minimumBuyerPriceCny = (purchaseCostCny + 12 + 220) / 0.882`
+- `ownerNetProfitCny = buyerPriceCny * 0.792 - purchaseCostCny - 12`
+- `minimumBuyerPriceCny = (purchaseCostCny + 12 + 80) / 0.792`
 - with the current planned 40% WB discount: `wbUploadPriceCny = ceil(minimumBuyerPriceCny / 0.60)`
 
-These values are business decisions as of 2026-07-12. Recalibrate them from live commission, settlement, advertising, return, and logistics data rather than silently carrying them into unrelated categories.
+The 15% smartphone commission took effect in the confirmed 2026-07-22 repricing plan and supersedes the 5% / 0.892 policy from 2026-07-19. Recalibrate these values from live commission, settlement, advertising, return, and logistics data by publishing a new versioned policy file; never edit historical policy evidence in place.
+
+The 2026-08-28 v5 allocation keeps advertising and returns in one 3% pool. Actual WB finance rows determine the return/cancellation logistics charge; the remainder of the pool is advertising provision. There is no separate return-risk line, fixed 8/16 CNY assumption, or extra logistics deduction outside the pool. Total variable rate remains 20.8%, and the retained-price factor remains 0.792, so this evidence rule does not itself require a live price change. Actual order-profit reporting is governed separately by `config/finance/active_phone_financial_reporting_policy.json`.

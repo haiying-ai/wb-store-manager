@@ -4,12 +4,21 @@
 
 At the `E:\电商运营` root, use `00共享资料` for cross-platform product facts/assets, `01平台资料\02OZON` for Ozon materials, `02店铺资料` for store assets, and `03运营数据` for normalized multi-store reports. Do not place new WB categories directly under `E:\电商运营`.
 
+Use `E:\电商运营\03运营数据\WB财务` for store-wide financial evidence and reports. Keep it local and Git-ignored. The stable layout is:
+
+- `ledger\<store_id>\raw\<YYYY-MM-DD>`: immutable, timestamped WB responses and source-status manifests.
+- `ledger\<store_id>\normalized`: the idempotent completed-order ledger, return links, settlement rows, cost-version references, and durable collection watermark.
+- `runs\<task_id>`: workflow state, reconciliation diagnostics, funding plans, approvals, execution evidence, and readbacks.
+- `reports\weekly\<period>` and `reports\monthly\<period>`: per-store detail plus consolidated owner reports.
+
+Never mix stores in raw evidence, overwrite an earlier response, or store tokens. Consolidate only normalized records that retain their `store_id`, source identity, status, and evidence path.
+
 Required folders:
 
 - `00知识库`: generated facts, source manifest, asset index, manual overrides, missing facts, change log.
 - `01来源资料`: original source files. Never modify source files in place.
 - `02生成资料`: generated reviews, pricing packages, image workspaces, prompts, and external inboxes.
 - `03上线资料`: confirmed listing package, WB payloads, live responses, and audit logs.
-- `04运营资料`: daily operations reports and snapshots.
+- `04运营资料`: category-scoped daily operations reports and snapshots; do not use it as the canonical cross-store financial ledger.
 
 Keep generated batches timestamped. Promote materials into `03上线资料` only after the relevant gate passes.

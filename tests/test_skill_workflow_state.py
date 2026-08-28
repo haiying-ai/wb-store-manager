@@ -37,3 +37,22 @@ def test_approval_requires_actor():
     assert any("approved_by" in error for error in module.validate_state(state))
     state["stages"]["approve"]["approved_by"] = "user"
     assert module.validate_state(state) == []
+
+
+def test_finance_skill_uses_canonical_report_lifecycle_and_accounting_terms():
+    skill_root = SCRIPT.parents[1]
+    sources = [
+        skill_root / "SKILL.md",
+        skill_root / "references" / "fixed-workflows.md",
+        skill_root / "references" / "financial-reporting.md",
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in sources)
+
+    assert "`PENDING_DATA`" in combined
+    assert "`FINAL`" in combined
+    assert "`RESTATED`" in combined
+    assert "`DRAFT`" not in combined
+    assert "`PARTIAL`" not in combined
+    assert "actual return-logistics" in combined.lower()
+    assert "2%" in combined
+    assert "3%" in combined

@@ -5,7 +5,7 @@ Reusable WB platform logic is maintained in two GitHub repositories:
 - `haiying-ai/wb-store-manager`: executable WB implementation and the detailed WB product workflow Skill;
 - `haiying-ai/store-manager-ru`: multi-platform/multi-store wrapper, onboarding documentation and its canonical marketplace Skill.
 
-Whenever changing WB authentication, permissions, directory contracts, category onboarding gates, listing/media/price/stock workflows, safety requirements or readback/completion rules:
+Whenever changing WB authentication, permissions, directory contracts, category onboarding gates, listing/media/price/stock workflows, financial reporting, scheduled financial ingestion, money-moving actions, safety requirements or readback/completion rules:
 
 1. update the project-level package at `E:\CodexWorks\WB\.agents\skills\wb-product-workflow`;
 2. mirror that complete package to `C:\Users\孙兵\.agents\skills\wb-product-workflow` and run `python .agents/skills/wb-product-workflow/scripts/sync_wb_skill_layers.py check`; zero missing or hash-mismatched project files is a release gate;

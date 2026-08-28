@@ -10,6 +10,8 @@ class ApiDomain(StrEnum):
     STATISTICS = "https://statistics-api.wildberries.ru"
     ANALYTICS = "https://seller-analytics-api.wildberries.ru"
     ADVERTISING = "https://advert-api.wildberries.ru"
+    FINANCE = "https://finance-api.wildberries.ru"
+    RETURNS = "https://seller-analytics-api.wildberries.ru"
     FEEDBACKS = "https://feedbacks-api.wildberries.ru"
     COMMON = "https://common-api.wildberries.ru"
 

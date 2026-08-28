@@ -22,6 +22,7 @@ wb_*probe.ps1
 *.local.json
 config/store-intelligence.local.json
 config/store-intelligence.tokens.local.env
+config/wb-new-store.local.env
 data/store_intelligence/
 *.store-intelligence.raw.json
 tmp_*.py

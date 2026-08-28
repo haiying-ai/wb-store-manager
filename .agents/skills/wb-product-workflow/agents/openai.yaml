@@ -1,4 +1,4 @@
 interface:
   display_name: "WB Product Workflow"
   short_description: "Run safe, resumable WB product and store workflows"
-  default_prompt: "Use $wb-product-workflow to run a daily, listing, media, or review workflow with approval and readback gates."
+  default_prompt: "Use $wb-product-workflow to run a daily, listing, media, review, finance, or funding workflow with completeness, approval, and readback gates."
