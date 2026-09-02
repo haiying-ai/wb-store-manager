@@ -1,52 +1,193 @@
-# WB Financial Reporting
+# WB Financial Analysis Methodology
 
-Use this contract for completed-order accounting, first-run financial bootstrap, daily financial ingestion, weekly and monthly reports, return-charge reconciliation, managed-operations fees, withdrawals, and advertising funding. Financial reports are read-only. Any movement of money is a separate `funding` workflow.
+This document is the reusable public method layer for WB financial analysis.
+It describes evidence governance, reconciliation, reporting, and funding
+boundaries only. Seller-specific prices, cost tables, exchange rates, rates,
+thresholds, account identifiers, and credentials belong in the private active
+policy/configuration and must not be copied into this Skill, source code,
+documentation, logs, or a public repository.
 
-## Store scope and periods
+The runtime calculator loads the active approved policy at execution time.
+This document never replaces that policy and intentionally contains no
+seller-specific calculation constants or price equations.
 
-- Enumerate every enabled WB owner store from the active store registry on every run. Do not hard-code the current two stores; a newly enabled store joins the next collection and report automatically.
-- Keep credentials, raw responses, watermarks, normalized rows, and source status isolated by `store_id`. Consolidate only after each store-level calculation passes.
-- The daily collector records newly available completed orders and return/settlement changes. Resume from the last durable successful watermark and backfill every missed calendar day after network, permission, or scheduler failure. Re-fetch unresolved orders until their finance evidence settles; idempotent upserts must not duplicate orders or charges.
-- A normal weekly report runs Monday for the prior Monday-through-Sunday period. A normal monthly report runs on day 1 for the prior calendar month. Derive the current date, cutoff, and half-open period boundaries from the actual current clock plus the configured scheduler and business timezones; never select a period from a user-described weekday or date label when it conflicts with those values.
-- The first successful financial run is a bootstrap from each store's opening date through the cutoff, not only the prior week. The first monthly report also covers opening-to-cutoff history and must be labelled as a bootstrap rather than an ordinary one-month comparison.
+## Operating boundary and flow
 
-## Source precedence and order identity
+Use the read-only `finance` flow for:
 
-- Preserve immutable raw evidence and source status. Normalize by store plus stable WB order/sale/settlement identities; retain every source identifier and evidence path needed to reproduce a row.
-- Use completed orders as the reporting population, then link sales, returns, cancellations, financial settlements, logistics, commissions, and advertising evidence. Never join across stores.
-- Platform financial rows and confirmed settlement readbacks take precedence over a template assumption. Statistics or order APIs can establish lifecycle facts but cannot replace settlement amounts.
-- Select purchase cost from the version whose effective interval contains the order creation timestamp. Completion, sale, return, report, or settlement time must not switch an old order to a newer cost.
-- A return fee is the sum of actual linked return-logistics deductions in WB financial rows. Never default to 8 CNY, 16 CNY, one row, or two rows. If a return exists but the charge is missing, unsettled, duplicated, or cannot be linked confidently, keep the order and report non-final.
+`collect -> backfill -> reconcile -> calculate -> verify -> report -> archive`
 
-## Calculation contract
+Use a separate `funding` flow for any money-moving action:
 
-For every order, retain both the amount and evidence source for buyer-paid revenue, purchase cost, WB commission and logistics, payment/withdrawal cost, managed-operations fee, combined advertising-and-return pool, actual return logistics, advertising allocation, and owner profit.
+`preflight -> plan -> approve -> execute -> readback -> archive`
 
-- Managed-operations fee: `max(0, netRetainedBuyerPaidTurnover) * 2%`, using the signed settlement evidence defined by the active financial policy.
-- Combined advertising-and-return pool: `max(0, netRetainedBuyerPaidTurnover) * 3%`.
-- Return logistics: the actual linked WB financial deduction, never an assumed percentage or fixed amount.
-- Advertising allocation: `max(0, combinedPool - actualReturnLogistics)`.
-- Combined pool expense used in owner profit: `actualReturnLogistics + advertisingAllocation`, which equals the 3% pool unless actual return logistics exceed it.
-- Actual campaign spend is reported as reconciliation evidence against the advertising allocation. Do not deduct it again from owner profit after the combined pool has already been charged.
-- Use the active financial policy for all other components and rounding. Show planned/template values separately from actual settlement values; never silently mix them in one column.
+A report may expose a proposed allocation, but publishing a report never
+executes a withdrawal, advertising deposit, or campaign mutation.
 
-The order-detail report must expose order creation/completion dates, store, SKU/nmID, stable source identities, lifecycle/return state, revenue, selected cost version, every expense, profit, completeness status, and evidence links. Weekly and monthly summaries must show per store and consolidated totals for revenue, purchase cost, WB/platform costs, owner profit, 2% managed-operations fee, actual return fee, advertising allocation, actual campaign-spend reconciliation, and unresolved amounts.
+## Store scope and time
 
-## Report gates
+- Discover every enabled WB owner store from the active registry on every run;
+  do not hard-code a store list.
+- Keep tokens, raw responses, watermarks, normalized rows, evidence, and
+  status isolated by store. Calculate each store first and consolidate only for
+  display; funding and withdrawal decisions remain store-specific.
+- Use the configured business timezone for financial event periods and the
+  configured scheduler timezone for trigger dates. A weekly report covers the
+  preceding complete Monday-to-Sunday period. A monthly report covers the
+  preceding complete calendar month.
+- The first initialization backfills from each store's effective opening point
+  through the cutoff. The first monthly publication includes both the
+  ordinary month view and an explicitly labelled opening-to-cutoff cumulative
+  view.
 
-- Status is `FINAL` only when every required store was collected and every in-scope order has a resolved identity, applicable historical cost, settled revenue/fee evidence, and reconciled return status.
-- Use `PENDING_DATA` whenever collection is unfinished, a required source is missing, or any in-scope row remains unresolved. Missing or unavailable values remain unavailable; never convert them to zero.
-- A genuinely new refund event belongs to the reporting period in which the refund occurs. Record its signed negative delta in that current refund week, even if the linked sale was reported in an earlier week; the new refund alone does not restate the earlier sale period.
-- Use `RESTATED` only when WB later corrects, rewrites, or reassigns evidence for a financial period that was already reported. Produce a new complete version of that same historical period, preserve the earlier `FINAL` or `RESTATED` version, and expose the difference; never overwrite it.
-- A failure in one store may still produce clearly labelled per-store evidence, but the consolidated report cannot be `FINAL`.
-- The weekly report includes order detail and the exact withdrawal/advertising-funding proposal, if any. The monthly owner summary states what the business completed, owner profit, and the managed-operations fee payable to the operator.
-- Archive the period, policy IDs, cost-version IDs, source coverage, watermarks, unresolved list, calculations, and report hashes so a later settlement correction is visible as a new revision rather than a silent overwrite.
+## Platform-first evidence
 
-## Funding boundary
+The platform is the transaction fact source. The local SQLite ledger is a
+persistent evidence, audit, report-history, and watermark store; it is not a
+substitute for a newer platform response.
 
-- A report never moves money. Create a separate `funding` state and fresh preflight for each withdrawal or advertising top-up.
-- Approval must name the exact store/account, currency, amount, source balance, destination or campaign, policy cap, and evidence timestamp. Any changed balance, target, amount, or stale preflight invalidates the approval.
-- An advertising top-up is two-stage: first persist an exact read-only dry-run proposal, then accept a separate live confirmation for that same fingerprint. A one-shot live call without the prior proposal is forbidden. The governed per-action cap comes from the current post-activation unallocated advertising reserve; it is not a caller-supplied number, and pre-activation deposits never consume that reserve.
-- WB withdrawal has no supported public API. Provide the exact manual seller-portal step and wait for balance readback or settlement evidence; never claim automatic withdrawal.
-- Advertising funding may use an official supported endpoint only when the same-store token proves the current seller-account currency and the current campaign, source balance, amount, reserve cap, and permission all pass preflight. Unknown or unsupported response shapes fail closed. Otherwise use a manual instruction. Never reuse an approval across stores or campaigns.
-- After execution or the user's manual action, read back the same account/campaign balance, compare expected and observed deltas, archive evidence, and keep the flow blocked on any mismatch. An ambiguous write may only enter a readback-only resolution path; it must never send another top-up automatically.
+Source precedence is:
+
+1. WB official financial and settlement rows;
+2. WB official order, lifecycle, return, and cancellation state;
+3. effective-dated private cost, price-policy, and reporting-policy records;
+4. live prices and balances as reconciliation or execution-time evidence.
+
+Preserve the raw payload, source timestamp, stable source identifier, request
+coverage, and response status. A failed, unauthorized, rate-limited, or
+ambiguous source remains visible as an open item; it must not become a zero.
+
+## Synchronization and replay
+
+- Resume each source from its durable successful watermark and backfill missed
+  dates before calculating a period.
+- Use a short ordinary correction window and a longer period-close window;
+  expand either window to the earliest known gap. An explicit bootstrap ignores
+  incremental watermarks and rereads the complete available opening history.
+- Use source-specific cursors with a boundary overlap for inclusive APIs.
+- Upsert by stable, store-scoped identities so repeated pages are idempotent;
+  preserve corrections as new evidence rather than overwriting old payloads.
+- Bound concurrency by store and platform token. Keep source throttling intact,
+  serialize stores sharing a token, and commit database writes in deterministic
+  store/source order after network reads. A transient platform failure is
+  recorded and retried by a later run, not hidden by an unbounded in-process
+  retry loop.
+
+## Order evidence and historical snapshots
+
+Group order, sale, return, cancellation, and finance rows by a stable WB
+identity such as `srid`, `orderId`, or `shkId`, always together with the store.
+Retain every contributing evidence ID and the linkage used.
+
+For each order, lock the historical snapshots that were effective when the
+order was created:
+
+- transaction selling-price evidence and its policy/version reference;
+- purchase-cost version and source;
+- reporting-policy version and component-rate snapshots.
+
+Later quote or policy changes create a new effective-dated version for later
+orders. They do not silently rewrite an earlier order. If a historical version
+is recovered or corrected, append a validation or restatement record.
+
+The order row must expose lifecycle, signed transaction amount, platform
+deductions, direct settlement amount, payment/collection costs, logistics,
+policy-derived allocations, profit components, completeness state, and source
+links. Actual platform deductions take precedence over planning estimates. A
+missing actual cannot be silently replaced by a template estimate in a
+confirmed cash figure.
+
+The exact component calculations, rounding, and rates are supplied by the
+active private financial policy. The methodology only requires that:
+
+- the transaction amount is taken from order-time platform settlement
+  evidence, not today's price, a converted display price, or the settlement
+  amount itself;
+- platform deductions and direct settlement reconcile to one another;
+- policy-derived operating and advertising/return reserves use the same
+  order-time basis and are retained with their evidence;
+- actual return logistics is linked from all applicable WB finance rows and is
+  allocated once at store-and-period scope;
+- the reserve remaining after actual return logistics is reported as the
+  advertising allocation, while any excess return loss is shown separately;
+- actual advertising spend is reconciliation evidence and is never deducted a
+  second time outside the policy reserve;
+- planned/template values and actual settlement values occupy separate fields.
+
+## Returns and period corrections
+
+A genuinely new refund or return adjustment is recognized in the period in
+which the platform posts that financial event, even when the original sale was
+reported earlier. Keep the original sale and the signed adjustment visible.
+
+Use a new `RESTATED` version only when WB later corrects, rewrites, or
+reassigns evidence for a period that was already published. Preserve the
+earlier version and show the difference. Do not manufacture a return charge
+when the platform linkage is missing; keep the row open instead.
+
+## Report publication gates
+
+- `PENDING_DATA` means evidence is incomplete. Publish the scheduled report,
+  show the open items, and keep unavailable values unavailable.
+- `FINAL` means every required store and every in-scope row has the required
+  identity, historical version, settlement evidence, and reconciled lifecycle.
+- `RESTATED` is a later auditable replacement of an already published period;
+  it never overwrites history.
+
+Settled, cash-reconciled rows may be used for confirmed allocation. Unsettled
+or unresolved rows remain visible but are excluded from confirmed cash totals.
+An incomplete auxiliary source must not hold the whole report hostage.
+
+## Funding, withdrawals, and advertising-fee debt
+
+Funding is calculated per store and is independent from order-profit history.
+The report distinguishes:
+
+- the policy-derived advertising/return reserve and the portion available for
+  advertising allocation;
+- the order-ledger allocation ceiling for withdrawal;
+- the live platform balance and the fresh execution-time funding plan;
+- confirmed historical withdrawals, pending withdrawal requests, and
+  advertising-fee debt.
+
+The live execution plan must use a fresh same-store balance readback and
+reserve/lock checks. A report balance snapshot is not an execution preflight.
+Historical withdrawals are separate cash events: a confirmed event is counted
+once in the cumulative cash adjustment, never as an order expense. A request
+reported as processing is not a settled withdrawal; keep it in a separate
+pending view until platform success or settlement evidence arrives.
+
+WB withdrawal remains a manual seller-portal action unless a supported public
+write route is independently verified. Advertising deposits, when supported,
+require an exact store/campaign/currency/amount dry run, a fresh preflight, an
+explicit approval of that same fingerprint, one execution attempt, and a
+readback. Promotional credits and other non-cash allowances are not selected
+as funding sources.
+
+If a withdrawal record does not state the advertising amount due and the
+amount withheld, mark its fee state `unknown/PENDING_DATA`; do not report a
+numeric zero. Once actual, timestamped platform advertising-payment evidence
+is available, apply it only to the same store and allocate it FIFO to eligible
+withdrawal debt, preserving unapplied amounts. Corrected fee facts are added
+as immutable correction evidence; the original user record remains intact.
+
+## Workbook and archive
+
+Maintain one canonical, append-only workbook and matching JSON/Markdown
+artifacts. Keep order detail, financial-event detail, source checks, report
+history, policy/version snapshots, funding snapshots, withdrawal records, and
+update notes in separate auditable sections. Refresh the current cumulative
+dashboard from the latest valid snapshot so corrections do not double count;
+never delete or silently replace an earlier report version.
+
+## Scheduler and safety
+
+The daily controller should sync through the last complete financial day, run
+read-only advertising-payment reconciliation, generate due weekly/monthly
+reports, and bridge the canonical workbook. Period-close runs use the longer
+repair window and publish open items on schedule. Record phase timings, source
+coverage, watermarks, hashes, and failures.
+
+No finance report may implicitly change price, stock, advertising, campaign,
+withdrawal, or account state. Any write requires a separately scoped approval,
+fresh preflight, exact readback, and archived evidence.

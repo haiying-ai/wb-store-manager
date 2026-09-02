@@ -48,11 +48,12 @@ Use one of six resumable flows. Keep the state file with the task artifacts and 
 
 `collect -> backfill -> reconcile -> calculate -> verify -> report -> archive`
 
-- This flow is read-only. It may ingest and normalize financial evidence but must not withdraw money, fund advertising, or mutate a campaign.
-- On the first run, backfill every enabled store from its opening date through the reporting cutoff. Later runs resume from the durable watermark and recover every missed day before processing the nominal period.
-- Reconcile completed orders, financial settlements, returns, actual return-logistics deductions, purchase-cost versions, and advertising evidence before calculating profit.
-- Mark a period `PENDING_DATA`, never `FINAL`, while a required store, order identity, historical cost, return charge, or settlement row is unresolved. Use `RESTATED` only for a later complete replacement version after all completeness gates pass.
-- A weekly report may produce a funding plan; execution always starts a separate `funding` flow.
+- Read `references/financial-reporting.md` before entering this flow. It is the public methodology layer; seller-specific prices, costs, rates, thresholds, and formulas are loaded from an authorized private policy at runtime.
+- This flow is read-only. It may ingest and normalize platform evidence but must not withdraw money, fund advertising, or mutate a campaign.
+- On the first run, backfill every enabled store from its effective opening point through the reporting cutoff. Later runs resume from durable watermarks, repair known gaps, and remain idempotent.
+- Reconcile order lifecycle, platform settlements, returns, actual logistics, historical versions, and advertising readbacks before calculating. Keep each store isolated until its store-level result is verified.
+- Publish a scheduled report with visible open items when evidence is incomplete (`PENDING_DATA`); use `FINAL` only after the required completeness gates pass. Use `RESTATED` for a later auditable correction of an already published period.
+- A weekly or monthly report may expose a funding plan; execution always starts a separate `funding` flow.
 
 ## Funding actions (`funding`)
 
