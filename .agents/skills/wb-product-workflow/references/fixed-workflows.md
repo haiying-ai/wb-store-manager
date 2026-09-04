@@ -1,6 +1,6 @@
 # Fixed WB Workflows
 
-Use one of seven resumable flows. Keep the state file with the task artifacts and update it after every material stage.
+Use one of eight resumable flows. Keep the state file with the task artifacts and update it after every material stage.
 
 ## Daily operations (`daily`)
 
@@ -74,6 +74,17 @@ Use one of seven resumable flows. Keep the state file with the task artifacts an
 - Record the approving actor before passing `approve`; reject stale balances, changed scope, or an amount outside the approved plan.
 - Execute only a currently supported route. WB withdrawal has no supported public API and must remain a manual seller-portal step.
 - Read back the account or campaign balance and archive request, response, manual evidence, and any discrepancy before completion.
+
+## Warehouse fulfillment (`fulfillment`)
+
+`collect -> table_sync -> approve -> prepare -> wait_imei -> sync_imei -> labels -> archive`
+
+- Read `references/fulfillment-workflow.md`. Track each store/order independently; one missing IMEI must not block other orders.
+- `table_sync` passes only after independent local archival, a complete online snapshot and verified row readback. Preserve human fields and restore missing unshipped orders with a factual note.
+- `approve` records existing exact-scope authorization when available; do not ask again for actions already authorized. Table writes, adding orders to supplies, IMEI writes and closing supplies are distinct action scopes.
+- `prepare` confirms an authorized new order by adding it to a compatible active supply and reading back `confirm`. Already-confirmed orders need no repeat mutation. Never use `deliver` as an acknowledgement or regress a later state.
+- `wait_imei` passes only with a valid, unique warehouse reply. `sync_imei` requires same-order WB readback. `labels` requires verified new image insertion or an explicitly evidenced unavailable/not-applicable outcome; report any missing required code as pending, never completed shipment.
+- Local schedules require a running host/app and connectivity. When local interruption is accepted, retain the ledger and resume on the next available run after recovery; reconcile pending operations and re-read current state before continuing. Do not require a cloud service, replay stale writes, or report missed checks as zero orders.
 
 ## State commands
 

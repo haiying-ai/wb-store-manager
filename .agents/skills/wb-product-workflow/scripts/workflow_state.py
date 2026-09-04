@@ -17,6 +17,7 @@ FLOWS = {
     "finance": ["collect", "backfill", "reconcile", "calculate", "verify", "report", "archive"],
     "funding": ["preflight", "plan", "approve", "execute", "readback", "archive"],
     "advertising": ["preflight", "plan", "approve", "execute", "readback", "archive"],
+    "fulfillment": ["collect", "table_sync", "approve", "prepare", "wait_imei", "sync_imei", "labels", "archive"],
 }
 STATUSES = {"pending", "in_progress", "waiting_approval", "passed", "blocked"}
 APPROVAL_STAGES = {"approve"}
@@ -54,6 +55,8 @@ def validate_state(state: dict) -> list[str]:
             continue
         if status == "passed" and incomplete_seen:
             errors.append(f"{name}: cannot pass before an earlier stage")
+        elif flow == "fulfillment" and status in {"in_progress", "waiting_approval"} and incomplete_seen:
+            errors.append(f"{name}: cannot start before an earlier stage passes")
         if status != "passed":
             incomplete_seen = True
         if name in APPROVAL_STAGES and status == "passed" and not item.get("approved_by"):

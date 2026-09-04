@@ -1,6 +1,6 @@
 ---
 name: wb-product-workflow
-description: Run end-to-end Wildberries/WB product and store operations from local source material through pricing, listing, media, publication readback, buyer audit, daily reporting, financial reporting, advertising, funding actions, and periodic review. Use for WB daily operations, new listings, listing optimization, pricing, FBS sale readiness, images, videos, buyer questions, funnel analysis, store or financial reports, withdrawals, advertising campaigns or search-term exclusions, top-ups, or requests to prepare listings using the verified V2 SKU logic ("V2版本SKU逻辑").
+description: Run end-to-end Wildberries/WB product and store operations through pricing, listing, media, publication readback, buyer audit, reporting, advertising, funding, warehouse fulfillment, and periodic review. Use for WB warehouse orders, WPS shipping tables, IMEI replies, shipment labels, recurring fulfillment, daily operations, listings, pricing, FBS sale readiness, media, buyer questions, funnel analysis, financial reports, withdrawals, advertising, top-ups, or the verified V2 SKU logic ("V2版本SKU逻辑").
 ---
 
 # WB Product Workflow
@@ -9,7 +9,9 @@ Use this skill for Wildberries/WB product work rooted at `E:\电商运营\01平�
 
 ## Fixed Workflow Router
 
-Classify each request as `daily`, `listing`, `media`, `review`, `finance`, `advertising`, or `funding`. Read `references/fixed-workflows.md`, create or resume its workflow state, and then load only the domain references needed for that flow. Use spreadsheet, document, browser, image, and video skills as execution tools without weakening WB truth, approval, visual-review, financial-completeness, or readback gates.
+Classify each request as `daily`, `listing`, `media`, `review`, `finance`, `advertising`, `funding`, or `fulfillment`. Read `references/fixed-workflows.md`, create or resume its workflow state, and then load only the domain references needed for that flow. Use spreadsheet, document, browser, image, and video skills as execution tools without weakening WB truth, approval, visual-review, financial-completeness, or readback gates.
+
+For WB warehouse orders, WPS shipping tables, IMEI replies, order labels, deleted-row restoration, or shipment automation, read `references/fulfillment-workflow.md`. Use the separate `fulfillment` flow: archive and verify table entry, then perform an authorized transition from new to in assembly before waiting for IMEI. Synchronize and independently verify IMEI before retrieving new labels. Table entry is not shipment. Honor the user's chosen runtime: local disconnection may wait for recovery; do not require independent deployment when local resume is accepted. Keep actual runtime capabilities separate from this reusable workflow contract.
 
 For WB advertising selection, creation, resumption, search-term exclusions, or monitoring, first read `references/advertising-workflow.md`. Analysis remains read-only; campaign mutations use the separate `advertising` flow and money movement additionally uses `funding`. Default smartphone tests to one SKU, manual CPM and search-only placement, subject to the current approved plan. Exact model relevance, preservation of existing exclusions, and same-identity readback are mandatory; campaign-specific bids, budgets, funding sources and stop rules are not global constants. Updating this Skill never grants live-write authority or changes an existing campaign or monitor.
 
