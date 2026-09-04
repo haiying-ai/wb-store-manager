@@ -161,8 +161,12 @@ WB withdrawal remains a manual seller-portal action unless a supported public
 write route is independently verified. Advertising deposits, when supported,
 require an exact store/campaign/currency/amount dry run, a fresh preflight, an
 explicit approval of that same fingerprint, one execution attempt, and a
-readback. Promotional credits and other non-cash allowances are not selected
-as funding sources.
+readback. Do not select promotional credits or other non-cash allowances
+implicitly from a finance report. A separately approved advertising funding
+plan may explicitly select an eligible promotional source after verifying its
+currency, expiry, permitted share, balance and expected source debit. Never
+fall back to cash or another source without a new approval. Promotional credit
+is not withdrawable cash or realized order profit.
 
 If a withdrawal record does not state the advertising amount due and the
 amount withheld, mark its fee state `unknown/PENDING_DATA`; do not report a

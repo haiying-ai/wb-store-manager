@@ -1,6 +1,6 @@
 ---
 name: wb-product-workflow
-description: Run end-to-end Wildberries/WB product and store operations from local source material through pricing, listing, media, publication readback, buyer audit, daily reporting, financial reporting, funding actions, and periodic review. Use for WB daily operations, new listings, listing optimization, pricing, FBS sale readiness, images, videos, buyer questions, funnel analysis, store or financial reports, withdrawals, advertising top-ups, or requests to prepare listings using the verified V2 SKU logic ("V2版本SKU逻辑").
+description: Run end-to-end Wildberries/WB product and store operations from local source material through pricing, listing, media, publication readback, buyer audit, daily reporting, financial reporting, advertising, funding actions, and periodic review. Use for WB daily operations, new listings, listing optimization, pricing, FBS sale readiness, images, videos, buyer questions, funnel analysis, store or financial reports, withdrawals, advertising campaigns or search-term exclusions, top-ups, or requests to prepare listings using the verified V2 SKU logic ("V2版本SKU逻辑").
 ---
 
 # WB Product Workflow
@@ -9,7 +9,9 @@ Use this skill for Wildberries/WB product work rooted at `E:\电商运营\01平�
 
 ## Fixed Workflow Router
 
-Classify each request as `daily`, `listing`, `media`, `review`, `finance`, or `funding`. Read `references/fixed-workflows.md`, create or resume its workflow state, and then load only the domain references needed for that flow. Use spreadsheet, document, browser, image, and video skills as execution tools without weakening WB truth, approval, visual-review, financial-completeness, or readback gates.
+Classify each request as `daily`, `listing`, `media`, `review`, `finance`, `advertising`, or `funding`. Read `references/fixed-workflows.md`, create or resume its workflow state, and then load only the domain references needed for that flow. Use spreadsheet, document, browser, image, and video skills as execution tools without weakening WB truth, approval, visual-review, financial-completeness, or readback gates.
+
+For WB advertising selection, creation, resumption, search-term exclusions, or monitoring, first read `references/advertising-workflow.md`. Analysis remains read-only; campaign mutations use the separate `advertising` flow and money movement additionally uses `funding`. Default smartphone tests to one SKU, manual CPM and search-only placement, subject to the current approved plan. Exact model relevance, preservation of existing exclusions, and same-identity readback are mandatory; campaign-specific bids, budgets, funding sources and stop rules are not global constants. Updating this Skill never grants live-write authority or changes an existing campaign or monitor.
 
 For completed-order profit, weekly or monthly finance reports, return-charge reconciliation, managed-operations fees, withdrawals, or advertising funding, first read `references/financial-reporting.md`. Keep the read-only `finance` flow separate from the side-effecting `funding` flow. A finance report may propose a withdrawal or advertising top-up, but it must never execute either action implicitly.
 
@@ -247,6 +249,7 @@ Before saying a product is sellable, verify:
 - `references/operations-analytics.md`
 - `references/daily-report-template-v2.md`
 - `references/financial-reporting.md`
+- `references/advertising-workflow.md`
 - `references/buyer-perspective-post-publish-audit.md`
 - `references/github-ssh.md`
 - `references/dual-repository-sync.md`

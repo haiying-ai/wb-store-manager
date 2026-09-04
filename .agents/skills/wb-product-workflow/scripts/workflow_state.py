@@ -16,6 +16,7 @@ FLOWS = {
     "review": ["collect", "compare", "diagnose", "recommend", "report", "archive"],
     "finance": ["collect", "backfill", "reconcile", "calculate", "verify", "report", "archive"],
     "funding": ["preflight", "plan", "approve", "execute", "readback", "archive"],
+    "advertising": ["preflight", "plan", "approve", "execute", "readback", "archive"],
 }
 STATUSES = {"pending", "in_progress", "waiting_approval", "passed", "blocked"}
 APPROVAL_STAGES = {"approve"}
