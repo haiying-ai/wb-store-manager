@@ -24,6 +24,8 @@ WB moves new orders to `confirm` when they are added to a supply. Use a verified
 
 This API fact supports timely acknowledgement in the seller system. It does not guarantee a particular buyer-facing phrase or instant client refresh. Do not claim that the buyer saw the change without buyer-side evidence.
 
+When the approved preparation policy uses one order per dedicated supply, persist a unique generated name and the creation attempt before creating it. Verify the returned identity, creation time, active state and empty membership before adding the single order. A supply name is not a platform idempotency key: after an unknown creation result, complete the supply listing and accept only one verified match; no match or multiple matches is not permission to create again. After an uncertain add, read back membership and order status before deciding what happened. Keep this policy separate from any later authorized batching or delivery policy.
+
 `deliver` closes the whole supply and changes its orders to `complete`. It is a separate handover action requiring verified operational readiness and authorization for the entire affected supply. Neither table entry, IMEI completion nor a desire to obtain a QR code is sufficient authority to execute it.
 
 Official routes to verify against current [WB FBS documentation](https://dev.wildberries.ru/en/docs/openapi/orders-fbs):
@@ -64,3 +66,13 @@ Collect fresh data for all configured stores, review locally known pending order
 Preserve local files across retries and restarts. A row deleted online never deletes local history. Use per-store/order idempotency keys; unrelated orders can continue only where their own source and readback gates are satisfied. Never start a second writer to work around an existing lock. Credentials, live orders, full IMEIs and workbook access details remain outside public repositories and logs.
 
 Notify on meaningful changes, completed actions, failures needing intervention or required input. Unchanged IMEI waits and a previously acknowledged connectivity limitation do not need repeated notifications. Describe the actual schedule and last verified successful run; a Git push or workflow-state update does not prove an order was processed.
+
+## Whole-inspection performance
+
+Optimize the recurring inspection as a whole; do not add a separate single-order entrypoint unless requested. Independent read-only store collection may run concurrently, with separate credentials, archives, source status and rate limits. Keep the single-writer lock and ordered mutation/readback stages.
+
+Reuse current collection evidence only to skip preparation work that would make no change. Require the same run ID, complete successful coverage of all configured stores, the expected seller identity, matching collection/status timestamps and fresh table/source evidence. A non-new order may then skip duplicate preparation queries. For `confirm`, also require the same supply ID and fresh, explicit evidence that it is neither closed nor scanned. A saved preparation journal must already be `prepared` and match the store/order/supply; an absent journal may support a no-op but must not be turned into a claim that this worker performed preparation. Do not rewrite an existing completed journal just to record another unchanged inspection.
+
+New orders, pending or rejected operations, stale/incomplete evidence and identity/supply conflicts use the full verification path. Reuse is not authority to write: preserve every required write-precondition check, IMEI validation and independent post-write readback. It never substitutes old cached terminal status for a current check.
+
+Record per-run durations for table reads, collection, table synchronization, preparation, IMEI and labels, plus total duration and request counts by service/stage. Separate no-change rounds from rounds that create supplies, synchronize IMEI or insert labels when evaluating performance. Prioritize the measured bottleneck; network latency and actual work make fixed-duration promises inappropriate. Do not meet a time target by truncating source coverage, treating failures as zero, releasing an uncertain write for retry or omitting required evidence.
