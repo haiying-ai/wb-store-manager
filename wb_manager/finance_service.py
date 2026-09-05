@@ -9,11 +9,15 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .client import WbClient
 from .finance_calculations import calculate_financial_report
 from .finance_costs import normalize_product_key, parse_cost_quote
+from .finance_debt import (
+    import_advertising_payment_events_from_ledger,
+    record_withdrawal_from_user_record,
+)
 from .finance_funds import (
     AdvertisingAccrual,
     DepositCommitment,
@@ -62,6 +66,11 @@ _ADVERTISING_SOURCE_FIELDS = {
     "balance": "net",
     "bonus": "bonus",
 }
+_ADVERTISING_SOURCE_REQUEST_TYPES = {
+    "account": 0,
+    "balance": 1,
+    "bonus": 3,
+}
 _FUNDABLE_CAMPAIGN_STATUSES = {4, 9, 11}
 _LOCKING_ADVERTISING_ACTION_STATUSES = {
     "approved",
@@ -85,6 +94,7 @@ _DELTA_MONEY_FIELDS = (
     "combinedPoolCny",
     "returnLogisticsCny",
     "advertisingProvisionCny",
+    "advertisingSettlementDeductionCny",
     "excessReturnLossCny",
     "ownerProfitCny",
 )
@@ -116,6 +126,17 @@ class FinanceService:
         self.now = now
         self.source_factory = source_factory
         self.registry = read_registry(self.registry_path)
+        financial_timezone_name = str(
+            self.registry.get("financialTimezone") or ""
+        ).strip()
+        if not financial_timezone_name:
+            raise FinanceServiceError("Store registry has no financialTimezone")
+        try:
+            self.financial_timezone = ZoneInfo(financial_timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise FinanceServiceError(
+                f"Store registry has an invalid financialTimezone: {financial_timezone_name}"
+            ) from exc
         self.policy = load_active_phone_financial_policy()
         self.store_aliases = register_enabled_stores(
             self.ledger,
@@ -126,6 +147,119 @@ class FinanceService:
 
     def close(self) -> None:
         self.ledger.close()
+
+    def withdrawal_record(
+        self,
+        *,
+        store_alias: str,
+        record_key: str,
+        amount_cny: Any,
+        withdrawn_at: datetime | str,
+        advertising_fee_due_cny: Any | None = None,
+        advertising_fee_withheld_cny: Any | None = None,
+        advertising_fee_status: str | None = None,
+        settled_at: datetime | str | None = None,
+        external_reference: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record a manual withdrawal without executing a money movement."""
+
+        if store_alias not in self.store_aliases:
+            raise FinanceServiceError(f"Withdrawal store is not enabled: {store_alias}")
+        if not self.policy.settlement_balance_contract_enabled:
+            raise FinanceServiceError(
+                "Withdrawal record writes are not enabled until the active financial "
+                "policy declares the complete settlement-balance and legacy-debt cutover "
+                "contract"
+            )
+        withdrawn = _parse_datetime(
+            withdrawn_at,
+            default_timezone=self.financial_timezone,
+        )
+        if withdrawn is None:
+            raise FinanceServiceError("withdrawn_at must be a valid date-time")
+        supplied_status = str(advertising_fee_status or "").strip().casefold()
+        settlement_aliases = {
+            "settlement_balance",
+            "settlement-balance",
+            "settlement balance",
+            "not_applicable",
+            "not-applicable",
+            "not applicable",
+            "n/a",
+            "余额结算",
+            "结算余额",
+        }
+        cutover = self.policy.withdrawal_advertising_debt_cutover
+        if cutover is None:
+            raise FinanceServiceError(
+                "Active settlement-balance policy has no authoritative withdrawal cutover"
+            )
+        elif withdrawn.astimezone(self.financial_timezone).date() >= cutover:
+            if supplied_status and supplied_status not in settlement_aliases:
+                raise FinanceServiceError(
+                    "Withdrawals on or after the policy cutover must use "
+                    "advertising_fee_status=settlement_balance"
+                )
+            advertising_fee_status = "settlement_balance"
+        elif supplied_status in settlement_aliases:
+            raise FinanceServiceError(
+                "settlement_balance cannot be applied to a pre-cutover withdrawal; "
+                "preserve its historical advertising-fee evidence"
+            )
+        return record_withdrawal_from_user_record(
+            self.ledger,
+            store_alias=store_alias,
+            record_key=record_key,
+            amount_cny=amount_cny,
+            withdrawn_at=withdrawn,
+            advertising_fee_due_cny=advertising_fee_due_cny,
+            advertising_fee_withheld_cny=advertising_fee_withheld_cny,
+            advertising_fee_status=advertising_fee_status,
+            settled_at=settled_at,
+            external_reference=external_reference,
+            evidence=evidence,
+            advertising_fee_cutover=cutover,
+            financial_timezone=self.financial_timezone,
+        )
+
+    def advertising_debt_status(
+        self,
+        *,
+        store_alias: str | None = None,
+        as_of: datetime | str | None = None,
+    ) -> dict[str, Any]:
+        if store_alias is not None and store_alias not in self.store_aliases:
+            raise FinanceServiceError(f"Debt store is not enabled: {store_alias}")
+        return self.ledger.advertising_debt_summary(
+            store_alias=store_alias, as_of=as_of
+        )
+
+    def reconcile_advertising_debt(
+        self,
+        *,
+        store_alias: str,
+        period_start: datetime | date | str | None = None,
+        period_end: datetime | date | str | None = None,
+    ) -> dict[str, Any]:
+        if store_alias not in self.store_aliases:
+            raise FinanceServiceError(f"Debt store is not enabled: {store_alias}")
+        start_boundary = _normalize_debt_reconcile_boundary(
+            period_start,
+            financial_timezone=self.financial_timezone,
+            inclusive_date_end=False,
+        )
+        end_boundary = _normalize_debt_reconcile_boundary(
+            period_end,
+            financial_timezone=self.financial_timezone,
+            inclusive_date_end=True,
+        )
+        return import_advertising_payment_events_from_ledger(
+            self.ledger,
+            store_alias,
+            period_start=start_boundary,
+            period_end=end_boundary,
+        )
 
     def bootstrap(self, *, through: str | date = "yesterday") -> dict[str, Any]:
         summaries = sync_enabled_stores(
@@ -570,6 +704,7 @@ class FinanceService:
             if str(item["idempotency_key"]) == f"ads-deposit:{payload['fingerprint']}"
         ]
         if not confirm_live:
+            self._require_settlement_balance_deposit_contract(payload)
             self._require_current_deposit_report(payload["reportId"])
             self._require_governed_deposit_cap(
                 payload,
@@ -621,6 +756,7 @@ class FinanceService:
             )
         action = matching[0]
         if str(action["lifecycle_status"]) in {"proposed", "approved"}:
+            self._require_settlement_balance_deposit_contract(payload)
             self._require_current_deposit_report(payload["reportId"])
         owner = f"finance-{uuid.uuid4()}"
         lock_name = f"wb-advertising-funds:{payload['store']}"
@@ -643,6 +779,8 @@ class FinanceService:
             lifecycle_status = str(action["lifecycle_status"])
             if lifecycle_status in {"proposed", "approved"}:
                 try:
+                    self._require_settlement_balance_deposit_contract(payload)
+                    self._require_current_deposit_report(payload["reportId"])
                     self._require_governed_deposit_cap(
                         payload,
                         exclude_action_id=str(action["action_id"]),
@@ -759,6 +897,29 @@ class FinanceService:
     def _resolve_path(self, path: Path) -> Path:
         value = Path(path)
         return value if value.is_absolute() else self.repo_root / value
+
+    def _require_settlement_balance_deposit_contract(
+        self,
+        payload: Mapping[str, Any],
+    ) -> None:
+        policy = self.policy
+        if not policy.settlement_balance_contract_enabled:
+            raise FinanceServiceError(
+                "Settlement-balance advertising deposits are not enabled by the "
+                "active financial policy"
+            )
+        source = str(payload.get("source") or "").strip().casefold()
+        balance_field = _ADVERTISING_SOURCE_FIELDS.get(source)
+        request_type = _ADVERTISING_SOURCE_REQUEST_TYPES.get(source)
+        if (
+            source != policy.advertising_funding_source
+            or balance_field != policy.advertising_balance_field
+            or request_type != policy.advertising_request_type
+        ):
+            raise FinanceServiceError(
+                "Advertising deposit plan funding source/balance field/request type "
+                "does not match the active policy balance/net/type=1 contract"
+            )
 
     def _now(self) -> datetime:
         value = self.now or datetime.now(SHANGHAI)
@@ -1953,7 +2114,11 @@ def _record_at_or_before(row: Mapping[str, Any], end_exclusive: str) -> bool:
     return True
 
 
-def _parse_datetime(value: Any) -> datetime | None:
+def _parse_datetime(
+    value: Any,
+    *,
+    default_timezone: ZoneInfo = MOSCOW,
+) -> datetime | None:
     if value in (None, ""):
         return None
     raw = str(value).strip().replace("Z", "+00:00")
@@ -1964,7 +2129,50 @@ def _parse_datetime(value: Any) -> datetime | None:
             parsed = datetime.combine(date.fromisoformat(raw[:10]), time.min)
         except ValueError:
             return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=MOSCOW)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=default_timezone)
+
+
+def _normalize_debt_reconcile_boundary(
+    value: datetime | date | str | None,
+    *,
+    financial_timezone: ZoneInfo,
+    inclusive_date_end: bool,
+) -> datetime | None:
+    """Resolve CLI date bounds in the registry timezone.
+
+    A date-only ``--through`` value is inclusive and therefore becomes local
+    midnight on the following day. Explicit datetimes remain exact boundaries.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed_date: date | None = value if isinstance(value, date) else None
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                raise FinanceServiceError("Advertising debt reconciliation boundary is empty")
+            try:
+                parsed_date = date.fromisoformat(raw)
+            except ValueError:
+                parsed = _parse_datetime(raw, default_timezone=financial_timezone)
+                if parsed is None:
+                    raise FinanceServiceError(
+                        f"Invalid advertising debt reconciliation boundary: {value}"
+                    )
+                return parsed
+        elif parsed_date is None:
+            raise FinanceServiceError(
+                "Advertising debt reconciliation boundary must be an ISO date or datetime"
+            )
+        if inclusive_date_end:
+            parsed_date += timedelta(days=1)
+        return datetime.combine(parsed_date, time.min, tzinfo=financial_timezone)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=financial_timezone)
+    return parsed
 
 
 def _order_period_delta(

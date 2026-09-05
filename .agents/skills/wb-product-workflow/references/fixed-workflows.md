@@ -62,18 +62,18 @@ Use one of eight resumable flows. Keep the state file with the task artifacts an
 - Read `references/advertising-workflow.md` before selection, creation, resumption, exclusions, or monitoring. Read-only recommendations stay in `review` or `daily`.
 - Freeze store, SKU/nmID, model, settings, exclusions, authorized actions and monitoring policy in a private plan. A skill default is not permission to mutate.
 - Treat campaign creation, exclusion updates and start/resume as separately authorized actions within that plan. Verify identity and exclusion readback before launch; incomplete readback blocks further writes.
-- Funding requires its own linked `funding` state. This flow does not authorize deposits implicitly.
+- Funding requires its own linked `funding` state. This flow does not authorize campaign-budget allocations implicitly.
 - Archive the plan, evidence, readbacks and any actual scheduler identity. A missing scheduled task is not ongoing monitoring.
 
 ## Funding actions (`funding`)
 
 `preflight -> plan -> approve -> execute -> readback -> archive`
 
-- Treat withdrawals and advertising top-ups as money-moving mutations, never as an automatic continuation of a report.
-- Freeze the exact store/account, currency, amount, source balance, destination or campaign, policy caps, and preflight evidence before approval.
+- Treat withdrawals and balance-funded campaign-budget allocations as money-moving mutations, never as an automatic continuation of a report. Under the active policy, allocation uses WB mutual-settlement `balance` (`net`, request `type=1`) and does not require a separate withdrawal or external cash recharge.
+- Freeze the exact store/account, currency, amount, source balance, destination campaign, policy caps, and preflight evidence before approval.
 - Record the approving actor before passing `approve`; reject stale balances, changed scope, or an amount outside the approved plan.
 - Execute only a currently supported route. WB withdrawal has no supported public API and must remain a manual seller-portal step.
-- Read back the account or campaign balance and archive request, response, manual evidence, and any discrepancy before completion.
+- Read back the source and campaign balances and archive request, response, settlement evidence, and any discrepancy before completion. Keep allocation, actual campaign consumption, and later WB settlement-cycle deductions as separate evidence layers; do not charge the same advertising cost again outside the policy pool.
 
 ## Warehouse fulfillment (`fulfillment`)
 

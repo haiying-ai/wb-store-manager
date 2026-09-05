@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -34,7 +35,11 @@ def test_live_shape_cny_seller_balance_uses_minor_units():
     assert advertising is None
 
 
-def _registry(path: Path) -> Path:
+def _registry(
+    path: Path,
+    *,
+    financial_timezone: str = "Europe/Moscow",
+) -> Path:
     path.write_text(
         json.dumps(
             {
@@ -42,7 +47,7 @@ def _registry(path: Path) -> Path:
                 "registryId": "test-registry",
                 "status": "active",
                 "reportingCurrency": "CNY",
-                "financialTimezone": "Europe/Moscow",
+                "financialTimezone": financial_timezone,
                 "schedulerTimezone": "Asia/Shanghai",
                 "officialHistoryStart": "2026-07-01",
                 "fundingActivationAt": "2026-08-28T00:00:00+08:00",
@@ -279,6 +284,76 @@ def _service(tmp_path: Path, monkeypatch, now: datetime) -> FinanceService:
     return service
 
 
+def _enable_modern_settlement_policy(service: FinanceService) -> None:
+    raw = deepcopy(service.policy.raw)
+    raw["effectiveFrom"] = "2026-09-05"
+    raw.setdefault("funding", {}).setdefault("advertisingDeposit", {}).update(
+        {
+            "fundingSource": "balance",
+            "platformBalanceField": "net",
+            "platformRequestType": 1,
+            "deductionMode": "future_sales_settlement_netting",
+            "separateWithdrawalRequired": False,
+            "manualCashTopUpRequired": False,
+            "actualDeductionEvidenceRequired": True,
+        }
+    )
+    raw["funding"]["withdrawalAdvertisingDebt"] = {
+        "cutoverEffectiveFrom": "2026-09-05",
+        "modeFromCutover": "not_applicable_to_withdrawal",
+        "preserveHistoricalRecords": True,
+        "noRetroactiveClearing": True,
+    }
+    service.policy = replace(
+        service.policy,
+        effective_from="2026-09-05",
+        settlement_balance_contract_enabled=True,
+        advertising_funding_source="balance",
+        advertising_balance_field="net",
+        advertising_request_type=1,
+        advertising_deduction_mode="future_sales_settlement_netting",
+        withdrawal_advertising_debt_cutover=date(2026, 9, 5),
+        raw=raw,
+    )
+
+
+def test_debt_reconcile_date_bounds_use_financial_timezone_and_inclusive_through(
+    tmp_path, monkeypatch
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
+    )
+    captured = {}
+
+    def fake_import(ledger, store_alias, *, period_start, period_end):
+        captured.update(
+            store_alias=store_alias,
+            period_start=period_start,
+            period_end=period_end,
+        )
+        return {"importedCount": 0}
+
+    monkeypatch.setattr(
+        "wb_manager.finance_service.import_advertising_payment_events_from_ledger",
+        fake_import,
+    )
+    try:
+        result = service.reconcile_advertising_debt(
+            store_alias="owner-store",
+            period_start="2026-09-04",
+            period_end="2026-09-05",
+        )
+    finally:
+        service.close()
+
+    assert result == {"importedCount": 0}
+    assert captured["store_alias"] == "owner-store"
+    assert captured["period_start"].isoformat() == "2026-09-04T00:00:00+03:00"
+    assert captured["period_end"].isoformat() == "2026-09-06T00:00:00+03:00"
+
+
 def _import_costs(service: FinanceService, tmp_path: Path):
     quote = tmp_path / "quote.json"
     quote.write_text(
@@ -298,6 +373,191 @@ def _import_costs(service: FinanceService, tmp_path: Path):
         rub_per_cny="11.5",
     )
     assert result["rowCount"] == 2
+
+
+def test_withdrawal_cutover_defaults_to_settlement_balance_and_preserves_history(
+    tmp_path, monkeypatch
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
+    )
+    _enable_modern_settlement_policy(service)
+    try:
+        service.withdrawal_record(
+            store_alias="owner-store",
+            record_key="legacy-withdrawal",
+            amount_cny="100.00",
+            withdrawn_at="2026-09-04T12:00:00+03:00",
+            advertising_fee_due_cny="10.00",
+            advertising_fee_withheld_cny="0.00",
+            advertising_fee_status="not_deducted",
+        )
+        service.withdrawal_record(
+            store_alias="owner-store",
+            record_key="post-cutover-withdrawal",
+            amount_cny="200.00",
+            withdrawn_at="2026-09-05T12:00:00+03:00",
+        )
+        rows = service.ledger.list_withdrawal_records(store_alias="owner-store")
+        assert rows[0]["advertising_fee_debt_cny"] == "10.00"
+        assert rows[1]["advertising_fee_status"] == "settlement_balance"
+        assert rows[1]["advertising_fee_due_cny"] == "0.00"
+        assert rows[1]["advertising_fee_withheld_cny"] == "0.00"
+        assert rows[1]["advertising_fee_debt_cny"] == "0.00"
+
+        with pytest.raises(FinanceServiceError, match="policy cutover"):
+            service.withdrawal_record(
+                store_alias="owner-store",
+                record_key="invalid-current",
+                amount_cny="100.00",
+                withdrawn_at="2026-09-06T12:00:00+03:00",
+                advertising_fee_status="unknown",
+            )
+        with pytest.raises(FinanceServiceError, match="pre-cutover"):
+            service.withdrawal_record(
+                store_alias="owner-store",
+                record_key="invalid-legacy",
+                amount_cny="100.00",
+                withdrawn_at="2026-09-04T12:00:00+03:00",
+                advertising_fee_status="settlement_balance",
+            )
+    finally:
+        service.close()
+
+
+def test_legacy_policy_disables_money_actions_and_withdrawal_debt_writes(
+    tmp_path,
+    monkeypatch,
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
+    )
+    approved_at = service._now()
+    plan = build_advertising_deposit_plan(
+        report_id="report-placeholder",
+        store="owner-store",
+        campaign=1234567,
+        amount_cny="10",
+        source="balance",
+        currency="CNY",
+        source_balance_cny="100",
+        source_balance_evidence_at=approved_at,
+        policy_cap_cny="10",
+        available_advertising_reserve_cny="10",
+        approved_by="boss",
+        approved_at=approved_at,
+        expires_at=approved_at + timedelta(minutes=15),
+    )
+    plan_path = tmp_path / "legacy-policy-deposit-plan.json"
+    plan_path.write_text(json.dumps(plan.as_dict()), encoding="utf-8")
+    client = _FakeFundingClient()
+    monkeypatch.setattr("wb_manager.finance_service.WbClient", lambda token: client)
+    try:
+        assert service.policy.settlement_balance_contract_enabled is False
+        with pytest.raises(FinanceServiceError, match="not enabled"):
+            service.ads_deposit(
+                plan_path=plan_path,
+                approved_by="boss",
+                confirm_live=False,
+            )
+        assert client.calls == []
+
+        with pytest.raises(FinanceServiceError, match="not enabled"):
+            service.withdrawal_record(
+                store_alias="owner-store",
+                record_key="legacy-policy-post-cutover-unknown",
+                amount_cny="100.00",
+                withdrawn_at="2026-09-06T12:00:00+03:00",
+            )
+        assert service.ledger.list_withdrawal_records(store_alias="owner-store") == []
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize(
+    ("financial_timezone", "withdrawn_at", "expected_status"),
+    [
+        ("Asia/Tokyo", "2026-09-04T15:30:00+00:00", "settlement_balance"),
+        ("America/New_York", "2026-09-05T03:30:00+00:00", "unknown"),
+    ],
+)
+def test_withdrawal_cutover_uses_configured_financial_timezone_boundary(
+    tmp_path,
+    monkeypatch,
+    financial_timezone,
+    withdrawn_at,
+    expected_status,
+):
+    monkeypatch.setenv("TEST_OWNER_TOKEN", "owner-token")
+    monkeypatch.setenv("TEST_NEW_TOKEN", "new-token")
+    registry_path = _registry(
+        tmp_path / "stores.json",
+        financial_timezone=financial_timezone,
+    )
+    monkeypatch.setattr(
+        "wb_manager.finance_service.read_registry",
+        lambda path: json.loads(Path(path).read_text(encoding="utf-8-sig")),
+    )
+    service = FinanceService(
+        db_path=tmp_path / "finance.sqlite3",
+        registry_path=registry_path,
+        output_root=tmp_path / "reports",
+        now=datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
+        source_factory=lambda client, alias: FakeSources(alias),
+    )
+    _enable_modern_settlement_policy(service)
+    try:
+        assert service.financial_timezone.key == financial_timezone
+        service.withdrawal_record(
+            store_alias="owner-store",
+            record_key=f"timezone-boundary-{financial_timezone}",
+            amount_cny="100.00",
+            withdrawn_at=withdrawn_at,
+        )
+        row = service.ledger.list_withdrawal_records(store_alias="owner-store")[0]
+        assert row["advertising_fee_status"] == expected_status
+    finally:
+        service.close()
+
+
+def test_ads_deposit_rejects_non_settlement_balance_source(tmp_path, monkeypatch):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
+    )
+    _enable_modern_settlement_policy(service)
+    approved_at = service._now()
+    plan = build_advertising_deposit_plan(
+        report_id="report-placeholder",
+        store="owner-store",
+        campaign=1234567,
+        amount_cny="10",
+        source="account",
+        currency="CNY",
+        source_balance_cny="100",
+        source_balance_evidence_at=approved_at,
+        policy_cap_cny="10",
+        available_advertising_reserve_cny="10",
+        approved_by="boss",
+        approved_at=approved_at,
+        expires_at=approved_at + timedelta(minutes=15),
+    )
+    plan_path = tmp_path / "account-source-plan.json"
+    plan_path.write_text(json.dumps(plan.as_dict()), encoding="utf-8")
+    try:
+        with pytest.raises(FinanceServiceError, match="balance/net/type=1"):
+            service.ads_deposit(
+                plan_path=plan_path,
+                approved_by="boss",
+                confirm_live=False,
+            )
+    finally:
+        service.close()
 
 
 def test_daily_is_idempotent_and_second_stable_capture_finalizes_week(tmp_path, monkeypatch):
@@ -701,6 +961,7 @@ def _advertising_deposit_plan_file(
     tmp_path: Path,
     report_id: str,
 ) -> Path:
+    _enable_modern_settlement_policy(service)
     approved_at = service._now()
     plan = build_advertising_deposit_plan(
         report_id=report_id,
@@ -805,6 +1066,86 @@ def test_ads_deposit_confirm_live_requires_prior_dry_run_proposal(tmp_path, monk
             approved_by="boss",
             confirm_live=True,
         )
+    assert client.calls == []
+    service.close()
+
+
+@pytest.mark.parametrize("lifecycle_status", ["executing", "unknown"])
+def test_ads_deposit_existing_execution_state_allows_readback_after_policy_fallback(
+    tmp_path,
+    monkeypatch,
+    lifecycle_status,
+):
+    service, weekly = _finalized_weekly_service(tmp_path, monkeypatch)
+    plan_path = _advertising_deposit_plan_file(service, tmp_path, weekly["reportId"])
+    monkeypatch.setattr(
+        service,
+        "_available_advertising_reserve_cny",
+        lambda store_alias, *, exclude_action_id=None: Decimal("120"),
+    )
+    proposal = service.ads_deposit(
+        plan_path=plan_path,
+        approved_by="boss",
+        confirm_live=False,
+    )
+    service.ledger.update_funding_action_status(
+        proposal["actionId"],
+        lifecycle_status,
+        occurred_at=service._now(),
+        evidence={"livePreflight": {"campaignBudgetBeforeCny": "40.00"}},
+    )
+    service.policy = replace(
+        service.policy,
+        settlement_balance_contract_enabled=False,
+    )
+    client = _FakeFundingClient()
+    client.budget_reads = 1
+    monkeypatch.setattr("wb_manager.finance_service.WbClient", lambda token: client)
+
+    result = service.ads_deposit(
+        plan_path=plan_path,
+        approved_by="boss",
+        confirm_live=True,
+    )
+
+    assert result["status"] == "readback_confirmed"
+    assert result["readbackOnly"] is True
+    assert [call[0] for call in client.calls] == ["GET"]
+    assert "/adv/v1/budget?id=" in client.calls[0][1]
+    assert not any(call[0] == "POST" for call in client.calls)
+    service.close()
+
+
+def test_ads_deposit_proposed_action_cannot_post_after_policy_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    service, weekly = _finalized_weekly_service(tmp_path, monkeypatch)
+    plan_path = _advertising_deposit_plan_file(service, tmp_path, weekly["reportId"])
+    monkeypatch.setattr(
+        service,
+        "_available_advertising_reserve_cny",
+        lambda store_alias, *, exclude_action_id=None: Decimal("120"),
+    )
+    service.ads_deposit(
+        plan_path=plan_path,
+        approved_by="boss",
+        confirm_live=False,
+    )
+    service.policy = replace(
+        service.policy,
+        settlement_balance_contract_enabled=False,
+    )
+    client = _FakeFundingClient()
+    monkeypatch.setattr("wb_manager.finance_service.WbClient", lambda token: client)
+
+    with pytest.raises(FinanceServiceError, match="not enabled"):
+        service.ads_deposit(
+            plan_path=plan_path,
+            approved_by="boss",
+            confirm_live=True,
+        )
+
     assert client.calls == []
     service.close()
 

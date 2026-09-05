@@ -355,7 +355,12 @@ def _persist_source_rows(
                 store_alias,
                 identity,
                 payload,
-                occurred_at=_event_time(payload, "occurredAt", "updTime", "date"),
+                occurred_at=_event_time(
+                    payload,
+                    "occurredAt",
+                    "updTime",
+                    "date",
+                ),
                 campaign_id=_first(payload, "advertId", "advert_id", "campaignId"),
                 nm_id=_first(payload, "nmId", "nm_id"),
                 spend_cny=payload.get("amount") if payload.get("pnl") is True else None,
@@ -453,23 +458,48 @@ def _event_identity(row: Mapping[str, Any], *, fallback: str) -> dict[str, Any]:
     return {"fallback": fallback, "payload": dict(row)}
 
 
-def _event_time(row: Mapping[str, Any], *keys: str) -> str:
-    for key in keys:
-        raw = row.get(key)
-        if raw in (None, ""):
-            continue
-        value = str(raw).strip().replace("Z", "+00:00")
+def _event_time(
+    row: Mapping[str, Any],
+    *keys: str,
+    fallback: datetime | str | None = None,
+) -> str:
+    candidates = [row]
+    nested_raw = row.get("raw")
+    if isinstance(nested_raw, Mapping):
+        candidates.append(nested_raw)
+    for candidate in candidates:
+        for key in keys:
+            raw = candidate.get(key)
+            parsed = _parse_event_time(raw)
+            if parsed is not None:
+                return parsed.isoformat()
+    parsed_fallback = _parse_event_time(fallback)
+    if parsed_fallback is not None:
+        return parsed_fallback.isoformat()
+    raise FinanceSyncError("Source row has no usable event timestamp")
+
+
+def _parse_event_time(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime.combine(value, time.min)
+    else:
+        raw = str(value).strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
         try:
-            parsed = datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(raw)
         except ValueError:
             try:
-                parsed = datetime.combine(date.fromisoformat(value[:10]), time.min)
+                parsed = datetime.combine(date.fromisoformat(raw), time.min)
             except ValueError:
-                continue
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=MOSCOW)
-        return parsed.isoformat()
-    raise FinanceSyncError("Source row has no usable event timestamp")
+                return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=MOSCOW)
+    return parsed
 
 
 def _signed_buyer_paid(row: Mapping[str, Any]) -> Decimal:

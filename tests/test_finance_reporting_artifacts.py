@@ -96,6 +96,7 @@ def sample_payload() -> dict:
             "managedOperationsCny": "20",
             "returnLogisticsCny": "16",
             "advertisingProvisionCny": "30",
+            "advertisingSettlementDeductionCny": "30",
             "ownerProfitCny": "168",
         },
         "costVersions": [
@@ -131,6 +132,9 @@ def test_markdown_uses_actual_return_language():
     assert "实际退货物流费" in text
     assert "不使用 8/16 CNY 默认值" in text
     assert "老板实际利润" in text
+    assert "WB 结算周期广告扣款（仅对账）：30.00 CNY" in text
+    assert "balance/net/type=1" in text
+    assert "settlement_balance" in text
 
 
 def test_writes_verified_immutable_artifacts(tmp_path: Path):

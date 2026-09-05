@@ -77,6 +77,68 @@ def add_finance_parser(subparsers: Any) -> None:
         help="Required for the live campaign-budget write; otherwise validate only",
     )
 
+    withdrawal = commands.add_parser(
+        "withdrawal-record",
+        help="Record a human-executed withdrawal without moving money",
+    )
+    _add_runtime_paths(withdrawal, output=False)
+    withdrawal.add_argument("--store", required=True, help="Enabled store alias")
+    withdrawal.add_argument("--record-key", required=True, help="Stable idempotency key")
+    withdrawal.add_argument("--amount-cny", required=True, help="Actual withdrawal amount")
+    withdrawal.add_argument(
+        "--withdrawn-at", required=True, help="Timezone-aware withdrawal timestamp"
+    )
+    withdrawal.add_argument("--ad-fee-due-cny", default=None)
+    withdrawal.add_argument("--ad-fee-withheld-cny", default=None)
+    withdrawal.add_argument(
+        "--ad-fee-status",
+        choices=(
+            "deducted",
+            "not_deducted",
+            "partial",
+            "unknown",
+            "settlement_balance",
+        ),
+        default=None,
+        help=(
+            "Post-2026-09-05 withdrawals default to settlement_balance; "
+            "due/withheld/debt are then zero"
+        ),
+    )
+    withdrawal.add_argument("--settled-at")
+    withdrawal.add_argument("--external-reference")
+    withdrawal.add_argument("--evidence-json", default=None)
+
+    debt_status = commands.add_parser(
+        "ads-debt-status", help="Show legacy withdrawal advertising-fee debt"
+    )
+    _add_runtime_paths(debt_status, output=False)
+    debt_status.add_argument("--store", default=None)
+    debt_status.add_argument("--as-of", default=None)
+
+    debt_reconcile = commands.add_parser(
+        "ads-debt-reconcile",
+        aliases=("ads-payment-reconcile",),
+        help="Import synced advertising-payment readbacks and reconcile legacy debt",
+    )
+    _add_runtime_paths(debt_reconcile, output=False)
+    debt_reconcile.add_argument("--store", required=True)
+    debt_reconcile.add_argument(
+        "--from",
+        dest="period_start",
+        default=None,
+        help="Financial date (YYYY-MM-DD) or exact ISO datetime",
+    )
+    debt_reconcile.add_argument(
+        "--through",
+        dest="period_end",
+        default=None,
+        help=(
+            "Inclusive financial date (YYYY-MM-DD); an ISO datetime is an "
+            "exclusive boundary"
+        ),
+    )
+
 
 def dispatch_finance(args: argparse.Namespace) -> int:
     # Import lazily so ordinary listing/pricing commands do not load SQLite or
@@ -110,6 +172,37 @@ def dispatch_finance(args: argparse.Namespace) -> int:
                 plan_path=Path(args.plan),
                 approved_by=args.approved_by,
                 confirm_live=args.confirm_live,
+            )
+        elif command == "withdrawal-record":
+            evidence = None
+            if args.evidence_json:
+                try:
+                    evidence = json.loads(args.evidence_json)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("--evidence-json must be a JSON object") from exc
+                if not isinstance(evidence, dict):
+                    raise ValueError("--evidence-json must be a JSON object")
+            result = service.withdrawal_record(
+                store_alias=args.store,
+                record_key=args.record_key,
+                amount_cny=args.amount_cny,
+                withdrawn_at=args.withdrawn_at,
+                advertising_fee_due_cny=args.ad_fee_due_cny,
+                advertising_fee_withheld_cny=args.ad_fee_withheld_cny,
+                advertising_fee_status=args.ad_fee_status,
+                settled_at=args.settled_at,
+                external_reference=args.external_reference,
+                evidence=evidence,
+            )
+        elif command == "ads-debt-status":
+            result = service.advertising_debt_status(
+                store_alias=args.store, as_of=args.as_of
+            )
+        elif command in {"ads-debt-reconcile", "ads-payment-reconcile"}:
+            result = service.reconcile_advertising_debt(
+                store_alias=args.store,
+                period_start=args.period_start,
+                period_end=args.period_end,
             )
         else:  # argparse already prevents this, but keep the dispatch fail-closed.
             raise ValueError(f"Unsupported finance command: {command}")

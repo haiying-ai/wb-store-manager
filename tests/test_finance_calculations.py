@@ -238,6 +238,153 @@ def test_completed_order_uses_actual_finance_components_and_decimal_contract():
 
 
 @pytest.mark.parametrize(
+    "operation_marker",
+    [
+        "广告费结算扣除",
+        "活动推广费用扣除",
+        "Удержание за рекламу",
+        "Расходы на продвижение",
+        "Advertising settlement deduction",
+        "Promotion fee deduction",
+    ],
+)
+def test_explicit_advertising_deduction_is_reconciliation_only(operation_marker):
+    report = calculate(
+        [
+            sale_finance(
+                otherPlatformFeeCny="0",
+                deductionCny="12.34",
+                sellerOperName=operation_marker,
+            )
+        ]
+    )
+
+    detail = report.orders[0]
+    payload = report.to_dict()
+    assert detail.actual_other_platform_fee_cny == Decimal("0.00")
+    assert detail.advertising_settlement_deduction_cny == Decimal("12.34")
+    assert detail.owner_profit_cny == Decimal("182.00")
+    assert payload["orders"][0]["advertisingSettlementDeductionCny"] == "12.34"
+    assert payload["stores"][0]["advertisingSettlementDeductionCny"] == "12.34"
+    assert payload["totals"]["advertisingSettlementDeductionCny"] == "12.34"
+
+
+def test_unmarked_deduction_remains_other_platform_cost():
+    report = calculate(
+        [
+            sale_finance(
+                otherPlatformFeeCny="0",
+                deductionCny="12.34",
+                sellerOperName="Иное удержание",
+            )
+        ]
+    )
+
+    detail = report.orders[0]
+    assert detail.actual_other_platform_fee_cny == Decimal("12.34")
+    assert detail.advertising_settlement_deduction_cny == Decimal("0.00")
+    assert detail.owner_profit_cny == Decimal("169.66")
+
+
+@pytest.mark.parametrize("marker_field", ["operationName", "serviceName", "docTypeName"])
+def test_advertising_deduction_uses_all_supported_operation_fields(marker_field):
+    report = calculate(
+        [
+            sale_finance(
+                otherPlatformFeeCny="0",
+                deduction="7.00",
+                **{marker_field: "Advertising promotion settlement"},
+            )
+        ]
+    )
+
+    assert report.orders[0].advertising_settlement_deduction_cny == Decimal("7.00")
+    assert report.orders[0].actual_other_platform_fee_cny == Decimal("0.00")
+
+
+@pytest.mark.parametrize(
+    ("marker_field", "operation_marker"),
+    [
+        ("operationName", "广告费用周期扣款"),
+        ("sellerOperName", "Удержание за рекламу"),
+        ("docTypeName", "Advertising promotion settlement deduction"),
+    ],
+)
+def test_advertising_settlement_uses_exact_supported_operation_names(
+    marker_field, operation_marker
+):
+    row = sale_finance(
+        otherCostCny="9.50",
+        **{marker_field: operation_marker},
+    )
+    row.pop("otherPlatformFeeCny")
+    report = calculate([row])
+
+    detail = report.orders[0]
+    assert detail.advertising_settlement_deduction_cny == Decimal("9.50")
+    assert detail.actual_other_platform_fee_cny == Decimal("0.00")
+
+
+@pytest.mark.parametrize(
+    "operation_marker",
+    [
+        "Promotion discount compensation",
+        "促销活动补贴",
+        "推广折扣补偿",
+    ],
+)
+def test_similar_promotional_text_remains_other_platform_cost(operation_marker):
+    report = calculate(
+        [
+            sale_finance(
+                otherPlatformFeeCny="0",
+                deductionCny="7.00",
+                operationName=operation_marker,
+            )
+        ]
+    )
+
+    detail = report.orders[0]
+    assert detail.advertising_settlement_deduction_cny == Decimal("0.00")
+    assert detail.actual_other_platform_fee_cny == Decimal("7.00")
+
+
+def test_stable_advertising_settlement_code_is_supported():
+    report = calculate(
+        [
+            sale_finance(
+                otherPlatformFeeCny="0",
+                deductionCny="6.25",
+                operationCode="advertising_settlement_deduction",
+            )
+        ]
+    )
+
+    detail = report.orders[0]
+    assert detail.advertising_settlement_deduction_cny == Decimal("6.25")
+    assert detail.actual_other_platform_fee_cny == Decimal("0.00")
+
+
+def test_advertising_marker_keeps_penalty_and_acceptance_in_profit_costs():
+    report = calculate(
+        [
+            sale_finance(
+                otherPlatformFeeCny="5.00",
+                deductionCny="7.00",
+                penaltyCny="2.00",
+                acceptanceFeeCny="3.00",
+                operationName="广告费用周期扣款",
+            )
+        ]
+    )
+
+    detail = report.orders[0]
+    assert detail.advertising_settlement_deduction_cny == Decimal("12.00")
+    assert detail.actual_other_platform_fee_cny == Decimal("5.00")
+    assert detail.owner_profit_cny == Decimal("177.00")
+
+
+@pytest.mark.parametrize(
     ("return_rows", "expected"),
     [
         ([return_finance(delivery="8")], Decimal("8.00")),

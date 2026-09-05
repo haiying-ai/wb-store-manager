@@ -93,6 +93,7 @@ class OrderCalculation:
     actual_forward_logistics_cny: Decimal | None
     actual_storage_cny: Decimal | None
     actual_other_platform_fee_cny: Decimal | None
+    advertising_settlement_deduction_cny: Decimal
     forward_operations_used_cny: Decimal | None
     managed_operations_cny: Decimal | None
     combined_pool_cny: Decimal | None
@@ -132,6 +133,9 @@ class OrderCalculation:
             "forwardLogisticsCny": _money_text(self.actual_forward_logistics_cny),
             "storageAndOperationsCny": _money_text(self.actual_storage_cny),
             "otherPlatformCostCny": _money_text(self.actual_other_platform_fee_cny),
+            "advertisingSettlementDeductionCny": _money_text(
+                self.advertising_settlement_deduction_cny
+            ),
             "forwardOperationsUsedCny": _money_text(self.forward_operations_used_cny),
             "managedOperationsCny": _money_text(self.managed_operations_cny),
             "combinedPoolCny": _money_text(self.combined_pool_cny),
@@ -172,6 +176,7 @@ class StoreSummary:
     advertising_provision_cny: Decimal | None
     excess_return_loss_cny: Decimal | None
     actual_advertising_spend_cny: Decimal
+    advertising_settlement_deduction_cny: Decimal
     other_platform_cost_cny: Decimal | None
     owner_profit_cny: Decimal | None
     unresolved_order_count: int
@@ -201,6 +206,9 @@ class StoreSummary:
             "excessReturnLossCny": _money_text(self.excess_return_loss_cny),
             "actualAdvertisingSpendCny": _money_text(
                 self.actual_advertising_spend_cny
+            ),
+            "advertisingSettlementDeductionCny": _money_text(
+                self.advertising_settlement_deduction_cny
             ),
             "otherPlatformCostCny": _money_text(self.other_platform_cost_cny),
             "ownerProfitCny": _money_text(self.owner_profit_cny),
@@ -569,7 +577,9 @@ def _calculate_group(
     direct_forward, direct_forward_present = _sum_first_alias(
         finance_records, _DIRECT_FORWARD_FIELDS, issues, group, "forward logistics"
     )
-    other, other_present = _sum_other_platform(finance_records, issues, group)
+    other, other_present, advertising_settlement_deduction = _sum_other_platform(
+        finance_records, issues, group
+    )
     if direct_forward_present:
         forward_logistics += direct_forward
         forward_present = True
@@ -735,6 +745,9 @@ def _calculate_group(
         actual_forward_logistics_cny=actual_forward,
         actual_storage_cny=actual_storage,
         actual_other_platform_fee_cny=actual_other,
+        advertising_settlement_deduction_cny=_money(
+            advertising_settlement_deduction
+        ),
         forward_operations_used_cny=forward_operations_used,
         managed_operations_cny=managed,
         combined_pool_cny=combined_pool,
@@ -884,6 +897,10 @@ def _summary_for_orders(
         actual_advertising_spend_cny=_money(
             sum((order.actual_advertising_spend_cny for order in orders), ZERO)
         ),
+        advertising_settlement_deduction_cny=sum_field(
+            "advertising_settlement_deduction_cny"
+        )
+        or ZERO,
         other_platform_cost_cny=other_total,
         owner_profit_cny=sum_field("owner_profit_cny"),
         unresolved_order_count=blocking_order_count,
@@ -1358,16 +1375,48 @@ def _sum_other_platform(
     records: Sequence[EvidenceRecord],
     issues: list[ReconciliationIssue],
     group: OrderEvidenceGroup,
-) -> tuple[Decimal, bool]:
+) -> tuple[Decimal, bool, Decimal]:
     total = ZERO
     present = False
-    for aliases in _OTHER_PLATFORM_FIELD_GROUPS:
-        subtotal, seen = _sum_first_alias(
-            records, aliases, issues, group, "other platform fee"
+    advertising_settlement_deduction = ZERO
+    for record in records:
+        is_advertising_settlement = _is_advertising_settlement_marker(record.row)
+        field_groups = (
+            *_OTHER_PLATFORM_FIELD_GROUPS_EXCLUDING_DEDUCTION,
+            _DEDUCTION_FIELDS,
         )
-        total += subtotal
-        present = present or seen
-    return total, present
+        for group_index, aliases in enumerate(field_groups):
+            is_deduction_group = aliases == _DEDUCTION_FIELDS
+            advertising_reconciliation_eligible = (
+                group_index == 0 or is_deduction_group
+            )
+            key, value = _first_item(record.row, aliases)
+            if key is None:
+                continue
+            if not is_deduction_group:
+                # A recognized zero still proves that the generic report field was
+                # supplied.  Classification only controls where a non-zero amount
+                # is routed; it does not erase evidence completeness.
+                present = True
+            try:
+                amount = _decimal(value, key)
+            except FinanceCalculationError as exc:
+                issues.append(
+                    _group_issue(
+                        group,
+                        "invalid_other_platform_fee",
+                        str(exc),
+                        (record.evidence_id,),
+                    )
+                )
+                continue
+            if is_advertising_settlement and advertising_reconciliation_eligible:
+                advertising_settlement_deduction += amount
+            else:
+                total += amount
+                if is_deduction_group:
+                    present = True
+    return total, present, advertising_settlement_deduction
 
 
 def _retail_return_quantity(row: Mapping[str, Any]) -> tuple[Decimal, Decimal] | None:
@@ -1415,6 +1464,22 @@ def _has_logistics_marker(row: Mapping[str, Any]) -> bool:
     return any(value in marker for value in ("物流", "логист", "delivery", "logistic"))
 
 
+def _is_advertising_settlement_marker(row: Mapping[str, Any]) -> bool:
+    for key in _ADVERTISING_SETTLEMENT_OPERATION_NAME_FIELDS:
+        marker = _normalize_operation_marker(row.get(key))
+        if marker in _ADVERTISING_SETTLEMENT_OPERATION_NAMES:
+            return True
+    for key in _ADVERTISING_SETTLEMENT_OPERATION_CODE_FIELDS:
+        marker = _normalize_operation_marker(row.get(key))
+        if marker in _ADVERTISING_SETTLEMENT_OPERATION_CODES:
+            return True
+    return False
+
+
+def _normalize_operation_marker(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
 def _marker_text(row: Mapping[str, Any]) -> str:
     return " ".join(
         str(row.get(key) or "").strip().casefold()
@@ -1427,6 +1492,10 @@ def _marker_text(row: Mapping[str, Any]) -> str:
             "bonus_type_name",
             "operationType",
             "operation_type",
+            "operationName",
+            "operation_name",
+            "serviceName",
+            "service_name",
             "status",
             "eventType",
             "event_type",
@@ -1678,11 +1747,50 @@ _DIRECT_FORWARD_FIELDS = (
     "forward_logistics_cny",
     "logistics_cny",
 )
-_OTHER_PLATFORM_FIELD_GROUPS = (
+_OTHER_PLATFORM_FIELD_GROUPS_EXCLUDING_DEDUCTION = (
     ("otherPlatformFeeCny", "other_platform_fee_cny", "otherCostCny", "other_cost_cny"),
     ("penaltyCny", "penalty_cny", "penalty"),
-    ("deductionCny", "deduction_cny", "deduction"),
     ("acceptanceFeeCny", "acceptance_fee_cny", "acceptanceFee", "acceptance_fee"),
+)
+_DEDUCTION_FIELDS = ("deductionCny", "deduction_cny", "deduction")
+_ADVERTISING_SETTLEMENT_OPERATION_NAME_FIELDS = (
+    "sellerOperName",
+    "seller_oper_name",
+    "docTypeName",
+    "doc_type_name",
+    "operationName",
+    "operation_name",
+    "operationType",
+    "operation_type",
+    "serviceName",
+    "service_name",
+)
+_ADVERTISING_SETTLEMENT_OPERATION_CODE_FIELDS = (
+    "operationCode",
+    "operation_code",
+    "serviceCode",
+    "service_code",
+    "eventType",
+    "event_type",
+)
+_ADVERTISING_SETTLEMENT_OPERATION_NAMES = frozenset(
+    {
+        "广告费用周期扣款",
+        "广告费结算扣除",
+        "活动推广费用扣除",
+        "удержание за рекламу",
+        "расходы на продвижение",
+        "advertising settlement deduction",
+        "advertising promotion settlement",
+        "advertising promotion settlement deduction",
+        "promotion fee deduction",
+    }
+)
+_ADVERTISING_SETTLEMENT_OPERATION_CODES = frozenset(
+    {
+        "advertising_settlement",
+        "advertising_settlement_deduction",
+    }
 )
 _RETURN_MARKERS = (
     "退货",

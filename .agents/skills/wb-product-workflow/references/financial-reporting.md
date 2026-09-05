@@ -22,7 +22,8 @@ Use a separate `funding` flow for any money-moving action:
 `preflight -> plan -> approve -> execute -> readback -> archive`
 
 A report may expose a proposed allocation, but publishing a report never
-executes a withdrawal, advertising deposit, or campaign mutation.
+executes a withdrawal, balance-funded campaign-budget allocation, or campaign
+mutation.
 
 ## Store scope and time
 
@@ -138,7 +139,7 @@ Settled, cash-reconciled rows may be used for confirmed allocation. Unsettled
 or unresolved rows remain visible but are excluded from confirmed cash totals.
 An incomplete auxiliary source must not hold the whole report hostage.
 
-## Funding, withdrawals, and advertising-fee debt
+## Settlement-balance advertising, withdrawals, and legacy debt
 
 Funding is calculated per store and is independent from order-profit history.
 The report distinguishes:
@@ -147,8 +148,10 @@ The report distinguishes:
   advertising allocation;
 - the order-ledger allocation ceiling for withdrawal;
 - the live platform balance and the fresh execution-time funding plan;
-- confirmed historical withdrawals, pending withdrawal requests, and
-  advertising-fee debt.
+- confirmed historical withdrawals and pending withdrawal requests;
+- balance-funded campaign-budget allocations, actual campaign consumption,
+  and WB settlement-cycle deductions as three separate evidence layers;
+- pre-cutover withdrawal-linked advertising debt, when it exists.
 
 The live execution plan must use a fresh same-store balance readback and
 reserve/lock checks. A report balance snapshot is not an execution preflight.
@@ -158,22 +161,31 @@ reported as processing is not a settled withdrawal; keep it in a separate
 pending view until platform success or settlement evidence arrives.
 
 WB withdrawal remains a manual seller-portal action unless a supported public
-write route is independently verified. Advertising deposits, when supported,
-require an exact store/campaign/currency/amount dry run, a fresh preflight, an
-explicit approval of that same fingerprint, one execution attempt, and a
-readback. Do not select promotional credits or other non-cash allowances
-implicitly from a finance report. A separately approved advertising funding
-plan may explicitly select an eligible promotional source after verifying its
-currency, expiry, permitted share, balance and expected source debit. Never
-fall back to cash or another source without a new approval. Promotional credit
-is not withdrawable cash or realized order profit.
+write route is independently verified. Under the active policy from
+2026-09-05, advertising allocation uses the same store's WB mutual-settlement
+`balance` (`net`, request `type=1`) through `/adv/v1/budget/deposit`; it does
+not require a prior withdrawal or an external cash recharge. The allocation
+still requires an exact store/campaign/currency/amount dry run, a fresh balance
+and reserve preflight, explicit approval of that same fingerprint, one
+execution attempt, and campaign-budget readback. Do not select promotional
+credits or silently fall back to another source.
 
-If a withdrawal record does not state the advertising amount due and the
-amount withheld, mark its fee state `unknown/PENDING_DATA`; do not report a
-numeric zero. Once actual, timestamped platform advertising-payment evidence
-is available, apply it only to the same store and allocate it FIFO to eligible
-withdrawal debt, preserving unapplied amounts. Corrected fee facts are added
-as immutable correction evidence; the original user record remains intact.
+Reconcile actual campaign consumption from official promotion evidence and
+the later settlement-cycle charge from official finance/balance evidence.
+Neither is a second expense outside the policy-derived advertising-and-return
+pool. Exclude a finance deduction from generic other-platform cost only when a
+stable operation code or an exact approved operation name identifies it as the
+settlement-cycle advertising charge; retain the source row for reconciliation.
+
+Withdrawals on or after the cutover have advertising fee state
+`settlement_balance`: due, withheld, and debt are zero/not applicable because
+the advertising obligation is independent of that withdrawal. Historical
+pre-cutover withdrawal debt remains immutable and is never cleared merely by
+the new policy. A new balance-funded campaign allocation, campaign consumption,
+or settlement-cycle deduction must never clear it. For a legacy withdrawal with
+missing fee facts, keep `unknown/PENDING_DATA`; only a successful, explicitly
+identified same-store legacy-debt payment may be allocated FIFO. Corrections
+append evidence; they never rewrite the original record.
 
 ## Workbook and archive
 
@@ -187,8 +199,9 @@ never delete or silently replace an earlier report version.
 ## Scheduler and safety
 
 The daily controller should sync through the last complete financial day, run
-read-only advertising-payment reconciliation, generate due weekly/monthly
-reports, and bridge the canonical workbook. Period-close runs use the longer
+read-only advertising consumption/settlement reconciliation plus any legacy
+advertising-payment debt reconciliation, generate due weekly/monthly reports,
+and bridge the canonical workbook. Period-close runs use the longer
 repair window and publish open items on schedule. Record phase timings, source
 coverage, watermarks, hashes, and failures.
 

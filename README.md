@@ -174,7 +174,7 @@ python -m wb_manager finance report --kind weekly --period auto
 # Plan-only calculation from a FINAL or RESTATED weekly report
 python -m wb_manager finance funds-plan --report-id "weekly-report-id"
 
-# Record the exact immutable advertising-deposit plan as a dry-run proposal
+# Record the exact immutable settlement-balance campaign-budget plan as a dry-run proposal
 python -m wb_manager finance ads-deposit --plan "E:\path\approved-plan.json" --approved-by "operator-name"
 
 # After reviewing that recorded proposal, approve and execute the exact same fingerprint
@@ -190,7 +190,8 @@ Financial calculation is fail-closed:
 - the managed-operations fee is 2% and the combined advertising-and-return pool is 3%; return logistics consumes the pool first and actual campaign spend is reconciliation-only, never a second deduction;
 - the first cumulative history is informational and creates no retroactive funding obligation; afterward `suggested withdrawal = max(0, platform available balance - post-activation unallocated advertising accrual - approved/executing unread advertising deposits - other locked funds)`;
 - withdrawal is a plan-only amount and remains a manual seller-portal action because WB has no supported public withdrawal API;
-- advertising funding is the only supported money write. The immutable plan freezes store, campaign, CNY amount, source balance and evidence time, the ledger-derived advertising reserve, approver, approval time, and expiry. `policyCapCny` is not self-declared: it must exactly equal that current ledger-derived reserve under the active finance policy;
+- campaign-budget allocation is the only supported money write. It uses the same store's WB mutual-settlement `balance` (`net`, request `type=1`), so no separate withdrawal or external cash recharge is required. The immutable plan freezes store, campaign, CNY amount, source balance and evidence time, the ledger-derived advertising reserve, approver, approval time, and expiry. `policyCapCny` is not self-declared: it must exactly equal that current ledger-derived reserve under the active finance policy;
+- WB later nets advertising charges from future sales on its settlement cycle. Those deductions reconcile the 3% advertising-and-return pool and are not charged again as other platform cost. Withdrawal-linked advertising debt that predates the private-policy cutover remains in the legacy ledger; later withdrawals create no new advertising-fee debt;
 - the first command records a `proposed` ledger event and never writes to WB. `--confirm-live` requires that exact prior proposal, records the approval transition under the store funds lock, then rechecks campaign ownership/status, campaign budget, same-token seller-balance currency, source balance, policy cap, and reserve before the single non-retried POST;
 - an unknown POST outcome triggers one immediate read-only campaign-budget check. Later calls with the same fingerprint remain readback-only—never another POST—until the expected budget delta is confirmed or the action remains `unknown`.
 
