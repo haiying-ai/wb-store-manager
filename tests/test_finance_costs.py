@@ -98,6 +98,37 @@ def _write_sectioned_quote_xlsx(path: Path) -> None:
         archive.writestr("xl/worksheets/sheet1.xml", worksheet)
 
 
+def _write_cny_quote_xlsx(path: Path) -> None:
+    worksheet = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="5">
+      {_inline_cell("E5", "规格")}
+      {_inline_cell("F5", "卢布报价")}
+      {_inline_cell("G5", "人民币报价（¥）")}
+    </row>
+    <row r="6">
+      {_inline_cell("E6", "iPhone 12mini-128gb-Black")}
+      {_number_cell("F6", "14950")}
+      {_number_cell("G6", "1300")}
+    </row>
+  </sheetData>
+</worksheet>"""
+    workbook = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="0830报价" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"""
+    relationships = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("xl/workbook.xml", workbook)
+        archive.writestr("xl/_rels/workbook.xml.rels", relationships)
+        archive.writestr("xl/worksheets/sheet1.xml", worksheet)
+
+
 def test_xlsx_parses_realistic_headers_and_emits_ledger_row(tmp_path: Path) -> None:
     quote = tmp_path / "7月4日报价单.xlsx"
     _write_quote_xlsx(quote)
@@ -144,6 +175,24 @@ def test_xlsx_supports_repeated_brand_sections_and_contact_footers(tmp_path: Pat
         "SAMSUNGS22ULTRA-1TB-BLACK",
     ]
     assert [row.source_row for row in rows] == [3, 6]
+
+
+def test_cny_source_uses_direct_cost_and_preserves_rub_evidence(tmp_path: Path) -> None:
+    quote = tmp_path / "0830.xlsx"
+    _write_cny_quote_xlsx(quote)
+
+    rows = parse_cost_quote(
+        quote,
+        effective_from="2026-09-06T13:08:38+03:00",
+        source_currency="CNY",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].source_currency == "CNY"
+    assert rows[0].cost_cny == Decimal("1300.00")
+    assert rows[0].cost_rub == Decimal("14950")
+    assert rows[0].rub_per_cny == Decimal("11.5")
+    assert rows[0].as_dict()["sourceCurrency"] == "CNY"
 
 
 def test_product_key_normalization_is_case_separator_safe_and_fixes_bule() -> None:

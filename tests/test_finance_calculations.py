@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 from wb_manager.finance_calculations import (
+    aggregate_pool_for_orders,
     build_order_groups,
     calculate_financial_report,
 )
@@ -74,6 +75,12 @@ def sale_finance(**overrides):
         "otherPlatformFeeCny": "1",
     }
     row.update(overrides)
+    if "forPayCny" not in overrides:
+        quantity = Decimal(str(row.get("quantity", row.get("retailAmount", "1"))))
+        g = Decimal(str(row["retailPriceWithDisc"])) * quantity
+        row["forPayCny"] = str(
+            g - Decimal(str(row["commissionCny"])) - Decimal(str(row["paymentFeeCny"]))
+        )
     return row
 
 
@@ -106,6 +113,16 @@ def return_finance(
         "otherPlatformFeeCny": "0",
     }
     row.update(overrides)
+    if "forPayCny" not in overrides:
+        if include_refund:
+            g = -Decimal(str(row["retailPriceWithDisc"]))
+            row["forPayCny"] = str(
+                g
+                - Decimal(str(row["commissionCny"]))
+                - Decimal(str(row["paymentFeeCny"]))
+            )
+        else:
+            row["forPayCny"] = "0"
     return row
 
 
@@ -117,6 +134,79 @@ def calculate(finance_rows, **kwargs):
         policy=kwargs.pop("policy", POLICY),
         **kwargs,
     )
+
+
+def test_reporting_policy_is_locked_by_order_creation_timestamp():
+    old_policy = deepcopy(POLICY)
+    old_policy["policyId"] = "finance-old-3pct"
+    new_policy = deepcopy(POLICY)
+    new_policy["policyId"] = "finance-new-5pct"
+    new_policy["costs"]["advertisingAndReturns"] = {
+        "reserveAllocationMode": "SEPARATE_RETURN_AND_PROMOTION",
+        "returnRiskReserveRate": "0.02",
+        "promotionReserveRate": "0.03",
+        "totalReserveRate": "0.05",
+    }
+
+    class Timeline:
+        active_policy = new_policy
+
+        @staticmethod
+        def select(created_at):
+            return new_policy if created_at >= "2026-09-06T13:08:38+03:00" else old_policy
+
+    report = calculate_financial_report(
+        order_rows=[
+            order_row(orderCreatedAt="2026-09-06T13:08:37+03:00"),
+            order_row(
+                srid="srid-2",
+                orderId="order-2",
+                shkId="shk-2",
+                orderCreatedAt="2026-09-06T13:08:38+03:00",
+            ),
+        ],
+        finance_rows=[
+            sale_finance(orderDt="2026-09-06T13:08:37+03:00", deliveryService="0"),
+            sale_finance(
+                rrdId="rrd-sale-2",
+                srid="srid-2",
+                orderId="order-2",
+                shkId="shk-2",
+                orderDt="2026-09-06T13:08:38+03:00",
+                deliveryService="0",
+            ),
+        ],
+        cost_selector=cost_selector(),
+        policy=Timeline(),
+    ).to_dict()
+
+    old, new = sorted(report["orders"], key=lambda row: row["orderCreatedAt"])
+    assert old["financialReportingPolicyVersionId"] == "finance-old-3pct"
+    assert old["combinedPoolCny"] == "30.00"
+    assert old["strictOwnerProfitCny"] == "189.00"
+    assert new["financialReportingPolicyVersionId"] == "finance-new-5pct"
+    assert new["returnRiskReserveCny"] == "20.00"
+    assert new["promotionReserveCny"] == "30.00"
+    assert new["totalPolicyReserveCny"] == "50.00"
+    assert new["advertisingProvisionCny"] == "30.00"
+    assert new["strictOwnerProfitCny"] == "169.00"
+
+
+def test_separate_return_reserve_only_charges_excess_and_never_reduces_promotion():
+    pool = aggregate_pool_for_orders(
+        [
+            {
+                "reserveAllocationMode": "SEPARATE_RETURN_AND_PROMOTION",
+                "combinedPoolCny": "50",
+                "returnRiskReserveCny": "20",
+                "promotionReserveCny": "30",
+                "returnLogisticsCny": "25",
+            }
+        ]
+    )
+
+    assert pool.advertising_provision_cny == Decimal("30.00")
+    assert pool.excess_return_loss_cny == Decimal("5.00")
 
 
 def test_transitive_closure_uses_any_identity_but_never_crosses_stores():
@@ -222,166 +312,74 @@ def test_completed_order_uses_actual_finance_components_and_decimal_contract():
     assert detail.outcome == "completed"
     assert detail.net_quantity == Decimal("1")
     assert detail.net_turnover_cny == Decimal("1000.00")
+    assert detail.for_pay_cny == Decimal("842.00")
     assert detail.purchase_cost_cny == Decimal("600.00")
     assert detail.actual_commission_cny == Decimal("150.00")
+    assert detail.commission_formula_cny == Decimal("150.00")
+    assert detail.commission_reconciliation_difference_cny == Decimal("0.00")
     assert detail.actual_payment_fee_cny == Decimal("8.00")
+    assert detail.account_increment_cny == Decimal("842.00")
+    assert detail.for_pay_reconciliation_difference_cny == Decimal("0.00")
+    assert detail.cash_reconciliation_status == "PASS"
     assert detail.actual_forward_logistics_cny == Decimal("8.00")
     assert detail.actual_storage_cny == Decimal("2.00")
     assert detail.actual_other_platform_fee_cny == Decimal("1.00")
     assert detail.managed_operations_cny == Decimal("20.00")
     assert detail.combined_pool_cny == Decimal("30.00")
+    assert detail.rule_withdrawable_cny == Decimal("812.00")
     assert detail.advertising_provision_cny == Decimal("30.00")
     assert detail.actual_advertising_spend_cny == Decimal("25.00")
     assert detail.advertising_reconciliation_variance_cny == Decimal("5.00")
     assert detail.owner_profit_cny == Decimal("181.00")
+    assert detail.strict_owner_profit_cny == Decimal("181.00")
     assert report.stores[0].owner_profit_cny == Decimal("181.00")
+    assert report.stores[0].confirmed_order_count == 1
+    assert report.stores[0].open_item_order_count == 0
 
 
 @pytest.mark.parametrize(
-    "operation_marker",
-    [
-        "广告费结算扣除",
-        "活动推广费用扣除",
-        "Удержание за рекламу",
-        "Расходы на продвижение",
-        "Advertising settlement deduction",
-        "Promotion fee deduction",
-    ],
-)
-def test_explicit_advertising_deduction_is_reconciliation_only(operation_marker):
-    report = calculate(
-        [
-            sale_finance(
-                otherPlatformFeeCny="0",
-                deductionCny="12.34",
-                sellerOperName=operation_marker,
-            )
-        ]
-    )
-
-    detail = report.orders[0]
-    payload = report.to_dict()
-    assert detail.actual_other_platform_fee_cny == Decimal("0.00")
-    assert detail.advertising_settlement_deduction_cny == Decimal("12.34")
-    assert detail.owner_profit_cny == Decimal("182.00")
-    assert payload["orders"][0]["advertisingSettlementDeductionCny"] == "12.34"
-    assert payload["stores"][0]["advertisingSettlementDeductionCny"] == "12.34"
-    assert payload["totals"]["advertisingSettlementDeductionCny"] == "12.34"
-
-
-def test_unmarked_deduction_remains_other_platform_cost():
-    report = calculate(
-        [
-            sale_finance(
-                otherPlatformFeeCny="0",
-                deductionCny="12.34",
-                sellerOperName="Иное удержание",
-            )
-        ]
-    )
-
-    detail = report.orders[0]
-    assert detail.actual_other_platform_fee_cny == Decimal("12.34")
-    assert detail.advertising_settlement_deduction_cny == Decimal("0.00")
-    assert detail.owner_profit_cny == Decimal("169.66")
-
-
-@pytest.mark.parametrize("marker_field", ["operationName", "serviceName", "docTypeName"])
-def test_advertising_deduction_uses_all_supported_operation_fields(marker_field):
-    report = calculate(
-        [
-            sale_finance(
-                otherPlatformFeeCny="0",
-                deduction="7.00",
-                **{marker_field: "Advertising promotion settlement"},
-            )
-        ]
-    )
-
-    assert report.orders[0].advertising_settlement_deduction_cny == Decimal("7.00")
-    assert report.orders[0].actual_other_platform_fee_cny == Decimal("0.00")
-
-
-@pytest.mark.parametrize(
-    ("marker_field", "operation_marker"),
+    ("marker_field", "marker"),
     [
         ("operationName", "广告费用周期扣款"),
         ("sellerOperName", "Удержание за рекламу"),
         ("docTypeName", "Advertising promotion settlement deduction"),
     ],
 )
-def test_advertising_settlement_uses_exact_supported_operation_names(
-    marker_field, operation_marker
+def test_advertising_cycle_deduction_is_reconciliation_only_in_all_languages(
+    marker_field, marker
 ):
-    row = sale_finance(
-        otherCostCny="9.50",
-        **{marker_field: operation_marker},
-    )
-    row.pop("otherPlatformFeeCny")
-    report = calculate([row])
-
-    detail = report.orders[0]
-    assert detail.advertising_settlement_deduction_cny == Decimal("9.50")
-    assert detail.actual_other_platform_fee_cny == Decimal("0.00")
-
-
-@pytest.mark.parametrize(
-    "operation_marker",
-    [
-        "Promotion discount compensation",
-        "促销活动补贴",
-        "推广折扣补偿",
-    ],
-)
-def test_similar_promotional_text_remains_other_platform_cost(operation_marker):
     report = calculate(
         [
             sale_finance(
+                deduction="30",
                 otherPlatformFeeCny="0",
-                deductionCny="7.00",
-                operationName=operation_marker,
+                **{marker_field: marker},
             )
         ]
+    )
+
+    detail = report.orders[0]
+    assert detail.advertising_settlement_deduction_cny == Decimal("30.00")
+    assert detail.actual_other_platform_fee_cny == Decimal("0.00")
+    assert detail.strict_owner_profit_cny == Decimal("182.00")
+    assert detail.component_sources["advertisingSettlementDeduction"] == (
+        "financeActualReconciliationOnly"
+    )
+    payload = report.to_dict()
+    assert payload["orders"][0]["advertisingSettlementDeductionCny"] == "30.00"
+    assert payload["orders"][0]["otherPlatformCostCny"] == "0.00"
+    assert payload["totals"]["advertisingSettlementDeductionCny"] == "30.00"
+
+
+def test_unmarked_deduction_remains_an_other_platform_cost():
+    report = calculate(
+        [sale_finance(deduction="30", operationName="Generic service deduction")]
     )
 
     detail = report.orders[0]
     assert detail.advertising_settlement_deduction_cny == Decimal("0.00")
-    assert detail.actual_other_platform_fee_cny == Decimal("7.00")
-
-
-def test_stable_advertising_settlement_code_is_supported():
-    report = calculate(
-        [
-            sale_finance(
-                otherPlatformFeeCny="0",
-                deductionCny="6.25",
-                operationCode="advertising_settlement_deduction",
-            )
-        ]
-    )
-
-    detail = report.orders[0]
-    assert detail.advertising_settlement_deduction_cny == Decimal("6.25")
-    assert detail.actual_other_platform_fee_cny == Decimal("0.00")
-
-
-def test_advertising_marker_keeps_penalty_and_acceptance_in_profit_costs():
-    report = calculate(
-        [
-            sale_finance(
-                otherPlatformFeeCny="5.00",
-                deductionCny="7.00",
-                penaltyCny="2.00",
-                acceptanceFeeCny="3.00",
-                operationName="广告费用周期扣款",
-            )
-        ]
-    )
-
-    detail = report.orders[0]
-    assert detail.advertising_settlement_deduction_cny == Decimal("12.00")
-    assert detail.actual_other_platform_fee_cny == Decimal("5.00")
-    assert detail.owner_profit_cny == Decimal("177.00")
+    assert detail.actual_other_platform_fee_cny == Decimal("31.00")
+    assert detail.strict_owner_profit_cny == Decimal("151.00")
 
 
 @pytest.mark.parametrize(
@@ -489,6 +487,7 @@ def test_correction_uses_signed_adjustments_and_earliest_creation_for_cost():
         "date": "2026-08-20T00:00:00+03:00",
         "sellerOperName": "Корректировка цены",
         "buyerPaidAdjustmentCny": "-100",
+        "forPayCny": "-84.20",
         "commissionCny": "-15",
         "paymentFeeCny": "-0.80",
         "storageFee": "0",
@@ -562,8 +561,163 @@ def test_partial_return_can_exceed_three_percent_pool_without_double_counting_ad
     assert detail.advertising_provision_cny == Decimal("0.00")
     assert detail.excess_return_loss_cny == Decimal("5.00")
     profit_before_reconciliation = detail.owner_profit_cny
+    assert detail.strict_owner_profit_cny == Decimal("23.20")
     assert detail.actual_advertising_spend_cny == Decimal("50.00")
     assert detail.owner_profit_cny == profit_before_reconciliation
+
+
+def test_store_period_pool_aggregates_before_consuming_return_logistics():
+    """A return in one order consumes the other orders' unused 3% reserve."""
+
+    sale_a = sale_finance(
+        rrdId="rrd-sale-a",
+        srid="srid-a",
+        orderId="order-a",
+        shkId="shk-a",
+    )
+    sale_b = sale_finance(
+        rrdId="rrd-sale-b",
+        srid="srid-b",
+        orderId="order-b",
+        shkId="shk-b",
+    )
+    return_b = return_finance(
+        rrd_id="rrd-return-b",
+        srid="srid-return-b",
+        orderId="order-b",
+        shkId="shk-b",
+        delivery="40",
+    )
+    report = calculate(
+        [sale_a, sale_b, return_b],
+        order_rows=[
+            order_row(srid="srid-a", orderId="order-a", shkId="shk-a"),
+            order_row(srid="srid-b", orderId="order-b", shkId="shk-b"),
+        ],
+    )
+
+    assert report.status == "FINAL"
+    detail_a = next(row for row in report.orders if row.order_key == "srid:srid-a")
+    detail_b = next(row for row in report.orders if row.order_key == "srid:srid-b")
+    # Per-order values remain available for audit and explain why the store
+    # level result differs from a sum of independent max() calculations.
+    assert detail_a.combined_pool_cny == Decimal("30.00")
+    assert detail_a.advertising_provision_cny == Decimal("30.00")
+    assert detail_b.actual_return_logistics_cny == Decimal("40.00")
+    assert detail_b.excess_return_loss_cny == Decimal("40.00")
+
+    summary = report.stores[0]
+    assert summary.combined_pool_cny == Decimal("30.00")
+    assert summary.return_logistics_cny == Decimal("40.00")
+    assert summary.advertising_provision_cny == Decimal("0.00")
+    assert summary.excess_return_loss_cny == Decimal("10.00")
+    # The excess return loss is consumed once at store/period scope, not once
+    # for every order.
+    assert summary.strict_owner_profit_cny == Decimal("160.00")
+    assert report.to_dict()["totals"]["advertisingProvisionCny"] == "0.00"
+
+
+def test_pool_aggregation_ignores_negative_normal_pool_contributions():
+    aggregate = aggregate_pool_for_orders(
+        [
+            {"combinedPoolCny": "30.00", "returnLogisticsCny": "0.00"},
+            {"combinedPoolCny": "-5.00", "returnLogisticsCny": "10.00"},
+        ]
+    )
+
+    assert aggregate.combined_pool_cny == Decimal("30.00")
+    assert aggregate.return_logistics_cny == Decimal("10.00")
+    assert aggregate.advertising_provision_cny == Decimal("20.00")
+    assert aggregate.excess_return_loss_cny == Decimal("0.00")
+
+
+def test_all_totals_sum_store_pool_allocations_without_cross_store_netting():
+    sale_owner = sale_finance(
+        storeAlias="owner-store",
+        rrdId="rrd-owner",
+        srid="srid-owner",
+        orderId="order-owner",
+        shkId="shk-owner",
+    )
+    sale_new = sale_finance(
+        storeAlias="new-store",
+        rrdId="rrd-new",
+        srid="srid-new",
+        orderId="order-new",
+        shkId="shk-new",
+    )
+    return_new = return_finance(
+        rrd_id="rrd-return-new",
+        storeAlias="new-store",
+        srid="srid-return-new",
+        orderId="order-new",
+        shkId="shk-new",
+        delivery="40",
+    )
+    report = calculate(
+        [sale_owner, sale_new, return_new],
+        order_rows=[
+            order_row(
+                storeAlias="owner-store",
+                srid="srid-owner",
+                orderId="order-owner",
+                shkId="shk-owner",
+            ),
+            order_row(
+                storeAlias="new-store",
+                srid="srid-new",
+                orderId="order-new",
+                shkId="shk-new",
+            ),
+        ],
+    )
+
+    by_store = {summary.store_alias: summary for summary in report.stores}
+    assert by_store["owner-store"].advertising_provision_cny == Decimal("30.00")
+    assert by_store["new-store"].advertising_provision_cny == Decimal("0.00")
+    # If ALL were calculated directly, the owner's 30 CNY pool could be
+    # incorrectly netted against the new store's 40 CNY return charge.
+    assert report.to_dict()["totals"]["advertisingProvisionCny"] == "30.00"
+    assert report.to_dict()["totals"]["excessReturnLossCny"] == "40.00"
+
+
+def test_open_order_does_not_null_confirmed_settled_totals():
+    open_order = order_row(
+        srid="srid-open",
+        orderId="order-open",
+        shkId="shk-open",
+        status="in_delivery",
+        completedAt=None,
+    )
+    report = calculate(
+        [sale_finance()],
+        order_rows=[order_row(), open_order],
+    )
+
+    assert report.status == "PARTIAL"
+    summary = report.stores[0]
+    assert summary.order_count == 2
+    assert summary.confirmed_order_count == 1
+    assert summary.open_item_order_count == 1
+    assert summary.net_turnover_cny == Decimal("1000.00")
+    assert summary.for_pay_cny == Decimal("842.00")
+    assert summary.account_increment_cny == Decimal("842.00")
+    assert summary.rule_withdrawable_cny == Decimal("812.00")
+    assert summary.strict_owner_profit_cny == Decimal("181.00")
+
+
+def test_cash_reconciliation_mismatch_is_open_and_not_confirmed_cash():
+    report = calculate([sale_finance(forPayCny="800")])
+
+    assert report.status == "PARTIAL"
+    detail = report.orders[0]
+    assert detail.cash_reconciliation_status == "FAIL"
+    assert detail.commission_reconciliation_difference_cny == Decimal("-42.00")
+    assert detail.for_pay_reconciliation_difference_cny == Decimal("42.00")
+    assert detail.strict_owner_profit_cny is None
+    assert report.stores[0].confirmed_order_count == 0
+    assert report.stores[0].open_item_order_count == 1
+    assert report.stores[0].account_increment_cny is None
 
 
 def test_overlapping_collection_deduplicates_finance_rows_by_stable_id():
@@ -614,6 +768,16 @@ def test_result_is_json_serializable_and_exposes_store_summary_and_anomalies():
 
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     assert '"netTurnoverCny": "1000.00"' in encoded
+    assert payload["orders"][0]["salesAmountGCny"] == "1000.00"
+    assert payload["orders"][0]["actualCommissionCCny"] == "150.00"
+    assert payload["orders"][0]["acquiringFeeCny"] == "8.00"
+    assert payload["orders"][0]["forPayCny"] == "842.00"
+    assert payload["orders"][0]["accountIncrementCny"] == "842.00"
+    assert payload["orders"][0]["ruleWithdrawableCny"] == "812.00"
+    assert payload["orders"][0]["strictOwnerProfitCny"] == "181.00"
+    assert payload["orders"][0]["cashReconciliationStatus"] == "PASS"
     assert payload["stores"][0]["status"] == "FINAL"
+    assert payload["stores"][0]["confirmedOrderCount"] == 1
+    assert payload["stores"][0]["openItemOrderCount"] == 0
     assert payload["totals"]["ownerProfitCny"] == "181.00"
     assert payload["blockers"] == []

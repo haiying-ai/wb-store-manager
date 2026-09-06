@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,8 +21,10 @@ ADVERTISING_FUNDING_SOURCE = "balance"
 ADVERTISING_BALANCE_FIELD = "net"
 ADVERTISING_REQUEST_TYPE = 1
 ADVERTISING_DEDUCTION_MODE = "future_sales_settlement_netting"
-WITHDRAWAL_ADVERTISING_DEBT_CUTOVER = "2026-09-05"
 WITHDRAWAL_ADVERTISING_DEBT_CUTOVER_MODE = "not_applicable_to_withdrawal"
+LEGACY_SHARED_POOL = "LEGACY_SHARED_POOL"
+SEPARATE_RETURN_AND_PROMOTION = "SEPARATE_RETURN_AND_PROMOTION"
+MOSCOW = ZoneInfo("Europe/Moscow")
 
 
 class FinancialPolicyError(RuntimeError):
@@ -33,29 +36,71 @@ class PhoneFinancialPolicy:
     reporting_policy_id: str
     pricing_policy_id: str
     effective_from: str
+    effective_to: str | None
     reporting_currency: str
     managed_operations_rate: Decimal
     combined_advertising_return_pool_rate: Decimal
+    reserve_allocation_mode: str
+    return_risk_reserve_rate: Decimal
+    promotion_reserve_rate: Decimal
+    total_reserve_rate: Decimal
     advertising_deposit_cap_rule: str
-    settlement_balance_contract_enabled: bool
-    advertising_funding_source: str | None
-    advertising_balance_field: str | None
-    advertising_request_type: int | None
-    advertising_deduction_mode: str | None
-    withdrawal_advertising_debt_cutover: date | None
+    advertising_funding_source: str
+    advertising_balance_field: str
+    advertising_request_type: int
+    advertising_deduction_mode: str
     raw: dict[str, Any]
-
-    @property
-    def settlement_balance_enabled(self) -> bool:
-        """Compatibility alias for the explicit modern-contract capability flag."""
-
-        return self.settlement_balance_contract_enabled
 
     def managed_operations_amount(self, signed_buyer_paid_cny: Decimal) -> Decimal:
         return max(Decimal("0"), signed_buyer_paid_cny) * self.managed_operations_rate
 
     def combined_pool_amount(self, signed_buyer_paid_cny: Decimal) -> Decimal:
         return max(Decimal("0"), signed_buyer_paid_cny) * self.combined_advertising_return_pool_rate
+
+    def return_risk_reserve_amount(self, signed_buyer_paid_cny: Decimal) -> Decimal:
+        return max(Decimal("0"), signed_buyer_paid_cny) * self.return_risk_reserve_rate
+
+    def promotion_reserve_amount(self, signed_buyer_paid_cny: Decimal) -> Decimal:
+        return max(Decimal("0"), signed_buyer_paid_cny) * self.promotion_reserve_rate
+
+
+@dataclass(frozen=True)
+class PhoneFinancialPolicyTimeline:
+    """Select the immutable reporting policy in force when an order was created.
+
+    The immediate predecessor is intentionally used as the carry-back policy.  It
+    preserves the already-published three-percent treatment for every historical
+    order without depending on incomplete policies from older schema generations.
+    """
+
+    active_policy: PhoneFinancialPolicy
+    predecessor_policy: PhoneFinancialPolicy
+    historical_policies: tuple[PhoneFinancialPolicy, ...] = ()
+
+    def select(self, order_created_at: str | None) -> PhoneFinancialPolicy:
+        if not order_created_at:
+            return self.predecessor_policy
+        try:
+            created_at = _instant(order_created_at, "orderCreatedAt")
+            boundary = _instant(self.active_policy.effective_from, "effectiveFrom")
+        except FinancialPolicyError:
+            return self.predecessor_policy
+        policies = self.historical_policies or (self.predecessor_policy,)
+        candidates = (*policies, self.active_policy)
+        applicable = [
+            item
+            for item in candidates
+            if created_at >= _instant(item.effective_from, "effectiveFrom")
+        ]
+        if applicable:
+            return max(
+                applicable,
+                key=lambda item: _instant(item.effective_from, "effectiveFrom"),
+            )
+        return min(
+            policies,
+            key=lambda item: _instant(item.effective_from, "effectiveFrom"),
+        )
 
 
 def load_active_phone_financial_policy(
@@ -74,6 +119,27 @@ def load_active_phone_financial_policy(
         raise FinancialPolicyError(
             f"Referenced pricing policy is not active: {pricing.get('policyId')}"
         )
+
+    governance = data.get("governance") or {}
+    if int(data.get("schemaVersion") or 0) >= 5:
+        required_versioning = (
+            "effectiveDatedReportingPolicies",
+            "reportingPolicyVersionUsesOrderCreatedAt",
+            "requireExplicitSourceCurrency",
+            "rubCostImportsRequireExplicitExchangeRate",
+        )
+        missing_versioning = [
+            key for key in required_versioning if governance.get(key) is not True
+        ]
+        if missing_versioning:
+            raise FinancialPolicyError(
+                "Financial-policy versioning governance is incomplete: "
+                + ", ".join(missing_versioning)
+            )
+        if governance.get("latestTemplateForNonPurchaseCostRules") is not False:
+            raise FinancialPolicyError(
+                "Non-purchase-cost reporting rules must be selected by orderCreatedAt"
+            )
 
     reporting_policy_id = _required_text(data, "policyId", "financial reporting policy")
     pricing_policy_id = _required_text(pricing, "policyId", "pricing policy")
@@ -104,17 +170,25 @@ def load_active_phone_financial_policy(
     managed = costs.get("managedOperations") or {}
     advertising_returns = costs.get("advertisingAndReturns") or {}
     managed_rate = _decimal(managed.get("rate"), "managedOperations.rate")
-    combined_rate = _decimal(
-        advertising_returns.get("combinedPoolRate"),
-        "advertisingAndReturns.combinedPoolRate",
+    reserve_mode, return_risk_rate, promotion_rate, total_reserve_rate = (
+        _reserve_policy(advertising_returns)
     )
+    combined_rate = total_reserve_rate
     if managed_rate != Decimal("0.02"):
         raise FinancialPolicyError(
             f"Managed-operations rate must be 0.02, got {managed_rate}"
         )
-    if combined_rate != Decimal("0.03"):
+    if reserve_mode == LEGACY_SHARED_POOL and combined_rate != Decimal("0.03"):
         raise FinancialPolicyError(
-            f"Combined advertising-and-return pool rate must be 0.03, got {combined_rate}"
+            f"Legacy combined advertising-and-return pool rate must be 0.03, got {combined_rate}"
+        )
+    if reserve_mode == SEPARATE_RETURN_AND_PROMOTION and (
+        return_risk_rate != Decimal("0.02")
+        or promotion_rate != Decimal("0.03")
+        or combined_rate != Decimal("0.05")
+    ):
+        raise FinancialPolicyError(
+            "Separate reserves must be return risk 0.02 + promotion 0.03 = total 0.05"
         )
 
     _validate_return_logistics_contract(data, advertising_returns)
@@ -141,114 +215,209 @@ def load_active_phone_financial_policy(
         raise FinancialPolicyError(
             "Advertising-deposit funding governance is incomplete: " + ", ".join(missing)
         )
-
-    # Legacy private policy versions remain readable during a staged rollout,
-    # but they do not authorize settlement-balance writes. Once any modern
-    # field is declared, the complete contract is required so a partial upgrade
-    # cannot silently choose another money source or withdrawal cutover.
-    withdrawal_debt_value = funding.get("withdrawalAdvertisingDebt")
-    withdrawal_debt = (
-        withdrawal_debt_value if isinstance(withdrawal_debt_value, dict) else {}
-    )
-    settlement_keys = {
-        "fundingSource",
-        "platformBalanceField",
-        "platformRequestType",
-        "deductionMode",
-        "separateWithdrawalRequired",
-        "manualCashTopUpRequired",
-        "actualDeductionEvidenceRequired",
+    required_funding_values = {
+        "fundingSource": ADVERTISING_FUNDING_SOURCE,
+        "platformBalanceField": ADVERTISING_BALANCE_FIELD,
+        "platformRequestType": ADVERTISING_REQUEST_TYPE,
+        "deductionMode": ADVERTISING_DEDUCTION_MODE,
     }
-    modern_contract = bool(set(advertising_deposit) & settlement_keys) or (
-        "withdrawalAdvertisingDebt" in funding
+    invalid_funding_values = [
+        key
+        for key, expected in required_funding_values.items()
+        if advertising_deposit.get(key) != expected
+    ]
+    if invalid_funding_values:
+        raise FinancialPolicyError(
+            "Advertising campaign allocation must use WB settlement balance/net/type=1: "
+            + ", ".join(invalid_funding_values)
+        )
+    required_false = ("separateWithdrawalRequired", "manualCashTopUpRequired")
+    invalid_false = [key for key in required_false if advertising_deposit.get(key) is not False]
+    if invalid_false:
+        raise FinancialPolicyError(
+            "Advertising campaign allocation must not require withdrawal or cash top-up: "
+            + ", ".join(invalid_false)
+        )
+    if advertising_deposit.get("actualDeductionEvidenceRequired") is not True:
+        raise FinancialPolicyError(
+            "Platform advertising settlement deductions require actual readback evidence"
+        )
+
+    withdrawal_debt = funding.get("withdrawalAdvertisingDebt") or {}
+    cutover = _required_text(
+        withdrawal_debt,
+        "cutoverEffectiveFrom",
+        "funding.withdrawalAdvertisingDebt",
     )
-    funding_source: str | None = None
-    balance_field: str | None = None
-    request_type: int | None = None
-    deduction_mode: str | None = None
-    withdrawal_cutover: date | None = None
-    if modern_contract:
-        if not isinstance(withdrawal_debt_value, dict):
-            raise FinancialPolicyError(
-                "funding.withdrawalAdvertisingDebt must be an object for the "
-                "settlement-balance contract"
-            )
-        expected = {
-            "fundingSource": ADVERTISING_FUNDING_SOURCE,
-            "platformBalanceField": ADVERTISING_BALANCE_FIELD,
-            "platformRequestType": ADVERTISING_REQUEST_TYPE,
-            "deductionMode": ADVERTISING_DEDUCTION_MODE,
-            "separateWithdrawalRequired": False,
-            "manualCashTopUpRequired": False,
-            "actualDeductionEvidenceRequired": True,
-        }
-        invalid = [
-            key
-            for key, value in expected.items()
-            if not _contract_value_matches(advertising_deposit.get(key), value)
-        ]
-        if invalid:
-            raise FinancialPolicyError(
-                "Advertising campaign allocation must use WB settlement "
-                "balance/net/type=1 without withdrawal or cash top-up: "
-                + ", ".join(invalid)
-            )
-        cutover_text = _required_text(
-            withdrawal_debt,
-            "cutoverEffectiveFrom",
-            "funding.withdrawalAdvertisingDebt",
+    effective_from = _required_text(data, "effectiveFrom", "financial reporting policy")
+    if _instant(cutover, "funding.withdrawalAdvertisingDebt.cutoverEffectiveFrom") > _instant(
+        effective_from, "effectiveFrom"
+    ):
+        raise FinancialPolicyError(
+            "Withdrawal advertising-debt cutover cannot be later than policy effectiveFrom"
         )
-        effective_from = _required_text(
-            data,
-            "effectiveFrom",
-            "financial reporting policy",
+    if withdrawal_debt.get("modeFromCutover") != WITHDRAWAL_ADVERTISING_DEBT_CUTOVER_MODE:
+        raise FinancialPolicyError(
+            "Withdrawals after the cutover must not create withdrawal-linked advertising debt"
         )
-        try:
-            withdrawal_cutover = date.fromisoformat(cutover_text)
-            policy_effective_from = date.fromisoformat(effective_from)
-        except ValueError as exc:
+    for key in ("preserveHistoricalRecords", "noRetroactiveClearing"):
+        if withdrawal_debt.get(key) is not True:
             raise FinancialPolicyError(
-                "Settlement-balance cutoverEffectiveFrom and policy effectiveFrom "
-                "must be ISO dates"
-            ) from exc
-        if withdrawal_cutover != policy_effective_from:
-            raise FinancialPolicyError(
-                "funding.withdrawalAdvertisingDebt.cutoverEffectiveFrom must equal "
-                "the financial reporting policy effectiveFrom"
+                f"Withdrawal advertising-debt governance requires {key}=true"
             )
-        if (
-            withdrawal_debt.get("modeFromCutover")
-            != WITHDRAWAL_ADVERTISING_DEBT_CUTOVER_MODE
-        ):
-            raise FinancialPolicyError(
-                "Post-cutover withdrawals must not create advertising debt"
-            )
-        for key in ("preserveHistoricalRecords", "noRetroactiveClearing"):
-            if withdrawal_debt.get(key) is not True:
-                raise FinancialPolicyError(
-                    f"Withdrawal advertising-debt governance requires {key}=true"
-                )
-        funding_source = str(advertising_deposit["fundingSource"])
-        balance_field = str(advertising_deposit["platformBalanceField"])
-        request_type = int(advertising_deposit["platformRequestType"])
-        deduction_mode = str(advertising_deposit["deductionMode"])
 
     return PhoneFinancialPolicy(
         reporting_policy_id=reporting_policy_id,
         pricing_policy_id=pricing_policy_id,
-        effective_from=str(data.get("effectiveFrom") or "").strip(),
+        effective_from=effective_from,
+        effective_to=str(data.get("effectiveTo") or "").strip() or None,
         reporting_currency=currency,
         managed_operations_rate=managed_rate,
         combined_advertising_return_pool_rate=combined_rate,
+        reserve_allocation_mode=reserve_mode,
+        return_risk_reserve_rate=return_risk_rate,
+        promotion_reserve_rate=promotion_rate,
+        total_reserve_rate=total_reserve_rate,
         advertising_deposit_cap_rule=cap_rule,
-        settlement_balance_contract_enabled=modern_contract,
-        advertising_funding_source=funding_source,
-        advertising_balance_field=balance_field,
-        advertising_request_type=request_type,
-        advertising_deduction_mode=deduction_mode,
-        withdrawal_advertising_debt_cutover=withdrawal_cutover,
+        advertising_funding_source=ADVERTISING_FUNDING_SOURCE,
+        advertising_balance_field=ADVERTISING_BALANCE_FIELD,
+        advertising_request_type=ADVERTISING_REQUEST_TYPE,
+        advertising_deduction_mode=ADVERTISING_DEDUCTION_MODE,
         raw=data,
     )
+
+
+def load_phone_financial_policy_timeline(
+    path: Path = ACTIVE_PHONE_FINANCIAL_POLICY,
+    *,
+    pricing_policy_path: Path = ACTIVE_PHONE_PRICING_POLICY,
+) -> PhoneFinancialPolicyTimeline:
+    """Load the active policy and its archived immediate predecessor."""
+
+    active = load_active_phone_financial_policy(
+        path, pricing_policy_path=pricing_policy_path
+    )
+    predecessor_id = str(active.raw.get("supersedes") or "").strip()
+    if not predecessor_id:
+        raise FinancialPolicyError("Active financial policy must name its predecessor")
+    predecessor_path = path.parent / "policies" / f"{predecessor_id}.json"
+    predecessor_data = _read_json(
+        predecessor_path, label="predecessor financial reporting policy"
+    )
+    if predecessor_data.get("status") != "historical":
+        raise FinancialPolicyError(
+            f"Predecessor financial policy must be historical: {predecessor_id}"
+        )
+    predecessor = _parse_historical_policy(predecessor_data)
+    if predecessor.effective_to != active.effective_from:
+        raise FinancialPolicyError(
+            "Predecessor effectiveTo must equal active policy effectiveFrom"
+        )
+    history = [predecessor]
+    next_id = str(predecessor.raw.get("supersedes") or "").strip()
+    while next_id:
+        next_path = path.parent / "policies" / f"{next_id}.json"
+        if not next_path.is_file():
+            break
+        try:
+            older = _parse_historical_policy(
+                _read_json(next_path, label="historical financial reporting policy")
+            )
+        except FinancialPolicyError:
+            # Older schema generations may not carry the calculation contract.
+            # Stop rather than guessing; the earliest fully specified policy is
+            # the safe carry-back for orders that predate it.
+            break
+        if older.effective_to != history[-1].effective_from:
+            raise FinancialPolicyError(
+                "Historical financial-policy intervals must be contiguous"
+            )
+        history.append(older)
+        next_id = str(older.raw.get("supersedes") or "").strip()
+    return PhoneFinancialPolicyTimeline(
+        active, predecessor, tuple(reversed(history))
+    )
+
+
+def _parse_historical_policy(data: dict[str, Any]) -> PhoneFinancialPolicy:
+    scope = data.get("scope") or {}
+    costs = data.get("costs") or {}
+    managed = costs.get("managedOperations") or {}
+    advertising_returns = costs.get("advertisingAndReturns") or {}
+    managed_rate = _decimal(managed.get("rate"), "managedOperations.rate")
+    reserve_mode, return_rate, promotion_rate, total_rate = _reserve_policy(
+        advertising_returns
+    )
+    references = data.get("pricingReferences") or {}
+    funding = data.get("funding") or {}
+    deposit = funding.get("advertisingDeposit") or {}
+    return PhoneFinancialPolicy(
+        reporting_policy_id=_required_text(data, "policyId", "historical policy"),
+        pricing_policy_id=_required_text(
+            references, "activePricingPolicyId", "pricingReferences"
+        ),
+        effective_from=_required_text(data, "effectiveFrom", "historical policy"),
+        effective_to=_required_text(data, "effectiveTo", "historical policy"),
+        reporting_currency=_required_text(scope, "reportingCurrency", "scope"),
+        managed_operations_rate=managed_rate,
+        combined_advertising_return_pool_rate=total_rate,
+        reserve_allocation_mode=reserve_mode,
+        return_risk_reserve_rate=return_rate,
+        promotion_reserve_rate=promotion_rate,
+        total_reserve_rate=total_rate,
+        advertising_deposit_cap_rule=str(deposit.get("perActionCapRule") or ""),
+        advertising_funding_source=str(deposit.get("fundingSource") or ""),
+        advertising_balance_field=str(deposit.get("platformBalanceField") or ""),
+        advertising_request_type=int(deposit.get("platformRequestType") or 0),
+        advertising_deduction_mode=str(deposit.get("deductionMode") or ""),
+        raw=data,
+    )
+
+
+def _reserve_policy(
+    advertising_returns: dict[str, Any],
+) -> tuple[str, Decimal, Decimal, Decimal]:
+    mode = str(advertising_returns.get("reserveAllocationMode") or "").strip()
+    has_separate_rates = any(
+        key in advertising_returns
+        for key in ("returnRiskReserveRate", "promotionReserveRate", "totalReserveRate")
+    )
+    if mode == SEPARATE_RETURN_AND_PROMOTION or has_separate_rates:
+        return_rate = _decimal(
+            advertising_returns.get("returnRiskReserveRate"),
+            "advertisingAndReturns.returnRiskReserveRate",
+        )
+        promotion_rate = _decimal(
+            advertising_returns.get("promotionReserveRate"),
+            "advertisingAndReturns.promotionReserveRate",
+        )
+        total_rate = _decimal(
+            advertising_returns.get("totalReserveRate"),
+            "advertisingAndReturns.totalReserveRate",
+        )
+        if return_rate + promotion_rate != total_rate:
+            raise FinancialPolicyError(
+                "Return-risk and promotion reserve rates must add to totalReserveRate"
+            )
+        return SEPARATE_RETURN_AND_PROMOTION, return_rate, promotion_rate, total_rate
+    combined_rate = _decimal(
+        advertising_returns.get("combinedPoolRate"),
+        "advertisingAndReturns.combinedPoolRate",
+    )
+    return LEGACY_SHARED_POOL, Decimal("0"), combined_rate, combined_rate
+
+
+def _instant(value: str, label: str) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        raise FinancialPolicyError(f"Missing timestamp: {label}")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise FinancialPolicyError(f"Invalid timestamp for {label}: {text}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=MOSCOW)
+    return parsed.astimezone(timezone.utc)
 
 
 def _validate_return_logistics_contract(
@@ -334,6 +503,8 @@ def _validate_advertising_contract(data: dict[str, Any]) -> None:
     required_true = (
         "actualAdvertisingSpendReconciliationOnly",
         "noDoubleCountActualAdvertisingOutsideCombinedPool",
+        "platformAdvertisingSettlementDeductionReconciliationOnly",
+        "noNewWithdrawalLinkedAdvertisingDebtAfterCutover",
     )
     missing = [key for key in required_true if governance.get(key) is not True]
     if missing:
@@ -375,14 +546,6 @@ def _required_text(parent: dict[str, Any], key: str, label: str) -> str:
     if not value:
         raise FinancialPolicyError(f"{label} requires {key}")
     return value
-
-
-def _contract_value_matches(actual: Any, expected: Any) -> bool:
-    if isinstance(expected, bool):
-        return actual is expected
-    if isinstance(expected, int):
-        return type(actual) is int and actual == expected
-    return actual == expected
 
 
 def _decimal(value: Any, label: str) -> Decimal:

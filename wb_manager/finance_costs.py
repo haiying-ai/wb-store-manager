@@ -30,12 +30,21 @@ _SPECIFICATION_HEADERS = {
     "SKU",
     "PRODUCTKEY",
 }
-_COST_HEADERS = {
+_RUB_COST_HEADERS = {
     "成本价格",
     "成本价",
+    "卢布报价",
     "COST",
     "COSTRUB",
     "PURCHASECOSTRUB",
+}
+_CNY_COST_HEADERS = {
+    "人民币报价",
+    "人民币报价(¥)",
+    "人民币报价(￥)",
+    "COSTCNY",
+    "PURCHASECOSTCNY",
+    "成本CNY",
 }
 
 
@@ -68,6 +77,7 @@ class CostVersionRow:
     source_row: int
     source_hash: str
     row_hash: str
+    source_currency: str = "RUB"
 
     def as_ledger_record(self) -> dict[str, Any]:
         """Return the append-only shape accepted by FinanceLedger.
@@ -94,6 +104,7 @@ class CostVersionRow:
             "capacity": self.capacity,
             "color": self.color,
             "specification": self.specification,
+            "sourceCurrency": self.source_currency,
             "costRub": _decimal_text(self.cost_rub),
             "exchangeRateRubPerCny": _decimal_text(self.rub_per_cny),
             "purchaseCostCny": _decimal_text(self.cost_cny),
@@ -110,7 +121,8 @@ class CostVersionRow:
 @dataclass(frozen=True)
 class _QuoteRow:
     specification: str
-    cost_rub: Any
+    source_cost: Any
+    cost_rub_evidence: Any | None
     sheet: str
     row: int
 
@@ -208,24 +220,34 @@ def parse_cost_quote(
     path: str | Path,
     *,
     effective_from: date | datetime | str,
-    rub_per_cny: Decimal | str | int | float,
+    rub_per_cny: Decimal | str | int | float | None = None,
+    source_currency: str = "RUB",
 ) -> list[CostVersionRow]:
     """Parse one JSON, CSV, or XLSX quote into append-only cost-version rows."""
 
     source = Path(path)
     if not source.is_file():
         raise CostQuoteError(f"Cost quote does not exist: {source}")
-    rate = _positive_decimal(rub_per_cny, "rub_per_cny")
+    currency = str(source_currency or "").strip().upper()
+    if currency not in {"RUB", "CNY"}:
+        raise CostQuoteError("source_currency must be explicitly RUB or CNY")
+    rate = (
+        _positive_decimal(rub_per_cny, "rub_per_cny")
+        if rub_per_cny not in (None, "")
+        else None
+    )
+    if currency == "RUB" and rate is None:
+        raise CostQuoteError("rub_per_cny is required when source_currency is RUB")
     effective = parse_effective_from(effective_from)
     source_bytes = source.read_bytes()
     source_hash = hashlib.sha256(source_bytes).hexdigest()
     suffix = source.suffix.lower()
     if suffix == ".json":
-        raw_rows = _read_json_rows(source_bytes, source.stem)
+        raw_rows = _read_json_rows(source_bytes, source.stem, currency)
     elif suffix in {".csv", ".tsv"}:
-        raw_rows = _read_csv_rows(source_bytes, source.stem, suffix)
+        raw_rows = _read_csv_rows(source_bytes, source.stem, suffix, currency)
     elif suffix == ".xlsx":
-        raw_rows = _read_xlsx_rows(source)
+        raw_rows = _read_xlsx_rows(source, currency)
     else:
         raise CostQuoteError(f"Unsupported cost quote format: {source.suffix or '<none>'}")
     if not raw_rows:
@@ -244,11 +266,47 @@ def parse_cost_quote(
                 f"{previous[0]} row {previous[1]} and {raw.sheet} row {raw.row}"
             )
         seen[parsed_key.product_key] = (raw.sheet, raw.row)
-        cost_rub = _positive_decimal(raw.cost_rub, f"cost at {raw.sheet} row {raw.row}")
-        cost_cny = (cost_rub / rate).quantize(_CNY_CENT, rounding=ROUND_HALF_UP)
+        source_cost = _positive_decimal(
+            raw.source_cost, f"{currency} cost at {raw.sheet} row {raw.row}"
+        )
+        if currency == "CNY":
+            cost_cny = source_cost.quantize(_CNY_CENT, rounding=ROUND_HALF_UP)
+            if not _blank(raw.cost_rub_evidence):
+                cost_rub = _positive_decimal(
+                    raw.cost_rub_evidence,
+                    f"RUB evidence at {raw.sheet} row {raw.row}",
+                )
+                row_rate = rate or (cost_rub / cost_cny)
+            elif rate is not None:
+                row_rate = rate
+                cost_rub = (cost_cny * row_rate).quantize(
+                    _CNY_CENT, rounding=ROUND_HALF_UP
+                )
+            else:
+                raise CostQuoteError(
+                    f"CNY source row {raw.sheet} {raw.row} requires RUB evidence "
+                    "when rub_per_cny is omitted"
+                )
+            converted = (cost_rub / row_rate).quantize(
+                _CNY_CENT, rounding=ROUND_HALF_UP
+            )
+            if converted != cost_cny:
+                raise CostQuoteError(
+                    f"CNY/RUB quote mismatch at {raw.sheet} row {raw.row}: "
+                    f"{cost_cny} CNY != {cost_rub} RUB / {row_rate}"
+                )
+        else:
+            assert rate is not None
+            row_rate = rate
+            cost_rub = source_cost
+            cost_cny = (cost_rub / row_rate).quantize(
+                _CNY_CENT, rounding=ROUND_HALF_UP
+            )
         row_payload = {
             "schema": 1,
             "productKey": parsed_key.product_key,
+            "sourceCurrency": currency,
+            "sourceCost": _decimal_text(source_cost),
             "costRub": _decimal_text(cost_rub),
             "sourceSheet": raw.sheet,
             "sourceRow": raw.row,
@@ -258,7 +316,7 @@ def parse_cost_quote(
             "schema": 1,
             "rowSha256": row_hash,
             "effectiveFrom": effective.isoformat(timespec="seconds"),
-            "rubPerCny": _decimal_text(rate),
+            "rubPerCny": _decimal_text(row_rate),
             "costCny": _decimal_text(cost_cny),
         }
         version_id = f"costv_{_json_hash(version_payload)[:24]}"
@@ -270,8 +328,9 @@ def parse_cost_quote(
                 capacity=parsed_key.capacity,
                 color=parsed_key.color,
                 specification=unicodedata.normalize("NFKC", raw.specification).strip(),
+                source_currency=currency,
                 cost_rub=cost_rub,
-                rub_per_cny=rate,
+                rub_per_cny=row_rate,
                 cost_cny=cost_cny,
                 effective_from=effective,
                 source_path=str(source.resolve()),
@@ -288,14 +347,22 @@ def load_cost_versions(
     path: str | Path,
     *,
     effective_from: date | datetime | str,
-    rub_per_cny: Decimal | str | int | float,
+    rub_per_cny: Decimal | str | int | float | None = None,
+    source_currency: str = "RUB",
 ) -> list[CostVersionRow]:
     """Compatibility-friendly name for callers that load rows into a ledger."""
 
-    return parse_cost_quote(path, effective_from=effective_from, rub_per_cny=rub_per_cny)
+    return parse_cost_quote(
+        path,
+        effective_from=effective_from,
+        rub_per_cny=rub_per_cny,
+        source_currency=source_currency,
+    )
 
 
-def _read_json_rows(source: bytes, default_sheet: str) -> list[_QuoteRow]:
+def _read_json_rows(
+    source: bytes, default_sheet: str, source_currency: str
+) -> list[_QuoteRow]:
     payload = _decode_json(source)
     top_sheet = default_sheet
     if isinstance(payload, Mapping):
@@ -314,7 +381,9 @@ def _read_json_rows(source: bytes, default_sheet: str) -> list[_QuoteRow]:
         if not isinstance(item, Mapping):
             raise CostQuoteError(f"JSON quote row {index} is not an object")
         specification = _mapping_value(item, _SPECIFICATION_HEADERS)
-        cost = _mapping_value(item, _COST_HEADERS)
+        cost_headers = _CNY_COST_HEADERS if source_currency == "CNY" else _RUB_COST_HEADERS
+        cost = _mapping_value(item, cost_headers)
+        rub_evidence = _mapping_value(item, _RUB_COST_HEADERS)
         if _blank(specification) and _blank(cost):
             continue
         if _blank(specification) or _blank(cost):
@@ -331,7 +400,11 @@ def _read_json_rows(source: bytes, default_sheet: str) -> list[_QuoteRow]:
             row_number = int(row_value)
         except (TypeError, ValueError) as exc:
             raise CostQuoteError(f"Invalid JSON source row: {row_value!r}") from exc
-        rows.append(_QuoteRow(str(specification).strip(), cost, sheet, row_number))
+        rows.append(
+            _QuoteRow(
+                str(specification).strip(), cost, rub_evidence, sheet, row_number
+            )
+        )
     return rows
 
 
@@ -347,7 +420,9 @@ def _decode_json(source: bytes) -> Any:
     raise CostQuoteError("JSON quote encoding is not UTF-8 or GB18030") from last_error
 
 
-def _read_csv_rows(source: bytes, sheet: str, suffix: str) -> list[_QuoteRow]:
+def _read_csv_rows(
+    source: bytes, sheet: str, suffix: str, source_currency: str
+) -> list[_QuoteRow]:
     text = _decode_text(source, "CSV")
     sample = text[:8192]
     if suffix == ".tsv":
@@ -358,7 +433,7 @@ def _read_csv_rows(source: bytes, sheet: str, suffix: str) -> list[_QuoteRow]:
         except csv.Error:
             dialect = csv.excel
     table = list(csv.reader(io.StringIO(text), dialect=dialect))
-    return _tabular_quote_rows(table, sheet)
+    return _tabular_quote_rows(table, sheet, source_currency)
 
 
 def _decode_text(source: bytes, label: str) -> str:
@@ -371,7 +446,7 @@ def _decode_text(source: bytes, label: str) -> str:
     raise CostQuoteError(f"{label} encoding is not UTF-8 or GB18030") from last_error
 
 
-def _read_xlsx_rows(path: Path) -> list[_QuoteRow]:
+def _read_xlsx_rows(path: Path, source_currency: str) -> list[_QuoteRow]:
     if not zipfile.is_zipfile(path):
         raise CostQuoteError(f"Invalid XLSX archive: {path}")
     try:
@@ -414,11 +489,15 @@ def _read_xlsx_rows(path: Path) -> list[_QuoteRow]:
                             values.append("")
                         values[column - 1] = _xlsx_cell_value(cell, shared_strings)
                     table.append((row_number, values))
-                rows, has_header = _tabular_quote_rows_numbered(table, name)
+                rows, has_header = _tabular_quote_rows_numbered(
+                    table, name, source_currency
+                )
                 found_header = found_header or has_header
                 parsed.extend(rows)
             if not found_header:
-                raise CostQuoteError("XLSX quote has no sheet with 规格 and 成本价格 columns")
+                raise CostQuoteError(
+                    f"XLSX quote has no sheet with 规格 and {source_currency} cost columns"
+                )
             return parsed
     except (KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
         raise CostQuoteError(f"Malformed XLSX quote: {path}") from exc
@@ -481,32 +560,41 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _tabular_quote_rows(table: Sequence[Sequence[Any]], sheet: str) -> list[_QuoteRow]:
+def _tabular_quote_rows(
+    table: Sequence[Sequence[Any]], sheet: str, source_currency: str
+) -> list[_QuoteRow]:
     numbered = [(index, list(row)) for index, row in enumerate(table, start=1)]
-    rows, found_header = _tabular_quote_rows_numbered(numbered, sheet)
+    rows, found_header = _tabular_quote_rows_numbered(
+        numbered, sheet, source_currency
+    )
     if not found_header:
-        raise CostQuoteError(f"{sheet} has no 规格 and 成本价格 columns")
+        raise CostQuoteError(f"{sheet} has no 规格 and {source_currency} cost columns")
     return rows
 
 
 def _tabular_quote_rows_numbered(
-    table: Sequence[tuple[int, Sequence[Any]]], sheet: str
+    table: Sequence[tuple[int, Sequence[Any]]], sheet: str, source_currency: str
 ) -> tuple[list[_QuoteRow], bool]:
     header_position = -1
     specification_column = -1
     cost_column = -1
+    rub_evidence_column = -1
+    cost_headers = _CNY_COST_HEADERS if source_currency == "CNY" else _RUB_COST_HEADERS
     for position, (_, row) in enumerate(table[:50]):
         for column, value in enumerate(row):
             normalized = _header(value)
             if normalized in _SPECIFICATION_HEADERS:
                 specification_column = column
-            if normalized in _COST_HEADERS:
+            if normalized in cost_headers:
                 cost_column = column
+            if normalized in _RUB_COST_HEADERS:
+                rub_evidence_column = column
         if specification_column >= 0 and cost_column >= 0:
             header_position = position
             break
         specification_column = -1
         cost_column = -1
+        rub_evidence_column = -1
     if header_position < 0:
         return [], False
 
@@ -514,12 +602,13 @@ def _tabular_quote_rows_numbered(
     for row_number, row in table[header_position + 1 :]:
         specification = _cell(row, specification_column)
         cost = _cell(row, cost_column)
+        rub_evidence = _cell(row, rub_evidence_column)
         # Real supplier workbooks may contain several product sections in one
         # sheet, separated by a one-cell brand label, contact footer, and a
         # repeated header. Those structural rows are not partial cost rows.
         if (
             _header(specification) in _SPECIFICATION_HEADERS
-            and _header(cost) in _COST_HEADERS
+            and _header(cost) in cost_headers
         ):
             continue
         if _blank(specification) and _blank(cost):
@@ -533,7 +622,15 @@ def _tabular_quote_rows_numbered(
             raise CostQuoteError(
                 f"{sheet} row {row_number} must contain both 规格 and 成本价格"
             )
-        rows.append(_QuoteRow(str(specification).strip(), cost, sheet, int(row_number)))
+        rows.append(
+            _QuoteRow(
+                str(specification).strip(),
+                cost,
+                rub_evidence,
+                sheet,
+                int(row_number),
+            )
+        )
     return rows, True
 
 

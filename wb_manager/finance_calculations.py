@@ -85,21 +85,29 @@ class OrderCalculation:
     outcome: str
     net_quantity: Decimal
     net_turnover_cny: Decimal | None
+    for_pay_cny: Decimal | None
     purchase_cost_cny: Decimal | None
     actual_commission_cny: Decimal | None
+    commission_formula_cny: Decimal | None
+    commission_reconciliation_difference_cny: Decimal | None
     commission_used_cny: Decimal | None
     actual_payment_fee_cny: Decimal | None
     payment_fee_used_cny: Decimal | None
+    account_increment_cny: Decimal | None
+    for_pay_reconciliation_difference_cny: Decimal | None
+    cash_reconciliation_status: str
     actual_forward_logistics_cny: Decimal | None
     actual_storage_cny: Decimal | None
     actual_other_platform_fee_cny: Decimal | None
-    advertising_settlement_deduction_cny: Decimal
     forward_operations_used_cny: Decimal | None
     managed_operations_cny: Decimal | None
     combined_pool_cny: Decimal | None
     actual_return_logistics_cny: Decimal | None
     advertising_provision_cny: Decimal | None
     excess_return_loss_cny: Decimal | None
+    rule_withdrawable_cny: Decimal | None
+    strict_owner_profit_cny: Decimal | None
+    advertising_settlement_deduction_cny: Decimal = ZERO
     actual_advertising_spend_cny: Decimal = ZERO
     advertising_reconciliation_variance_cny: Decimal | None = None
     owner_profit_cny: Decimal | None = None
@@ -108,6 +116,15 @@ class OrderCalculation:
     component_sources: Mapping[str, str] = field(default_factory=dict)
     issues: tuple[ReconciliationIssue, ...] = ()
     evidence_ids: tuple[str, ...] = ()
+    financial_reporting_policy_id: str | None = None
+    selling_price_policy_id: str | None = None
+    reserve_allocation_mode: str = "LEGACY_SHARED_POOL"
+    managed_operations_rate: Decimal = Decimal("0.02")
+    return_risk_reserve_rate: Decimal = ZERO
+    promotion_reserve_rate: Decimal = Decimal("0.03")
+    total_reserve_rate: Decimal = Decimal("0.03")
+    return_risk_reserve_cny: Decimal | None = None
+    promotion_reserve_cny: Decimal | None = None
 
     @property
     def evidence_status(self) -> str:
@@ -124,28 +141,56 @@ class OrderCalculation:
             "nmId": self.nm_id,
             "outcome": self.outcome,
             "netQuantity": _quantity_text(self.net_quantity),
+            "salesAmountGCny": _money_text(self.net_turnover_cny),
             "netTurnoverCny": _money_text(self.net_turnover_cny),
+            "forPayCny": _money_text(self.for_pay_cny),
             "purchaseCostCny": _money_text(self.purchase_cost_cny),
+            "actualCommissionCCny": _money_text(self.actual_commission_cny),
             "actualWbCommissionCny": _money_text(self.actual_commission_cny),
+            "commissionFormulaCny": _money_text(self.commission_formula_cny),
+            "commissionReconciliationDifferenceCny": _money_text(
+                self.commission_reconciliation_difference_cny
+            ),
             "wbCommissionCny": _money_text(self.commission_used_cny),
+            "acquiringFeeCny": _money_text(self.actual_payment_fee_cny),
             "actualPaymentFeeCny": _money_text(self.actual_payment_fee_cny),
             "paymentFeeCny": _money_text(self.payment_fee_used_cny),
+            "accountIncrementCny": _money_text(self.account_increment_cny),
+            "forPayReconciliationDifferenceCny": _money_text(
+                self.for_pay_reconciliation_difference_cny
+            ),
+            "cashReconciliationStatus": self.cash_reconciliation_status,
             "forwardLogisticsCny": _money_text(self.actual_forward_logistics_cny),
             "storageAndOperationsCny": _money_text(self.actual_storage_cny),
             "otherPlatformCostCny": _money_text(self.actual_other_platform_fee_cny),
-            "advertisingSettlementDeductionCny": _money_text(
-                self.advertising_settlement_deduction_cny
-            ),
             "forwardOperationsUsedCny": _money_text(self.forward_operations_used_cny),
             "managedOperationsCny": _money_text(self.managed_operations_cny),
+            "financialReportingPolicyVersionId": self.financial_reporting_policy_id,
+            "sellingPricePolicyVersionId": self.selling_price_policy_id,
+            "reserveAllocationMode": self.reserve_allocation_mode,
+            "managedOperationsRate": str(self.managed_operations_rate),
+            "returnRiskReserveRate": str(self.return_risk_reserve_rate),
+            "promotionReserveRate": str(self.promotion_reserve_rate),
+            "totalReserveRate": str(self.total_reserve_rate),
+            "returnRiskReserveCny": _money_text(self.return_risk_reserve_cny),
+            "promotionReserveCny": _money_text(self.promotion_reserve_cny),
+            "totalPolicyReserveCny": _money_text(self.combined_pool_cny),
+            "combinedAdvertisingAndReturnPoolCny": _money_text(
+                self.combined_pool_cny
+            ),
             "combinedPoolCny": _money_text(self.combined_pool_cny),
             "returnLogisticsCny": _money_text(self.actual_return_logistics_cny),
             "advertisingProvisionCny": _money_text(self.advertising_provision_cny),
             "excessReturnLossCny": _money_text(self.excess_return_loss_cny),
+            "ruleWithdrawableCny": _money_text(self.rule_withdrawable_cny),
+            "advertisingSettlementDeductionCny": _money_text(
+                self.advertising_settlement_deduction_cny
+            ),
             "actualAdvertisingSpendCny": _money_text(self.actual_advertising_spend_cny),
             "advertisingReconciliationVarianceCny": _money_text(
                 self.advertising_reconciliation_variance_cny
             ),
+            "strictOwnerProfitCny": _money_text(self.strict_owner_profit_cny),
             "ownerProfitCny": _money_text(self.owner_profit_cny),
             "template": {
                 key: _money_text(value) for key, value in self.template_calculation.items()
@@ -175,12 +220,21 @@ class StoreSummary:
     return_logistics_cny: Decimal | None
     advertising_provision_cny: Decimal | None
     excess_return_loss_cny: Decimal | None
-    actual_advertising_spend_cny: Decimal
-    advertising_settlement_deduction_cny: Decimal
+    advertising_settlement_deduction_cny: Decimal | None
+    actual_advertising_spend_cny: Decimal | None
     other_platform_cost_cny: Decimal | None
     owner_profit_cny: Decimal | None
     unresolved_order_count: int
     issue_count: int
+    confirmed_order_count: int
+    open_item_order_count: int
+    for_pay_cny: Decimal | None
+    account_increment_cny: Decimal | None
+    combined_pool_cny: Decimal | None
+    rule_withdrawable_cny: Decimal | None
+    strict_owner_profit_cny: Decimal | None
+    return_risk_reserve_cny: Decimal | None = None
+    promotion_reserve_cny: Decimal | None = None
 
     @property
     def status(self) -> str:
@@ -191,26 +245,42 @@ class StoreSummary:
             "storeAlias": self.store_alias,
             "status": self.status,
             "orderCount": self.order_count,
+            "confirmedOrderCount": self.confirmed_order_count,
+            "openItemOrderCount": self.open_item_order_count,
             "completedCount": self.completed_count,
             "returnedCount": self.returned_count,
             "correctedCount": self.corrected_count,
             "netQuantity": _quantity_text(self.net_quantity),
+            "salesAmountGCny": _money_text(self.net_turnover_cny),
             "netTurnoverCny": _money_text(self.net_turnover_cny),
+            "forPayCny": _money_text(self.for_pay_cny),
             "purchaseCostCny": _money_text(self.purchase_cost_cny),
+            "actualCommissionCCny": _money_text(self.commission_cny),
             "wbCommissionCny": _money_text(self.commission_cny),
+            "acquiringFeeCny": _money_text(self.payment_fee_cny),
             "paymentFeeCny": _money_text(self.payment_fee_cny),
+            "accountIncrementCny": _money_text(self.account_increment_cny),
             "forwardOperationsCny": _money_text(self.forward_operations_cny),
             "managedOperationsCny": _money_text(self.managed_operations_cny),
+            "returnRiskReserveCny": _money_text(self.return_risk_reserve_cny),
+            "promotionReserveCny": _money_text(self.promotion_reserve_cny),
+            "totalPolicyReserveCny": _money_text(self.combined_pool_cny),
+            "combinedAdvertisingAndReturnPoolCny": _money_text(
+                self.combined_pool_cny
+            ),
+            "combinedPoolCny": _money_text(self.combined_pool_cny),
             "returnLogisticsCny": _money_text(self.return_logistics_cny),
             "advertisingProvisionCny": _money_text(self.advertising_provision_cny),
             "excessReturnLossCny": _money_text(self.excess_return_loss_cny),
-            "actualAdvertisingSpendCny": _money_text(
-                self.actual_advertising_spend_cny
-            ),
+            "ruleWithdrawableCny": _money_text(self.rule_withdrawable_cny),
             "advertisingSettlementDeductionCny": _money_text(
                 self.advertising_settlement_deduction_cny
             ),
+            "actualAdvertisingSpendCny": _money_text(
+                self.actual_advertising_spend_cny
+            ),
             "otherPlatformCostCny": _money_text(self.other_platform_cost_cny),
+            "strictOwnerProfitCny": _money_text(self.strict_owner_profit_cny),
             "ownerProfitCny": _money_text(self.owner_profit_cny),
             "unresolvedOrderCount": self.unresolved_order_count,
             "issueCount": self.issue_count,
@@ -225,6 +295,12 @@ class FinanceCalculationResult:
     orders: tuple[OrderCalculation, ...]
     stores: tuple[StoreSummary, ...]
     issues: tuple[ReconciliationIssue, ...]
+    managed_operations_rate: Decimal = Decimal("0.02")
+    return_risk_reserve_rate: Decimal = ZERO
+    promotion_reserve_rate: Decimal = Decimal("0.03")
+    total_reserve_rate: Decimal = Decimal("0.03")
+    reserve_allocation_mode: str = "LEGACY_SHARED_POOL"
+    reporting_policy_versions: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def blockers(self) -> tuple[ReconciliationIssue, ...]:
@@ -237,8 +313,22 @@ class FinanceCalculationResult:
             "policy": {
                 "reportingPolicyId": self.reporting_policy_id,
                 "pricingPolicyId": self.pricing_policy_id,
-                "managedOperationsRate": "0.02",
-                "combinedPoolRate": "0.03",
+                "managedOperationsRate": str(self.managed_operations_rate),
+                "returnRiskReserveRate": str(self.return_risk_reserve_rate),
+                "promotionReserveRate": str(self.promotion_reserve_rate),
+                "totalReserveRate": str(self.total_reserve_rate),
+                "combinedPoolRate": str(self.total_reserve_rate),
+                "reserveAllocationMode": self.reserve_allocation_mode,
+                "reportingPolicyIdsUsed": sorted(
+                    {
+                        order.financial_reporting_policy_id
+                        for order in self.orders
+                        if order.financial_reporting_policy_id
+                    }
+                ),
+                "reportingPolicyVersions": [
+                    dict(item) for item in self.reporting_policy_versions
+                ],
             },
             "orders": [order.to_dict() for order in self.orders],
             "stores": [store.to_dict() for store in self.stores],
@@ -249,11 +339,254 @@ class FinanceCalculationResult:
 
 
 @dataclass(frozen=True)
+class PoolAggregation:
+    """Store/period-level allocation of the combined three-percent pool.
+
+    Order rows intentionally retain their own ``combinedPoolCny`` and
+    ``returnLogisticsCny`` values for auditability.  The funding decision,
+    however, is made at store + reporting-period scope: all positive-G pool
+    amounts are added first, then the actual return-logistics total is
+    deducted once.  Keeping this result as a small value object makes that
+    rule reusable by report and funding code without mutating order rows.
+    """
+
+    combined_pool_cny: Decimal | None
+    return_logistics_cny: Decimal | None
+    advertising_provision_cny: Decimal | None
+    excess_return_loss_cny: Decimal | None
+    return_risk_reserve_cny: Decimal | None = None
+    promotion_reserve_cny: Decimal | None = None
+
+    def to_dict(self) -> dict[str, Decimal | None]:
+        return {
+            "combinedPoolCny": self.combined_pool_cny,
+            "returnLogisticsCny": self.return_logistics_cny,
+            "advertisingProvisionCny": self.advertising_provision_cny,
+            "excessReturnLossCny": self.excess_return_loss_cny,
+            "returnRiskReserveCny": self.return_risk_reserve_cny,
+            "promotionReserveCny": self.promotion_reserve_cny,
+            "totalPolicyReserveCny": self.combined_pool_cny,
+        }
+
+
+def aggregate_pool_for_orders(
+    orders: Iterable[Mapping[str, Any] | OrderCalculation],
+) -> PoolAggregation:
+    """Aggregate the advertising/return pool for one store and one period.
+
+    ``orders`` must already be restricted to the desired store/period and to
+    the rows eligible for cash allocation (normally COMPLETE + cash PASS).
+    The helper deliberately does not infer a missing amount as zero.  A
+    missing pool or return-logistics value therefore propagates as ``None``
+    so callers can keep the report open rather than silently underfunding the
+    advertising reserve.
+    """
+
+    rows = tuple(orders)
+    if not rows:
+        return PoolAggregation(ZERO, ZERO, ZERO, ZERO, ZERO, ZERO)
+
+    raw_pool_values = [
+        _pool_order_value(row, "combined_pool_cny", "combinedPoolCny") for row in rows
+    ]
+    return_values = [
+        _pool_order_value(row, "actual_return_logistics_cny", "returnLogisticsCny")
+        for row in rows
+    ]
+    risk_values = [_reserve_component(row, "returnRiskReserveCny") for row in rows]
+    promotion_values = [_reserve_component(row, "promotionReserveCny") for row in rows]
+    if any(
+        value is None
+        for value in raw_pool_values + return_values + risk_values + promotion_values
+    ):
+        return PoolAggregation(None, None, None, None, None, None)
+
+    correction_indexes = {
+        index
+        for index, row in enumerate(rows)
+        if isinstance(row, Mapping)
+        and str(row.get("periodRecognition") or "") == "PRIOR_PERIOD_CORRECTION"
+    }
+    base_indexes = [index for index in range(len(rows)) if index not in correction_indexes]
+    correction_rows = [rows[index] for index in sorted(correction_indexes)]
+    combined_pool = _money(
+        sum(
+            (
+                raw_pool_values[index]
+                if index in correction_indexes
+                else max(ZERO, raw_pool_values[index])
+            )
+            for index in range(len(rows))
+        )
+    )
+    return_logistics = _money(sum(return_values, ZERO))
+    return_risk = _money(
+        sum(
+            (
+                risk_values[index]
+                if index in correction_indexes
+                else max(ZERO, risk_values[index])
+            )
+            for index in range(len(rows))
+        )
+    )
+    promotion = _money(
+        sum(
+            (
+                promotion_values[index]
+                if index in correction_indexes
+                else max(ZERO, promotion_values[index])
+            )
+            for index in range(len(rows))
+        )
+    )
+
+    legacy_indexes = [
+        index
+        for index in base_indexes
+        if _reserve_mode(rows[index]) != "SEPARATE_RETURN_AND_PROMOTION"
+    ]
+    separate_indexes = [index for index in base_indexes if index not in legacy_indexes]
+    legacy_pool = sum((max(ZERO, raw_pool_values[index]) for index in legacy_indexes), ZERO)
+    legacy_return = sum((return_values[index] for index in legacy_indexes), ZERO)
+    separate_return = sum((return_values[index] for index in separate_indexes), ZERO)
+    separate_risk = sum((max(ZERO, risk_values[index]) for index in separate_indexes), ZERO)
+    separate_promotion = sum(
+        (max(ZERO, promotion_values[index]) for index in separate_indexes), ZERO
+    )
+    advertising_provision = _money(
+        max(ZERO, legacy_pool - legacy_return) + separate_promotion
+    )
+    excess_return_loss = _money(
+        max(ZERO, legacy_return - legacy_pool)
+        + max(ZERO, separate_return - separate_risk)
+    )
+    if correction_rows:
+        correction_ad_values = [
+            _pool_order_value(row, "advertising_provision_cny", "advertisingProvisionCny")
+            for row in correction_rows
+        ]
+        correction_excess_values = [
+            _pool_order_value(row, "excess_return_loss_cny", "excessReturnLossCny")
+            for row in correction_rows
+        ]
+        if any(value is None for value in correction_ad_values + correction_excess_values):
+            return PoolAggregation(None, None, None, None, None, None)
+        advertising_provision = _money(
+            advertising_provision + sum(correction_ad_values, ZERO)
+        )
+        excess_return_loss = _money(
+            excess_return_loss + sum(correction_excess_values, ZERO)
+        )
+    return PoolAggregation(
+        combined_pool,
+        return_logistics,
+        advertising_provision,
+        excess_return_loss,
+        return_risk,
+        promotion,
+    )
+
+
+def _reserve_mode(order: Mapping[str, Any] | OrderCalculation) -> str:
+    if isinstance(order, Mapping):
+        return str(
+            order.get("reserveAllocationMode")
+            or order.get("reserve_allocation_mode")
+            or "LEGACY_SHARED_POOL"
+        )
+    return str(order.reserve_allocation_mode or "LEGACY_SHARED_POOL")
+
+
+def _reserve_component(
+    order: Mapping[str, Any] | OrderCalculation, key: str
+) -> Decimal | None:
+    attribute = (
+        "return_risk_reserve_cny"
+        if key == "returnRiskReserveCny"
+        else "promotion_reserve_cny"
+    )
+    value = _pool_order_value(order, attribute, key)
+    if value is not None:
+        return value
+    # Serialized snapshots created before the split only contain the shared
+    # three-percent pool.  Treat it as the legacy promotional/shared reserve.
+    if key == "returnRiskReserveCny":
+        return ZERO
+    return _pool_order_value(order, "combined_pool_cny", "combinedPoolCny")
+
+
+def _pool_order_value(
+    order: Mapping[str, Any] | OrderCalculation,
+    attribute: str,
+    key: str,
+) -> Decimal | None:
+    """Read a pool component from either a dataclass row or serialized row."""
+
+    if isinstance(order, Mapping):
+        value = order.get(key)
+        if value is None:
+            # Accept the snake_case names used by in-process ledger rows as
+            # well as the camelCase names emitted in report snapshots.
+            value = order.get(attribute)
+        if value is None and key == "combinedPoolCny":
+            value = order.get("combinedAdvertisingAndReturnPoolCny")
+        if value is None and key == "returnLogisticsCny":
+            value = order.get("actualReturnLogisticsCny")
+    else:
+        value = getattr(order, attribute, None)
+    if value is None:
+        return None
+    return _money(_decimal(value, key))
+
+
+def _sum_store_pool_aggregates(
+    orders: Sequence[OrderCalculation],
+) -> PoolAggregation:
+    """Aggregate independently per store, then add the store results.
+
+    This is used for the display-only ALL row.  It prevents return logistics
+    in one store from consuming another store's advertising reserve.
+    """
+
+    by_store: dict[str, list[OrderCalculation]] = defaultdict(list)
+    for order in orders:
+        by_store[order.store_alias].append(order)
+    aggregates = [aggregate_pool_for_orders(rows) for rows in by_store.values()]
+    if not aggregates:
+        return PoolAggregation(ZERO, ZERO, ZERO, ZERO, ZERO, ZERO)
+    if any(
+        value is None
+        for aggregate in aggregates
+        for value in (
+            aggregate.combined_pool_cny,
+            aggregate.return_logistics_cny,
+            aggregate.advertising_provision_cny,
+            aggregate.excess_return_loss_cny,
+            aggregate.return_risk_reserve_cny,
+            aggregate.promotion_reserve_cny,
+        )
+    ):
+        return PoolAggregation(None, None, None, None, None, None)
+    return PoolAggregation(
+        _money(sum((item.combined_pool_cny for item in aggregates), ZERO)),
+        _money(sum((item.return_logistics_cny for item in aggregates), ZERO)),
+        _money(sum((item.advertising_provision_cny for item in aggregates), ZERO)),
+        _money(sum((item.excess_return_loss_cny for item in aggregates), ZERO)),
+        _money(sum((item.return_risk_reserve_cny for item in aggregates), ZERO)),
+        _money(sum((item.promotion_reserve_cny for item in aggregates), ZERO)),
+    )
+
+
+@dataclass(frozen=True)
 class _PolicyView:
     reporting_policy_id: str
     pricing_policy_id: str
     managed_rate: Decimal
     pool_rate: Decimal
+    reserve_allocation_mode: str
+    return_risk_rate: Decimal
+    promotion_rate: Decimal
     commission_fallback_rate: Decimal | None
     payment_fallback_rate: Decimal | None
     fixed_operations_fallback_cny: Decimal | None
@@ -297,7 +630,7 @@ def calculate_financial_report(
     from owner profit after the contractual three-percent pool has been charged.
     """
 
-    policy_view = _policy_view(policy)
+    policy_view = _policy_view(getattr(policy, "active_policy", policy))
     records: list[EvidenceRecord] = []
     for source, collection in (
         ("order", order_rows),
@@ -311,7 +644,7 @@ def calculate_financial_report(
         )
     grouping = _group_records(tuple(records))
     orders = [
-        _calculate_group(group, cost_selector=cost_selector, policy=policy_view)
+        _calculate_group(group, cost_selector=cost_selector, policy=policy)
         for group in grouping.groups
     ]
     ad_issues = _allocate_actual_advertising(
@@ -344,6 +677,12 @@ def calculate_financial_report(
         orders=tuple(sorted(orders, key=lambda item: (item.store_alias, item.order_key))),
         stores=stores,
         issues=tuple(issues),
+        managed_operations_rate=policy_view.managed_rate,
+        return_risk_reserve_rate=policy_view.return_risk_rate,
+        promotion_reserve_rate=policy_view.promotion_rate,
+        total_reserve_rate=policy_view.pool_rate,
+        reserve_allocation_mode=policy_view.reserve_allocation_mode,
+        reporting_policy_versions=_reporting_policy_versions(policy),
     )
 
 
@@ -466,11 +805,12 @@ def _calculate_group(
     group: OrderEvidenceGroup,
     *,
     cost_selector: Callable[..., Any],
-    policy: _PolicyView,
+    policy: Any,
 ) -> OrderCalculation:
     issues: list[ReconciliationIssue] = []
     evidence_ids = tuple(record.evidence_id for record in group.records)
     created_at = _earliest_timestamp(group.records, _CREATED_AT_FIELDS, issues, group)
+    policy = _policy_view(_policy_for_timestamp(policy, created_at))
     completed_at = _earliest_timestamp(
         group.records, _COMPLETED_AT_FIELDS, issues, group, required=False
     )
@@ -568,6 +908,9 @@ def _calculate_group(
     commission, commission_present = _sum_first_alias(
         finance_records, _COMMISSION_FIELDS, issues, group, "commission"
     )
+    for_pay, for_pay_present = _sum_first_alias(
+        finance_records, _FOR_PAY_FIELDS, issues, group, "forPay"
+    )
     payment, payment_present = _sum_first_alias(
         finance_records, _PAYMENT_FIELDS, issues, group, "payment fee"
     )
@@ -577,19 +920,53 @@ def _calculate_group(
     direct_forward, direct_forward_present = _sum_first_alias(
         finance_records, _DIRECT_FORWARD_FIELDS, issues, group, "forward logistics"
     )
-    other, other_present, advertising_settlement_deduction = _sum_other_platform(
-        finance_records, issues, group
-    )
+    (
+        other,
+        other_present,
+        advertising_settlement_deduction,
+        advertising_settlement_present,
+    ) = _sum_other_platform(finance_records, issues, group)
     if direct_forward_present:
         forward_logistics += direct_forward
         forward_present = True
 
     component_sources: dict[str, str] = {}
+    if advertising_settlement_present:
+        # A platform advertising/promotion cycle charge is evidence that the
+        # already-reserved 3% pool was consumed.  It is intentionally exposed
+        # for reconciliation but never booked again as an "other" P&L cost.
+        component_sources["advertisingSettlementDeduction"] = (
+            "financeActualReconciliationOnly"
+        )
     positive_revenue = max(ZERO, revenue_value or ZERO)
+    actual_for_pay = _money(for_pay) if for_pay_present else None
+    actual_payment = _money(payment) if payment_present else None
+    if actual_for_pay is not None:
+        component_sources["forPay"] = "financeActual"
+    if actual_payment is not None:
+        component_sources["acquiringFee"] = "financeActual"
+    commission_formula: Decimal | None = None
+    if revenue_value is not None and actual_for_pay is not None and actual_payment is not None:
+        commission_magnitude = max(
+            ZERO,
+            abs(revenue_value) - abs(actual_for_pay) - abs(actual_payment),
+        )
+        commission_formula = _money(
+            -commission_magnitude if revenue_value < ZERO else commission_magnitude
+        )
+
     if commission_present:
         actual_commission = _money(commission)
         commission_used = actual_commission
         component_sources["commission"] = "financeActual"
+    elif commission_formula is not None:
+        # C is a platform-derived amount: G - forPay - acquiring, with the
+        # transaction sign preserved.  This is stronger evidence than a
+        # pricing-template percentage and remains auditable through the two
+        # source amounts and the reconciliation difference below.
+        actual_commission = commission_formula
+        commission_used = commission_formula
+        component_sources["commission"] = "platformForPayDerived"
     else:
         actual_commission = None
         commission_used = _rate_fallback(positive_revenue, policy.commission_fallback_rate)
@@ -604,11 +981,9 @@ def _calculate_group(
                 )
             )
     if payment_present:
-        actual_payment = _money(payment)
         payment_used = actual_payment
         component_sources["paymentFee"] = "financeActual"
     else:
-        actual_payment = None
         payment_used = _rate_fallback(positive_revenue, policy.payment_fallback_rate)
         component_sources["paymentFee"] = "policyFallback"
         if positive_revenue:
@@ -620,6 +995,69 @@ def _calculate_group(
                     evidence_ids,
                 )
             )
+
+    if not for_pay_present and finance_records:
+        issues.append(
+            _group_issue(
+                group,
+                "missing_for_pay_evidence",
+                "Platform forPay is absent; G/C/acquiring cash reconciliation is pending",
+                evidence_ids,
+            )
+        )
+
+    commission_reconciliation_difference: Decimal | None = None
+    if actual_commission is not None and commission_formula is not None:
+        commission_reconciliation_difference = _money(
+            actual_commission - commission_formula
+        )
+        if commission_reconciliation_difference != ZERO:
+            issues.append(
+                _group_issue(
+                    group,
+                    "commission_reconciliation_mismatch",
+                    "Actual C differs from abs(G)-abs(forPay)-abs(acquiring) after cent rounding",
+                    evidence_ids,
+                    unresolved_amount=commission_reconciliation_difference,
+                )
+            )
+
+    account_increment: Decimal | None = None
+    if (
+        revenue_value is not None
+        and commission_used is not None
+        and payment_used is not None
+    ):
+        account_increment = _money(
+            revenue_value - commission_used - payment_used
+        )
+        component_sources["accountIncrement"] = "formula:G-C-acquiring"
+
+    for_pay_reconciliation_difference: Decimal | None = None
+    if account_increment is not None and actual_for_pay is not None:
+        for_pay_reconciliation_difference = _money(
+            account_increment - actual_for_pay
+        )
+        if for_pay_reconciliation_difference != ZERO:
+            issues.append(
+                _group_issue(
+                    group,
+                    "for_pay_reconciliation_mismatch",
+                    "G-C-acquiring does not reconcile exactly to platform forPay after cent rounding",
+                    evidence_ids,
+                    unresolved_amount=for_pay_reconciliation_difference,
+                )
+            )
+
+    if commission_reconciliation_difference is None or for_pay_reconciliation_difference is None:
+        cash_reconciliation_status = "PENDING"
+    elif (
+        commission_reconciliation_difference != ZERO
+        or for_pay_reconciliation_difference != ZERO
+    ):
+        cash_reconciliation_status = "FAIL"
+    else:
+        cash_reconciliation_status = "PASS"
 
     actual_forward = _money(forward_logistics) if forward_present else None
     actual_storage = _money(storage) if storage_present else ZERO
@@ -685,13 +1123,35 @@ def _calculate_group(
     )
 
     managed = _money(positive_revenue * policy.managed_rate) if revenue_value is not None else None
+    return_risk_reserve = (
+        _money(positive_revenue * policy.return_risk_rate)
+        if revenue_value is not None
+        else None
+    )
+    promotion_reserve = (
+        _money(positive_revenue * policy.promotion_rate)
+        if revenue_value is not None
+        else None
+    )
     combined_pool = _money(positive_revenue * policy.pool_rate) if revenue_value is not None else None
     if combined_pool is not None and actual_return_logistics is not None:
-        advertising_provision = _money(max(ZERO, combined_pool - actual_return_logistics))
-        excess_return = _money(max(ZERO, actual_return_logistics - combined_pool))
+        if policy.reserve_allocation_mode == "SEPARATE_RETURN_AND_PROMOTION":
+            advertising_provision = promotion_reserve
+            excess_return = _money(
+                max(ZERO, actual_return_logistics - (return_risk_reserve or ZERO))
+            )
+        else:
+            advertising_provision = _money(max(ZERO, combined_pool - actual_return_logistics))
+            excess_return = _money(max(ZERO, actual_return_logistics - combined_pool))
     else:
         advertising_provision = None
         excess_return = None
+
+    rule_withdrawable = (
+        _money(account_increment - combined_pool)
+        if account_increment is not None and combined_pool is not None
+        else None
+    )
 
     template = _template_calculation(
         revenue_value,
@@ -701,30 +1161,30 @@ def _calculate_group(
     )
     blocking = any(issue.blocking for issue in issues)
     required_values = (
-        revenue_value,
+        account_increment,
         purchase_cost,
-        commission_used,
-        payment_used,
         forward_operations_used,
         managed,
-        actual_return_logistics,
-        advertising_provision,
+        combined_pool,
+        excess_return,
     )
     if blocking or any(value is None for value in required_values):
-        owner_profit = None
+        strict_owner_profit = None
     else:
-        owner_profit = _money(
-            revenue_value
+        # Return/cancellation logistics consumes the 3% pool first.  Only the
+        # amount above that pool is an additional loss; subtracting the full
+        # return charge again would double count it.
+        strict_owner_profit = _money(
+            account_increment
             - purchase_cost
-            - commission_used
-            - payment_used
             - forward_operations_used
             - actual_storage
             - actual_other
             - managed
-            - actual_return_logistics
-            - advertising_provision
+            - combined_pool
+            - excess_return
         )
+    owner_profit = strict_owner_profit
 
     return OrderCalculation(
         store_alias=group.store_alias,
@@ -737,29 +1197,48 @@ def _calculate_group(
         outcome=outcome,
         net_quantity=net_quantity,
         net_turnover_cny=revenue_value,
+        for_pay_cny=actual_for_pay,
         purchase_cost_cny=purchase_cost,
         actual_commission_cny=actual_commission,
+        commission_formula_cny=commission_formula,
+        commission_reconciliation_difference_cny=commission_reconciliation_difference,
         commission_used_cny=commission_used,
         actual_payment_fee_cny=actual_payment,
         payment_fee_used_cny=payment_used,
+        account_increment_cny=account_increment,
+        for_pay_reconciliation_difference_cny=for_pay_reconciliation_difference,
+        cash_reconciliation_status=cash_reconciliation_status,
         actual_forward_logistics_cny=actual_forward,
         actual_storage_cny=actual_storage,
         actual_other_platform_fee_cny=actual_other,
-        advertising_settlement_deduction_cny=_money(
-            advertising_settlement_deduction
-        ),
         forward_operations_used_cny=forward_operations_used,
         managed_operations_cny=managed,
         combined_pool_cny=combined_pool,
         actual_return_logistics_cny=actual_return_logistics,
         advertising_provision_cny=advertising_provision,
         excess_return_loss_cny=excess_return,
+        rule_withdrawable_cny=rule_withdrawable,
+        strict_owner_profit_cny=strict_owner_profit,
+        advertising_settlement_deduction_cny=(
+            _money(advertising_settlement_deduction)
+            if advertising_settlement_present
+            else ZERO
+        ),
         owner_profit_cny=owner_profit,
         template_calculation=template,
         cost_version_id=cost_selection.version_id if cost_selection else None,
         component_sources=component_sources,
         issues=tuple(_deduplicate_issues(issues)),
         evidence_ids=evidence_ids,
+        financial_reporting_policy_id=policy.reporting_policy_id,
+        selling_price_policy_id=policy.pricing_policy_id,
+        reserve_allocation_mode=policy.reserve_allocation_mode,
+        managed_operations_rate=policy.managed_rate,
+        return_risk_reserve_rate=policy.return_risk_rate,
+        promotion_reserve_rate=policy.promotion_rate,
+        total_reserve_rate=policy.pool_rate,
+        return_risk_reserve_cny=return_risk_reserve,
+        promotion_reserve_cny=promotion_reserve,
     )
 
 
@@ -863,19 +1342,85 @@ def _summary_for_orders(
     orders: Sequence[OrderCalculation],
     issues: Sequence[ReconciliationIssue],
 ) -> StoreSummary:
+    # The ALL row is display-only.  Build it from independent store summaries
+    # so that a return charge in one store can never consume another store's
+    # advertising reserve.
+    if store_alias == "ALL":
+        return _summary_for_all_stores(orders, issues)
+
+    confirmed_orders = [
+        order
+        for order in orders
+        if order.evidence_status == "COMPLETE"
+        and order.strict_owner_profit_cny is not None
+        and order.cash_reconciliation_status == "PASS"
+    ]
+
     def sum_field(name: str) -> Decimal | None:
-        values = [getattr(order, name) for order in orders]
+        values = [getattr(order, name) for order in confirmed_orders]
+        if not values:
+            return None if orders else ZERO
         if any(value is None for value in values):
             return None
         return _money(sum(values, ZERO))
 
     other_values: list[Decimal | None] = []
-    for order in orders:
+    for order in confirmed_orders:
         if order.actual_storage_cny is None or order.actual_other_platform_fee_cny is None:
             other_values.append(None)
         else:
             other_values.append(order.actual_storage_cny + order.actual_other_platform_fee_cny)
-    other_total = None if any(value is None for value in other_values) else _money(sum(other_values, ZERO))
+    other_total = (
+        None
+        if not confirmed_orders or any(value is None for value in other_values)
+        else _money(sum(other_values, ZERO))
+    )
+    if not orders:
+        other_total = ZERO
+    if confirmed_orders:
+        pool = aggregate_pool_for_orders(confirmed_orders)
+    elif orders:
+        # Preserve the existing missing-data contract: an open order does not
+        # turn the store's financial amounts into zero.
+        pool = PoolAggregation(None, None, None, None, None, None)
+    else:
+        pool = PoolAggregation(ZERO, ZERO, ZERO, ZERO, ZERO, ZERO)
+
+    account_increment = sum_field("account_increment_cny")
+    purchase_cost = sum_field("purchase_cost_cny")
+    forward_operations = sum_field("forward_operations_used_cny")
+    managed_operations = sum_field("managed_operations_cny")
+    actual_storage = sum_field("actual_storage_cny")
+    actual_other = sum_field("actual_other_platform_fee_cny")
+    if not confirmed_orders:
+        strict_owner_profit = None if orders else ZERO
+    elif any(
+        value is None
+        for value in (
+            account_increment,
+            purchase_cost,
+            forward_operations,
+            actual_storage,
+            actual_other,
+            managed_operations,
+            pool.combined_pool_cny,
+            pool.excess_return_loss_cny,
+        )
+    ):
+        strict_owner_profit = None
+    else:
+        # The three-percent pool is consumed by return logistics only after
+        # all confirmed orders in this store/period have been summed.
+        strict_owner_profit = _money(
+            account_increment
+            - purchase_cost
+            - forward_operations
+            - actual_storage
+            - actual_other
+            - managed_operations
+            - pool.combined_pool_cny
+            - pool.excess_return_loss_cny
+        )
     blocking_order_count = sum(order.evidence_status == "BLOCKED" for order in orders)
     blocking_issues = [issue for issue in issues if issue.blocking]
     return StoreSummary(
@@ -884,27 +1429,136 @@ def _summary_for_orders(
         completed_count=sum(order.outcome == "completed" for order in orders),
         returned_count=sum(order.outcome == "returned" for order in orders),
         corrected_count=sum(order.outcome == "corrected" for order in orders),
-        net_quantity=sum((order.net_quantity for order in orders), ZERO),
+        net_quantity=sum((order.net_quantity for order in confirmed_orders), ZERO),
         net_turnover_cny=sum_field("net_turnover_cny"),
+        for_pay_cny=sum_field("for_pay_cny"),
         purchase_cost_cny=sum_field("purchase_cost_cny"),
         commission_cny=sum_field("commission_used_cny"),
         payment_fee_cny=sum_field("payment_fee_used_cny"),
-        forward_operations_cny=sum_field("forward_operations_used_cny"),
-        managed_operations_cny=sum_field("managed_operations_cny"),
-        return_logistics_cny=sum_field("actual_return_logistics_cny"),
-        advertising_provision_cny=sum_field("advertising_provision_cny"),
-        excess_return_loss_cny=sum_field("excess_return_loss_cny"),
-        actual_advertising_spend_cny=_money(
-            sum((order.actual_advertising_spend_cny for order in orders), ZERO)
-        ),
+        account_increment_cny=account_increment,
+        forward_operations_cny=forward_operations,
+        managed_operations_cny=managed_operations,
+        combined_pool_cny=pool.combined_pool_cny,
+        return_risk_reserve_cny=pool.return_risk_reserve_cny,
+        promotion_reserve_cny=pool.promotion_reserve_cny,
+        return_logistics_cny=pool.return_logistics_cny,
+        advertising_provision_cny=pool.advertising_provision_cny,
+        excess_return_loss_cny=pool.excess_return_loss_cny,
+        rule_withdrawable_cny=sum_field("rule_withdrawable_cny"),
         advertising_settlement_deduction_cny=sum_field(
             "advertising_settlement_deduction_cny"
-        )
-        or ZERO,
+        ),
+        actual_advertising_spend_cny=sum_field("actual_advertising_spend_cny"),
         other_platform_cost_cny=other_total,
-        owner_profit_cny=sum_field("owner_profit_cny"),
+        strict_owner_profit_cny=strict_owner_profit,
+        owner_profit_cny=strict_owner_profit,
         unresolved_order_count=blocking_order_count,
         issue_count=len(blocking_issues),
+        confirmed_order_count=len(confirmed_orders),
+        open_item_order_count=len(orders) - len(confirmed_orders),
+    )
+
+
+def _summary_for_all_stores(
+    orders: Sequence[OrderCalculation],
+    issues: Sequence[ReconciliationIssue],
+) -> StoreSummary:
+    """Combine store summaries without cross-store pool netting."""
+
+    aliases = sorted(
+        {order.store_alias for order in orders}
+        | {issue.store_alias for issue in issues if issue.store_alias}
+    )
+    summaries = [
+        _summary_for_orders(
+            alias,
+            tuple(order for order in orders if order.store_alias == alias),
+            tuple(issue for issue in issues if issue.store_alias == alias),
+        )
+        for alias in aliases
+    ]
+    global_blocking_count = sum(
+        not issue.store_alias and issue.blocking for issue in issues
+    )
+    if not summaries:
+        return StoreSummary(
+            store_alias="ALL",
+            order_count=0,
+            completed_count=0,
+            returned_count=0,
+            corrected_count=0,
+            net_quantity=ZERO,
+            net_turnover_cny=ZERO,
+            purchase_cost_cny=ZERO,
+            commission_cny=ZERO,
+            payment_fee_cny=ZERO,
+            forward_operations_cny=ZERO,
+            managed_operations_cny=ZERO,
+            return_logistics_cny=ZERO,
+            advertising_provision_cny=ZERO,
+            excess_return_loss_cny=ZERO,
+            advertising_settlement_deduction_cny=ZERO,
+            actual_advertising_spend_cny=ZERO,
+            other_platform_cost_cny=ZERO,
+            owner_profit_cny=ZERO,
+            unresolved_order_count=0,
+            issue_count=global_blocking_count,
+            confirmed_order_count=0,
+            open_item_order_count=0,
+            for_pay_cny=ZERO,
+            account_increment_cny=ZERO,
+            combined_pool_cny=ZERO,
+            rule_withdrawable_cny=ZERO,
+            strict_owner_profit_cny=ZERO,
+            return_risk_reserve_cny=ZERO,
+            promotion_reserve_cny=ZERO,
+        )
+
+    def sum_int(name: str) -> int:
+        return sum(int(getattr(summary, name)) for summary in summaries)
+
+    def sum_decimal(name: str) -> Decimal | None:
+        values = [getattr(summary, name) for summary in summaries]
+        if any(value is None for value in values):
+            return None
+        return _money(sum(values, ZERO))
+
+    # Every money field is combined from the already store-scoped summaries;
+    # in particular advertisingProvision/excessReturnLoss are not recomputed
+    # from ALL-store totals.
+    return StoreSummary(
+        store_alias="ALL",
+        order_count=sum_int("order_count"),
+        completed_count=sum_int("completed_count"),
+        returned_count=sum_int("returned_count"),
+        corrected_count=sum_int("corrected_count"),
+        net_quantity=sum((summary.net_quantity for summary in summaries), ZERO),
+        net_turnover_cny=sum_decimal("net_turnover_cny"),
+        purchase_cost_cny=sum_decimal("purchase_cost_cny"),
+        commission_cny=sum_decimal("commission_cny"),
+        payment_fee_cny=sum_decimal("payment_fee_cny"),
+        forward_operations_cny=sum_decimal("forward_operations_cny"),
+        managed_operations_cny=sum_decimal("managed_operations_cny"),
+        return_logistics_cny=sum_decimal("return_logistics_cny"),
+        advertising_provision_cny=sum_decimal("advertising_provision_cny"),
+        excess_return_loss_cny=sum_decimal("excess_return_loss_cny"),
+        advertising_settlement_deduction_cny=sum_decimal(
+            "advertising_settlement_deduction_cny"
+        ),
+        actual_advertising_spend_cny=sum_decimal("actual_advertising_spend_cny"),
+        other_platform_cost_cny=sum_decimal("other_platform_cost_cny"),
+        owner_profit_cny=sum_decimal("owner_profit_cny"),
+        unresolved_order_count=sum_int("unresolved_order_count"),
+        issue_count=sum_int("issue_count") + global_blocking_count,
+        confirmed_order_count=sum_int("confirmed_order_count"),
+        open_item_order_count=sum_int("open_item_order_count"),
+        for_pay_cny=sum_decimal("for_pay_cny"),
+        account_increment_cny=sum_decimal("account_increment_cny"),
+        combined_pool_cny=sum_decimal("combined_pool_cny"),
+        rule_withdrawable_cny=sum_decimal("rule_withdrawable_cny"),
+        strict_owner_profit_cny=sum_decimal("strict_owner_profit_cny"),
+        return_risk_reserve_cny=sum_decimal("return_risk_reserve_cny"),
+        promotion_reserve_cny=sum_decimal("promotion_reserve_cny"),
     )
 
 
@@ -1057,6 +1711,9 @@ def _template_calculation(
             "paymentFeeCny": None,
             "fixedOperationsCny": None,
             "managedOperationsCny": None,
+            "returnRiskReserveCny": None,
+            "promotionReserveCny": None,
+            "totalPolicyReserveCny": None,
             "combinedPoolCny": None,
             "ownerProfitCny": None,
         }
@@ -1069,6 +1726,8 @@ def _template_calculation(
         else None
     )
     managed = _money(positive_revenue * policy.managed_rate)
+    return_risk = _money(positive_revenue * policy.return_risk_rate)
+    promotion = _money(positive_revenue * policy.promotion_rate)
     pool = _money(positive_revenue * policy.pool_rate)
     required = (purchase_cost, commission, payment, fixed)
     owner_profit = (
@@ -1081,6 +1740,9 @@ def _template_calculation(
         "paymentFeeCny": payment,
         "fixedOperationsCny": fixed,
         "managedOperationsCny": managed,
+        "returnRiskReserveCny": return_risk,
+        "promotionReserveCny": promotion,
+        "totalPolicyReserveCny": pool,
         "combinedPoolCny": pool,
         "ownerProfitCny": owner_profit,
     }
@@ -1096,15 +1758,55 @@ def _policy_view(policy: Any) -> _PolicyView:
         raw,
         ("costs", "managedOperations", "rate"),
     )
-    pool = _policy_decimal(
-        policy,
-        "combined_advertising_return_pool_rate",
-        raw,
-        ("costs", "advertisingAndReturns", "combinedPoolRate"),
-    )
-    if managed != Decimal("0.02") or pool != Decimal("0.03"):
+    advertising_returns = _nested(raw, ("costs", "advertisingAndReturns")) or {}
+    mode = str(
+        getattr(policy, "reserve_allocation_mode", None)
+        or (advertising_returns.get("reserveAllocationMode") if isinstance(advertising_returns, Mapping) else None)
+        or "LEGACY_SHARED_POOL"
+    ).strip()
+    if mode == "SEPARATE_RETURN_AND_PROMOTION":
+        return_risk = _policy_decimal(
+            policy,
+            "return_risk_reserve_rate",
+            raw,
+            ("costs", "advertisingAndReturns", "returnRiskReserveRate"),
+        )
+        promotion = _policy_decimal(
+            policy,
+            "promotion_reserve_rate",
+            raw,
+            ("costs", "advertisingAndReturns", "promotionReserveRate"),
+        )
+        pool = _policy_decimal(
+            policy,
+            "total_reserve_rate",
+            raw,
+            ("costs", "advertisingAndReturns", "totalReserveRate"),
+        )
+    else:
+        pool = _policy_decimal(
+            policy,
+            "combined_advertising_return_pool_rate",
+            raw,
+            ("costs", "advertisingAndReturns", "combinedPoolRate"),
+        )
+        return_risk = ZERO
+        promotion = pool
+        mode = "LEGACY_SHARED_POOL"
+    if managed != Decimal("0.02"):
         raise FinanceCalculationError(
-            f"Financial calculation requires managed rate 0.02 and combined pool 0.03; got {managed}/{pool}"
+            f"Financial calculation requires managed rate 0.02; got {managed}"
+        )
+    if mode == "LEGACY_SHARED_POOL" and pool != Decimal("0.03"):
+        raise FinanceCalculationError(f"Legacy shared pool must be 0.03; got {pool}")
+    if mode == "SEPARATE_RETURN_AND_PROMOTION" and (
+        return_risk != Decimal("0.02")
+        or promotion != Decimal("0.03")
+        or pool != Decimal("0.05")
+        or return_risk + promotion != pool
+    ):
+        raise FinanceCalculationError(
+            "Separate reserve policy must be return 0.02 + promotion 0.03 = total 0.05"
         )
     return _PolicyView(
         reporting_policy_id=str(
@@ -1117,6 +1819,9 @@ def _policy_view(policy: Any) -> _PolicyView:
         ).strip(),
         managed_rate=managed,
         pool_rate=pool,
+        reserve_allocation_mode=mode,
+        return_risk_rate=return_risk,
+        promotion_rate=promotion,
         commission_fallback_rate=_optional_policy_decimal(
             raw, ("costs", "wbCommission", "fallbackRate")
         ),
@@ -1127,6 +1832,41 @@ def _policy_view(policy: Any) -> _PolicyView:
             raw, ("costs", "fixedOperations", "fallbackPerCompletedUnitCny")
         ),
     )
+
+
+def _policy_for_timestamp(policy: Any, order_created_at: str | None) -> Any:
+    selector = getattr(policy, "select", None)
+    if callable(selector):
+        return selector(order_created_at)
+    return policy
+
+
+def _reporting_policy_versions(policy: Any) -> tuple[Mapping[str, Any], ...]:
+    active = getattr(policy, "active_policy", policy)
+    historical = tuple(getattr(policy, "historical_policies", ()) or ())
+    versions = (*historical, active)
+    result: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for item in versions:
+        view = _policy_view(item)
+        if view.reporting_policy_id in seen:
+            continue
+        seen.add(view.reporting_policy_id)
+        raw = item if isinstance(item, Mapping) else getattr(item, "raw", {})
+        result.append(
+            {
+                "reportingPolicyId": view.reporting_policy_id,
+                "pricingPolicyId": view.pricing_policy_id,
+                "reserveAllocationMode": view.reserve_allocation_mode,
+                "managedOperationsRate": str(view.managed_rate),
+                "returnRiskReserveRate": str(view.return_risk_rate),
+                "promotionReserveRate": str(view.promotion_rate),
+                "totalReserveRate": str(view.pool_rate),
+                "effectiveFrom": raw.get("effectiveFrom"),
+                "effectiveTo": raw.get("effectiveTo"),
+            }
+        )
+    return tuple(result)
 
 
 def _record(
@@ -1375,48 +2115,33 @@ def _sum_other_platform(
     records: Sequence[EvidenceRecord],
     issues: list[ReconciliationIssue],
     group: OrderEvidenceGroup,
-) -> tuple[Decimal, bool, Decimal]:
+) -> tuple[Decimal, bool, Decimal, bool]:
+    other_records = [
+        record for record in records if not _is_advertising_settlement_row(record.row)
+    ]
+    advertising_records = [
+        record for record in records if _is_advertising_settlement_row(record.row)
+    ]
     total = ZERO
     present = False
-    advertising_settlement_deduction = ZERO
-    for record in records:
-        is_advertising_settlement = _is_advertising_settlement_marker(record.row)
-        field_groups = (
-            *_OTHER_PLATFORM_FIELD_GROUPS_EXCLUDING_DEDUCTION,
-            _DEDUCTION_FIELDS,
+    advertising_total = ZERO
+    advertising_present = False
+    for aliases in _OTHER_PLATFORM_FIELD_GROUPS:
+        subtotal, seen = _sum_first_alias(
+            other_records, aliases, issues, group, "other platform fee"
         )
-        for group_index, aliases in enumerate(field_groups):
-            is_deduction_group = aliases == _DEDUCTION_FIELDS
-            advertising_reconciliation_eligible = (
-                group_index == 0 or is_deduction_group
-            )
-            key, value = _first_item(record.row, aliases)
-            if key is None:
-                continue
-            if not is_deduction_group:
-                # A recognized zero still proves that the generic report field was
-                # supplied.  Classification only controls where a non-zero amount
-                # is routed; it does not erase evidence completeness.
-                present = True
-            try:
-                amount = _decimal(value, key)
-            except FinanceCalculationError as exc:
-                issues.append(
-                    _group_issue(
-                        group,
-                        "invalid_other_platform_fee",
-                        str(exc),
-                        (record.evidence_id,),
-                    )
-                )
-                continue
-            if is_advertising_settlement and advertising_reconciliation_eligible:
-                advertising_settlement_deduction += amount
-            else:
-                total += amount
-                if is_deduction_group:
-                    present = True
-    return total, present, advertising_settlement_deduction
+        total += subtotal
+        present = present or seen
+        advertising_subtotal, advertising_seen = _sum_first_alias(
+            advertising_records,
+            aliases,
+            issues,
+            group,
+            "advertising settlement deduction",
+        )
+        advertising_total += advertising_subtotal
+        advertising_present = advertising_present or advertising_seen
+    return total, present, advertising_total, advertising_present
 
 
 def _retail_return_quantity(row: Mapping[str, Any]) -> tuple[Decimal, Decimal] | None:
@@ -1464,20 +2189,17 @@ def _has_logistics_marker(row: Mapping[str, Any]) -> bool:
     return any(value in marker for value in ("物流", "логист", "delivery", "logistic"))
 
 
-def _is_advertising_settlement_marker(row: Mapping[str, Any]) -> bool:
-    for key in _ADVERTISING_SETTLEMENT_OPERATION_NAME_FIELDS:
-        marker = _normalize_operation_marker(row.get(key))
-        if marker in _ADVERTISING_SETTLEMENT_OPERATION_NAMES:
-            return True
-    for key in _ADVERTISING_SETTLEMENT_OPERATION_CODE_FIELDS:
-        marker = _normalize_operation_marker(row.get(key))
-        if marker in _ADVERTISING_SETTLEMENT_OPERATION_CODES:
-            return True
-    return False
+def _is_advertising_settlement_row(row: Mapping[str, Any]) -> bool:
+    """Identify explicit advertising/promotion settlement deductions.
 
+    WB finance rows are multilingual and the monetary value commonly arrives
+    through the generic ``deduction`` field.  Classification therefore uses
+    only explicit operation markers; an unmarked deduction remains an ordinary
+    platform cost.
+    """
 
-def _normalize_operation_marker(value: Any) -> str:
-    return " ".join(str(value or "").split()).casefold()
+    marker = _marker_text(row)
+    return any(value in marker for value in _ADVERTISING_SETTLEMENT_MARKERS)
 
 
 def _marker_text(row: Mapping[str, Any]) -> str:
@@ -1728,6 +2450,12 @@ _COMMISSION_FIELDS = (
     "ppvzReward",
     "ppvz_reward",
 )
+_FOR_PAY_FIELDS = (
+    "forPayCny",
+    "for_pay_cny",
+    "forPay",
+    "for_pay",
+)
 _PAYMENT_FIELDS = (
     "paymentFeeCny",
     "payment_fee_cny",
@@ -1747,50 +2475,22 @@ _DIRECT_FORWARD_FIELDS = (
     "forward_logistics_cny",
     "logistics_cny",
 )
-_OTHER_PLATFORM_FIELD_GROUPS_EXCLUDING_DEDUCTION = (
+_OTHER_PLATFORM_FIELD_GROUPS = (
     ("otherPlatformFeeCny", "other_platform_fee_cny", "otherCostCny", "other_cost_cny"),
     ("penaltyCny", "penalty_cny", "penalty"),
+    ("deductionCny", "deduction_cny", "deduction"),
     ("acceptanceFeeCny", "acceptance_fee_cny", "acceptanceFee", "acceptance_fee"),
 )
-_DEDUCTION_FIELDS = ("deductionCny", "deduction_cny", "deduction")
-_ADVERTISING_SETTLEMENT_OPERATION_NAME_FIELDS = (
-    "sellerOperName",
-    "seller_oper_name",
-    "docTypeName",
-    "doc_type_name",
-    "operationName",
-    "operation_name",
-    "operationType",
-    "operation_type",
-    "serviceName",
-    "service_name",
-)
-_ADVERTISING_SETTLEMENT_OPERATION_CODE_FIELDS = (
-    "operationCode",
-    "operation_code",
-    "serviceCode",
-    "service_code",
-    "eventType",
-    "event_type",
-)
-_ADVERTISING_SETTLEMENT_OPERATION_NAMES = frozenset(
-    {
-        "广告费用周期扣款",
-        "广告费结算扣除",
-        "活动推广费用扣除",
-        "удержание за рекламу",
-        "расходы на продвижение",
-        "advertising settlement deduction",
-        "advertising promotion settlement",
-        "advertising promotion settlement deduction",
-        "promotion fee deduction",
-    }
-)
-_ADVERTISING_SETTLEMENT_OPERATION_CODES = frozenset(
-    {
-        "advertising_settlement",
-        "advertising_settlement_deduction",
-    }
+_ADVERTISING_SETTLEMENT_MARKERS = (
+    "广告",
+    "推广",
+    "реклам",
+    "продвижен",
+    "advertising",
+    "advertisement",
+    "promotion",
+    "ad fee",
+    "ad deduction",
 )
 _RETURN_MARKERS = (
     "退货",

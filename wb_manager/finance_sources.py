@@ -737,6 +737,7 @@ def normalize_advertising_payment_events(
                 "eventType": "advertising_funding",
                 "source": "adv/v1/payments",
                 "pnl": False,
+                "occurredAt": row.get("date"),
                 "raw": dict(row),
             }
         )

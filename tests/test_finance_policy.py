@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -10,11 +9,13 @@ import pytest
 
 from wb_manager.finance_policy import (
     ADVERTISING_BALANCE_FIELD,
+    ADVERTISING_DEDUCTION_MODE,
     ADVERTISING_DEPOSIT_CAP_RULE,
     ADVERTISING_FUNDING_SOURCE,
     ADVERTISING_REQUEST_TYPE,
     FinancialPolicyError,
     load_active_phone_financial_policy,
+    load_phone_financial_policy_timeline,
 )
 
 
@@ -41,17 +42,32 @@ def valid_reporting_policy() -> dict:
         },
         "funding": {
             "advertisingDeposit": {
+                "fundingSource": ADVERTISING_FUNDING_SOURCE,
+                "platformBalanceField": ADVERTISING_BALANCE_FIELD,
+                "platformRequestType": ADVERTISING_REQUEST_TYPE,
+                "separateWithdrawalRequired": False,
+                "manualCashTopUpRequired": False,
+                "deductionMode": ADVERTISING_DEDUCTION_MODE,
+                "actualDeductionEvidenceRequired": True,
                 "perActionCapRule": ADVERTISING_DEPOSIT_CAP_RULE,
                 "requireExactReserveEquality": True,
                 "requirePriorDryRunProposal": True,
                 "requireLiveSellerBalanceCurrencyReadback": True,
-            }
+            },
+            "withdrawalAdvertisingDebt": {
+                "cutoverEffectiveFrom": "2026-01-01",
+                "modeFromCutover": "not_applicable_to_withdrawal",
+                "preserveHistoricalRecords": True,
+                "noRetroactiveClearing": True,
+            },
         },
         "governance": {
             "returnLogisticsMustComeFromPlatformFinance": True,
             "noReturnLogisticsFallback": True,
             "actualAdvertisingSpendReconciliationOnly": True,
             "noDoubleCountActualAdvertisingOutsideCombinedPool": True,
+            "platformAdvertisingSettlementDeductionReconciliationOnly": True,
+            "noNewWithdrawalLinkedAdvertisingDebtAfterCutover": True,
         },
     }
 
@@ -83,15 +99,12 @@ def test_valid_policy_exposes_decimal_contract(tmp_path):
     assert policy.managed_operations_rate == Decimal("0.02")
     assert policy.combined_advertising_return_pool_rate == Decimal("0.03")
     assert policy.advertising_deposit_cap_rule == ADVERTISING_DEPOSIT_CAP_RULE
+    assert policy.advertising_funding_source == "balance"
+    assert policy.advertising_balance_field == "net"
+    assert policy.advertising_request_type == 1
+    assert policy.advertising_deduction_mode == "future_sales_settlement_netting"
     assert policy.managed_operations_amount(Decimal("100")) == Decimal("2.00")
     assert policy.combined_pool_amount(Decimal("100")) == Decimal("3.00")
-    assert policy.settlement_balance_contract_enabled is False
-    assert policy.settlement_balance_enabled is False
-    assert policy.advertising_funding_source is None
-    assert policy.advertising_balance_field is None
-    assert policy.advertising_request_type is None
-    assert policy.advertising_deduction_mode is None
-    assert policy.withdrawal_advertising_debt_cutover is None
 
 
 def test_repository_active_policy_satisfies_the_finance_contract():
@@ -102,7 +115,28 @@ def test_repository_active_policy_satisfies_the_finance_contract():
         "activePricingPolicyId"
     ]
     assert policy.reporting_currency == "CNY"
-    assert policy.settlement_balance_contract_enabled is False
+
+
+def test_repository_policy_timeline_uses_exact_readback_boundary():
+    timeline = load_phone_financial_policy_timeline()
+
+    assert timeline.predecessor_policy.reporting_policy_id.endswith("20260905-v6")
+    assert timeline.active_policy.reporting_policy_id.endswith("20260906-v7")
+    assert timeline.active_policy.return_risk_reserve_rate == Decimal("0.02")
+    assert timeline.active_policy.promotion_reserve_rate == Decimal("0.03")
+    assert timeline.active_policy.total_reserve_rate == Decimal("0.05")
+    assert timeline.select(
+        "2026-09-06T13:08:37+03:00"
+    ).reporting_policy_id.endswith("20260905-v6")
+    assert timeline.select(
+        "2026-09-06T13:08:38+03:00"
+    ).reporting_policy_id.endswith("20260906-v7")
+    assert (
+        timeline.active_policy.raw["funding"]["withdrawalAdvertisingDebt"][
+            "cutoverEffectiveFrom"
+        ]
+        == "2026-09-05"
+    )
 
 
 @pytest.mark.parametrize(
@@ -123,11 +157,25 @@ def test_repository_active_policy_satisfies_the_finance_contract():
             False,
         ),
         (
+            (
+                "governance",
+                "platformAdvertisingSettlementDeductionReconciliationOnly",
+            ),
+            False,
+        ),
+        (
             ("funding", "advertisingDeposit", "perActionCapRule"),
             "self_declared_numeric_cap",
         ),
         (
             ("funding", "advertisingDeposit", "requirePriorDryRunProposal"),
+            False,
+        ),
+        (("funding", "advertisingDeposit", "fundingSource"), "account"),
+        (("funding", "advertisingDeposit", "platformRequestType"), 0),
+        (("funding", "advertisingDeposit", "separateWithdrawalRequired"), True),
+        (
+            ("funding", "withdrawalAdvertisingDebt", "noRetroactiveClearing"),
             False,
         ),
     ],
@@ -204,135 +252,4 @@ def test_pricing_and_reporting_policy_ids_must_match(tmp_path):
     policy = valid_reporting_policy()
     policy["pricingReferences"]["reportingPolicyId"] = "wrong-reporting-id"
     with pytest.raises(FinancialPolicyError, match="reportingPolicyId"):
-        load(tmp_path, policy)
-
-
-def settlement_balance_policy() -> dict:
-    policy = valid_reporting_policy()
-    policy["effectiveFrom"] = "2026-09-05"
-    policy["funding"]["advertisingDeposit"].update(
-        {
-            "fundingSource": "balance",
-            "platformBalanceField": "net",
-            "platformRequestType": 1,
-            "deductionMode": "future_sales_settlement_netting",
-            "separateWithdrawalRequired": False,
-            "manualCashTopUpRequired": False,
-            "actualDeductionEvidenceRequired": True,
-        }
-    )
-    policy["funding"]["withdrawalAdvertisingDebt"] = {
-        "cutoverEffectiveFrom": "2026-09-05",
-        "modeFromCutover": "not_applicable_to_withdrawal",
-        "preserveHistoricalRecords": True,
-        "noRetroactiveClearing": True,
-    }
-    return policy
-
-
-def test_settlement_balance_policy_is_explicit_and_complete(tmp_path):
-    policy = load(tmp_path, settlement_balance_policy())
-
-    assert policy.settlement_balance_contract_enabled is True
-    assert policy.settlement_balance_enabled is True
-    assert policy.advertising_funding_source == ADVERTISING_FUNDING_SOURCE
-    assert policy.advertising_balance_field == ADVERTISING_BALANCE_FIELD
-    assert policy.advertising_request_type == ADVERTISING_REQUEST_TYPE
-    assert policy.withdrawal_advertising_debt_cutover == date(2026, 9, 5)
-
-
-def test_settlement_balance_cutover_must_equal_policy_effective_from(tmp_path):
-    policy = settlement_balance_policy()
-    policy["effectiveFrom"] = "2026-09-04"
-
-    with pytest.raises(FinancialPolicyError, match="must equal.*effectiveFrom"):
-        load(tmp_path, policy)
-
-
-def test_future_settlement_balance_policy_uses_its_own_matching_cutover(tmp_path):
-    policy = settlement_balance_policy()
-    policy["effectiveFrom"] = "2027-01-15"
-    policy["funding"]["withdrawalAdvertisingDebt"]["cutoverEffectiveFrom"] = (
-        "2027-01-15"
-    )
-
-    loaded = load(tmp_path, policy)
-
-    assert loaded.settlement_balance_contract_enabled is True
-    assert loaded.withdrawal_advertising_debt_cutover == date(2027, 1, 15)
-
-
-@pytest.mark.parametrize(
-    ("container", "key", "value"),
-    [
-        (("funding", "advertisingDeposit"), "fundingSource", "account"),
-        (("funding", "advertisingDeposit"), "platformBalanceField", "balance"),
-        (("funding", "advertisingDeposit"), "platformRequestType", 0),
-        (("funding", "advertisingDeposit"), "deductionMode", "cash_recharge"),
-        (("funding", "advertisingDeposit"), "separateWithdrawalRequired", True),
-        (("funding", "advertisingDeposit"), "manualCashTopUpRequired", True),
-        (
-            ("funding", "advertisingDeposit"),
-            "actualDeductionEvidenceRequired",
-            False,
-        ),
-        (
-            ("funding", "withdrawalAdvertisingDebt"),
-            "modeFromCutover",
-            "withdrawal_debt",
-        ),
-        (
-            ("funding", "withdrawalAdvertisingDebt"),
-            "preserveHistoricalRecords",
-            False,
-        ),
-        (
-            ("funding", "withdrawalAdvertisingDebt"),
-            "noRetroactiveClearing",
-            False,
-        ),
-    ],
-)
-def test_incomplete_settlement_balance_contract_fails_closed(
-    tmp_path, container, key, value
-):
-    policy = settlement_balance_policy()
-    target = policy
-    for part in container:
-        target = target[part]
-    target[key] = value
-
-    with pytest.raises(FinancialPolicyError):
-        load(tmp_path, policy)
-
-
-@pytest.mark.parametrize(
-    ("container", "key"),
-    [
-        (("funding", "advertisingDeposit"), "fundingSource"),
-        (("funding", "advertisingDeposit"), "deductionMode"),
-        (("funding", "withdrawalAdvertisingDebt"), "cutoverEffectiveFrom"),
-        (("funding",), "withdrawalAdvertisingDebt"),
-    ],
-)
-def test_missing_modern_settlement_balance_fields_fail_closed(
-    tmp_path,
-    container,
-    key,
-):
-    policy = settlement_balance_policy()
-    target = policy
-    for part in container:
-        target = target[part]
-    del target[key]
-
-    with pytest.raises(FinancialPolicyError):
-        load(tmp_path, policy)
-
-
-def test_settlement_balance_request_type_rejects_boolean_alias(tmp_path):
-    policy = settlement_balance_policy()
-    policy["funding"]["advertisingDeposit"]["platformRequestType"] = True
-
-    with pytest.raises(FinancialPolicyError, match="platformRequestType"):
         load(tmp_path, policy)

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "status": "active",
+  "currency": "CNY",
+  "governance": {
+    "appendOnly": true,
+    "storeSpecific": true,
+    "neverInferFromBalanceDelta": true,
+    "correctionsRequireNewEvent": true
+  },
+  "events": []
+}

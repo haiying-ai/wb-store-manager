@@ -156,17 +156,18 @@ Live write commands must be reviewed as dry runs and approved for exact SKUs/nmI
 
 The finance module maintains one local, append-only ledger for every enabled owner store. Its credential-free registry is [`config/finance/stores.json`](config/finance/stores.json): the current `owner-store` and `new-store` entries are both enabled, and every future store is included automatically after adding a unique `alias`, opening date, credential **variable names**, local token-file path, and currency. Never put a token value in the registry or Git.
 
-The six finance commands are:
+The seven finance commands are:
 
 ```powershell
 # First run: all available history from each store opening through yesterday
-python -m wb_manager finance bootstrap
+# (at most two distinct-token stores are read concurrently; use 1 if needed)
+python -m wb_manager finance bootstrap --max-store-workers 2
 
 # Daily repair/sync; the local schedule runs this at 09:30 Asia/Shanghai
-python -m wb_manager finance daily
+python -m wb_manager finance daily --max-store-workers 2
 
 # Append an approved historical cost version; a date starts at Moscow 00:00
-python -m wb_manager finance cost-import --quote "E:\path\approved-quote.xlsx" --effective-from 2026-07-04 --approved-by "operator-name" --rub-per-cny 11.5
+python -m wb_manager finance cost-import --quote "E:\path\approved-quote.xlsx" --effective-from 2026-07-04 --approved-by "operator-name" --source-currency RUB --rub-per-cny 11.5
 
 # Create or restate a bootstrap, weekly, or monthly report
 python -m wb_manager finance report --kind weekly --period auto
@@ -174,24 +175,27 @@ python -m wb_manager finance report --kind weekly --period auto
 # Plan-only calculation from a FINAL or RESTATED weekly report
 python -m wb_manager finance funds-plan --report-id "weekly-report-id"
 
-# Record the exact immutable settlement-balance campaign-budget plan as a dry-run proposal
+# Build one immutable balance-funded campaign plan after GET-only live preflight
+python -m wb_manager finance ads-deposit-plan --funds-plan "E:\path\weekly-funds-plan.json" --store "owner-store" --campaign 1234567 --amount-cny 100 --approved-by "operator-name"
+
+# Record the exact immutable advertising-deposit plan as a dry-run proposal
 python -m wb_manager finance ads-deposit --plan "E:\path\approved-plan.json" --approved-by "operator-name"
 
 # After reviewing that recorded proposal, approve and execute the exact same fingerprint
 python -m wb_manager finance ads-deposit --plan "E:\path\approved-plan.json" --approved-by "operator-name" --confirm-live
 ```
 
-The 09:30 daily run backfills missed dates before syncing yesterday. The first report is cumulative from store opening; ordinary weekly reports cover the prior Monday through Sunday, and ordinary monthly reports cover the prior calendar month. `PENDING_DATA` means required settlement or store evidence is still incomplete, `FINAL` means every completeness gate passed, and `RESTATED` is a new immutable correction linked to an earlier final report. A report is delivered as three matching artifacts: canonical JSON, Simplified-Chinese Markdown, and a verified XLSX workbook.
+The 09:30 daily run backfills missed dates before syncing yesterday. Ordinary days use a 30-day correction sweep; Monday/month-start uses 120 days, while source-specific statistics cursors resume from their own watermark with a one-day overlap. API reads are bounded by store and same-token stores are serialized; all SQLite writes remain deterministic and serial. The first report is cumulative from store opening; ordinary weekly reports cover the prior Monday through Sunday, and ordinary monthly reports cover the prior calendar month. `PENDING_DATA` means required settlement or store evidence is still incomplete, `FINAL` means every completeness gate passed, and `RESTATED` is a new immutable correction linked to an earlier final report. A report is delivered as three matching artifacts: canonical JSON, Simplified-Chinese Markdown, and a verified XLSX workbook. Repository defaults use `outputs/`; scheduled installations may set `WB_FINANCE_CANONICAL_WORKBOOK`, `WB_FINANCE_REPORT_ROOT`, and `WB_FINANCE_CASH_EVENTS` to local paths. The real cash-event registry stays local and Git-ignored; a tracked empty example keeps clean checkouts runnable. XLSX generation uses the Codex bundled Node spreadsheet runtime (`@oai/artifact-tool`); a fresh checkout must load workspace dependencies and expose that package through a local, Git-ignored `node_modules` junction.
 
 Financial calculation is fail-closed:
 
 - purchase cost uses the cost version effective when the order was created;
 - return logistics comes from actual linked WB finance rows—there is no fixed 8/16 CNY fallback;
-- the managed-operations fee is 2% and the combined advertising-and-return pool is 3%; return logistics consumes the pool first and actual campaign spend is reconciliation-only, never a second deduction;
+- the managed-operations fee is 2%; orders before `2026-09-06T13:08:38+03:00` retain the historical shared 3% advertising-and-return reserve, while later orders use a separate 2% return-risk reserve and 3% promotion reserve; actual return logistics reconciles only the applicable return reserve and campaign spend is never deducted a second time;
 - the first cumulative history is informational and creates no retroactive funding obligation; afterward `suggested withdrawal = max(0, platform available balance - post-activation unallocated advertising accrual - approved/executing unread advertising deposits - other locked funds)`;
 - withdrawal is a plan-only amount and remains a manual seller-portal action because WB has no supported public withdrawal API;
-- campaign-budget allocation is the only supported money write. It uses the same store's WB mutual-settlement `balance` (`net`, request `type=1`), so no separate withdrawal or external cash recharge is required. The immutable plan freezes store, campaign, CNY amount, source balance and evidence time, the ledger-derived advertising reserve, approver, approval time, and expiry. `policyCapCny` is not self-declared: it must exactly equal that current ledger-derived reserve under the active finance policy;
-- WB later nets advertising charges from future sales on its settlement cycle. Those deductions reconcile the 3% advertising-and-return pool and are not charged again as other platform cost. Withdrawal-linked advertising debt that predates the private-policy cutover remains in the legacy ledger; later withdrawals create no new advertising-fee debt;
+- campaign-budget allocation is the only supported money write. It uses the same store's WB mutual-settlement `balance` (`net`, `type=1`); no separate withdrawal or external cash recharge is required. The immutable plan freezes store, campaign, CNY amount, source balance and evidence time, the ledger-derived advertising reserve, approver, approval time, and expiry. `policyCapCny` is not self-declared: it must exactly equal that current ledger-derived reserve under the active finance policy;
+- `ads-deposit-plan` accepts one store and one campaign, forces `balance` (`type=1`), rejects non-integer CNY or any amount above the current ledger reserve, and performs only campaign/budget/currency/balance GET requests. Promotional bonuses and cashback are never selected. WB later nets advertising charges from future sales on its settlement cycle; those deductions reconcile the 3% pool and are not charged again as other platform cost;
 - the first command records a `proposed` ledger event and never writes to WB. `--confirm-live` requires that exact prior proposal, records the approval transition under the store funds lock, then rechecks campaign ownership/status, campaign budget, same-token seller-balance currency, source balance, policy cap, and reserve before the single non-retried POST;
 - an unknown POST outcome triggers one immediate read-only campaign-budget check. Later calls with the same fingerprint remain readback-only—never another POST—until the expected budget delta is confirmed or the action remains `unknown`.
 

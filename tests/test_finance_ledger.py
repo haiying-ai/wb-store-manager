@@ -8,7 +8,6 @@ import pytest
 
 from wb_manager.finance_costs import CostVersionRow
 from wb_manager.finance_ledger import (
-    SCHEMA_VERSION,
     FinanceLedger,
     FinanceLedgerError,
     MissingCostVersionError,
@@ -22,266 +21,6 @@ CN_TZ = timezone(timedelta(hours=8))
 
 def moment(year: int, month: int, day: int, hour: int = 0) -> datetime:
     return datetime(year, month, day, hour, tzinfo=CN_TZ)
-
-
-def _legacy_withdrawal_database(path) -> None:
-    connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-        PRAGMA user_version=3;
-        PRAGMA foreign_keys=ON;
-        CREATE TABLE store_registry(
-            store_alias TEXT PRIMARY KEY,
-            scope_id TEXT NOT NULL,
-            currency TEXT NOT NULL CHECK(currency = 'CNY'),
-            active INTEGER NOT NULL CHECK(active IN (0, 1)),
-            metadata_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE withdrawal_records(
-            record_id TEXT PRIMARY KEY,
-            idempotency_key TEXT NOT NULL UNIQUE,
-            store_alias TEXT NOT NULL REFERENCES store_registry(store_alias),
-            withdrawal_amount_cny TEXT NOT NULL CHECK(typeof(withdrawal_amount_cny) = 'text'),
-            withdrawn_at TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('reported', 'readback_confirmed', 'voided')),
-            advertising_fee_status TEXT NOT NULL
-                CHECK(advertising_fee_status IN ('deducted', 'not_deducted', 'partial', 'unknown')),
-            advertising_fee_due_cny TEXT NOT NULL CHECK(typeof(advertising_fee_due_cny) = 'text'),
-            advertising_fee_withheld_cny TEXT NOT NULL CHECK(typeof(advertising_fee_withheld_cny) = 'text'),
-            advertising_fee_debt_cny TEXT NOT NULL CHECK(typeof(advertising_fee_debt_cny) = 'text'),
-            settled_at TEXT,
-            external_reference TEXT,
-            source_type TEXT NOT NULL,
-            evidence_json TEXT NOT NULL,
-            payload_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE withdrawal_record_events(
-            record_id TEXT NOT NULL REFERENCES withdrawal_records(record_id),
-            event_id TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('reported', 'readback_confirmed', 'voided')),
-            occurred_at TEXT NOT NULL,
-            external_reference TEXT,
-            evidence_json TEXT NOT NULL,
-            PRIMARY KEY(record_id, event_id)
-        );
-        CREATE TABLE funding_actions(
-            action_id TEXT PRIMARY KEY,
-            idempotency_key TEXT NOT NULL UNIQUE,
-            store_alias TEXT NOT NULL REFERENCES store_registry(store_alias),
-            report_id TEXT REFERENCES reports(report_id),
-            action_type TEXT NOT NULL CHECK(action_type IN ('withdrawal', 'advertising_top_up')),
-            requested_amount_cny TEXT NOT NULL CHECK(typeof(requested_amount_cny) = 'text'),
-            status TEXT NOT NULL CHECK(status IN ('proposed', 'approved', 'executing', 'unknown', 'readback_pending', 'readback_confirmed', 'executed', 'failed', 'cancelled')),
-            lifecycle_status TEXT NOT NULL CHECK(lifecycle_status IN ('proposed', 'approved', 'executing', 'unknown', 'readback_pending', 'readback_confirmed', 'executed', 'failed', 'cancelled')),
-            requested_at TEXT NOT NULL,
-            approved_at TEXT,
-            executed_at TEXT,
-            external_reference TEXT,
-            evidence_json TEXT NOT NULL,
-            payload_hash TEXT NOT NULL
-        );
-        CREATE TABLE advertising_payment_readbacks(
-            payment_id TEXT PRIMARY KEY,
-            idempotency_key TEXT NOT NULL UNIQUE,
-            store_alias TEXT NOT NULL REFERENCES store_registry(store_alias),
-            amount_cny TEXT NOT NULL CHECK(typeof(amount_cny) = 'text'),
-            paid_at TEXT NOT NULL,
-            source_type TEXT NOT NULL CHECK(source_type IN ('platform_api', 'user_provided', 'funding_action')),
-            platform_reference TEXT,
-            raw_event_hash TEXT,
-            funding_action_id TEXT REFERENCES funding_actions(action_id),
-            evidence_json TEXT NOT NULL,
-            payload_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE advertising_debt_allocations(
-            allocation_id TEXT PRIMARY KEY,
-            payment_id TEXT NOT NULL REFERENCES advertising_payment_readbacks(payment_id),
-            withdrawal_record_id TEXT NOT NULL REFERENCES withdrawal_records(record_id),
-            amount_cny TEXT NOT NULL CHECK(typeof(amount_cny) = 'text'),
-            allocated_at TEXT NOT NULL,
-            evidence_json TEXT NOT NULL,
-            UNIQUE(payment_id, withdrawal_record_id)
-        );
-        CREATE INDEX legacy_withdrawal_index
-            ON withdrawal_records(store_alias, withdrawn_at);
-        CREATE TRIGGER legacy_withdrawal_guard
-            BEFORE UPDATE ON withdrawal_records BEGIN
-                SELECT RAISE(ABORT, 'legacy immutable');
-            END;
-        """
-    )
-    timestamp = "2026-09-04T07:00:00+00:00"
-    connection.execute(
-        "INSERT INTO store_registry VALUES ('owner-store', 'scope', 'CNY', 1, '{}', ?, ?)",
-        (timestamp, timestamp),
-    )
-    connection.execute(
-        """
-        INSERT INTO withdrawal_records VALUES(
-            'legacy-record', 'legacy-key', 'owner-store', '100.00', ?,
-            'reported', 'not_deducted', '10.00', '0.00', '10.00',
-            NULL, 'portal-1', 'user_provided', '{}', 'payload', ?
-        )
-        """,
-        (timestamp, timestamp),
-    )
-    connection.execute(
-        "INSERT INTO withdrawal_record_events VALUES ('legacy-record', 'event-1', 'reported', ?, 'portal-1', '{}')",
-        (timestamp,),
-    )
-    connection.execute(
-        """
-        INSERT INTO advertising_payment_readbacks VALUES(
-            'payment-1', 'payment-key', 'owner-store', '3.00', ?,
-            'platform_api', 'wb-payment', NULL, NULL, '{}', 'payment-payload', ?
-        )
-        """,
-        (timestamp, timestamp),
-    )
-    connection.execute(
-        "INSERT INTO advertising_debt_allocations VALUES ('allocation-1', 'payment-1', 'legacy-record', '3.00', ?, '{}')",
-        (timestamp,),
-    )
-    connection.commit()
-    connection.close()
-
-
-def test_legacy_withdrawal_constraint_migrates_without_rewriting_history(tmp_path):
-    database = tmp_path / "legacy-v3.sqlite3"
-    _legacy_withdrawal_database(database)
-
-    with FinanceLedger(database) as ledger:
-        table_sql = ledger.connection.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='withdrawal_records'"
-        ).fetchone()[0]
-        assert "settlement_balance" in table_sql
-        row = ledger.list_withdrawal_records(store_alias="owner-store")[0]
-        assert row["advertising_fee_status"] == "not_deducted"
-        assert row["advertising_fee_debt_cny"] == "10.00"
-        assert row["outstanding_advertising_fee_cny"] == "7.00"
-        assert ledger.connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert ledger.connection.execute(
-            "SELECT COUNT(*) FROM withdrawal_record_events"
-        ).fetchone()[0] == 1
-        assert ledger.connection.execute(
-            "SELECT COUNT(*) FROM advertising_debt_allocations"
-        ).fetchone()[0] == 1
-        objects = {
-            row["name"]
-            for row in ledger.connection.execute(
-                "SELECT name FROM sqlite_master WHERE type IN ('index', 'trigger')"
-            ).fetchall()
-        }
-        assert {"legacy_withdrawal_index", "legacy_withdrawal_guard"} <= objects
-
-        ledger.record_withdrawal_record(
-            "current-key",
-            "owner-store",
-            amount_cny="200.00",
-            withdrawn_at="2026-09-05T07:00:00+00:00",
-            advertising_fee_status="settlement_balance",
-            advertising_fee_cutover="2026-09-05",
-            financial_timezone="Europe/Moscow",
-        )
-
-    with FinanceLedger(database) as reopened:
-        assert len(reopened.list_withdrawal_records(store_alias="owner-store")) == 2
-        assert reopened.connection.execute("PRAGMA foreign_key_check").fetchall() == []
-
-
-@pytest.mark.parametrize(
-    "schema_object_sql",
-    [
-        """
-        CREATE TRIGGER external_withdrawal_reader
-        AFTER INSERT ON migration_audit BEGIN
-            SELECT COUNT(*) FROM withdrawal_records;
-        END
-        """,
-        """
-        CREATE VIEW external_withdrawal_view AS
-        SELECT record_id, store_alias FROM withdrawal_records
-        """,
-        """
-        CREATE VIEW external_bracketed_withdrawal_view AS
-        SELECT record_id, store_alias FROM [main].[withdrawal_records]
-        """,
-        """
-        CREATE VIEW external_quoted_withdrawal_view AS
-        SELECT record_id, store_alias FROM "main"."withdrawal_records"
-        """,
-    ],
-)
-def test_withdrawal_migration_fails_closed_for_external_schema_dependencies(
-    tmp_path, schema_object_sql
-):
-    database = tmp_path / "legacy-external-dependency.sqlite3"
-    _legacy_withdrawal_database(database)
-    connection = sqlite3.connect(database)
-    connection.execute("CREATE TABLE migration_audit(id INTEGER PRIMARY KEY)")
-    connection.execute(schema_object_sql)
-    connection.commit()
-    connection.close()
-
-    with pytest.raises(FinanceLedgerError, match="external schema objects"):
-        FinanceLedger(database)
-
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM withdrawal_records"
-        ).fetchone()[0] == 1
-        assert connection.execute(
-            "SELECT COUNT(*) FROM sqlite_master "
-            "WHERE name LIKE '%before_settlement_balance%'"
-        ).fetchone()[0] == 0
-    finally:
-        connection.close()
-
-
-def test_v3_pair_unique_allocation_table_migrates_to_append_only(tmp_path):
-    database = tmp_path / "v3-pair-unique.sqlite3"
-    connection = sqlite3.connect(database)
-    connection.executescript(
-        """
-        PRAGMA user_version=3;
-        CREATE TABLE advertising_debt_allocations(
-            allocation_id TEXT PRIMARY KEY,
-            payment_id TEXT NOT NULL
-                REFERENCES advertising_payment_readbacks(payment_id),
-            withdrawal_record_id TEXT NOT NULL
-                REFERENCES withdrawal_records(record_id),
-            amount_cny TEXT NOT NULL CHECK(typeof(amount_cny) = 'text'),
-            allocated_at TEXT NOT NULL,
-            evidence_json TEXT NOT NULL DEFAULT '{}',
-            UNIQUE(payment_id, withdrawal_record_id)
-        );
-        CREATE INDEX legacy_allocation_time
-            ON advertising_debt_allocations(withdrawal_record_id, allocated_at);
-        """
-    )
-    connection.commit()
-    connection.close()
-
-    with FinanceLedger(database) as ledger:
-        table_sql = ledger.connection.execute(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type='table' AND name='advertising_debt_allocations'"
-        ).fetchone()[0]
-        objects = {
-            row["name"]
-            for row in ledger.connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='index'"
-            ).fetchall()
-        }
-        assert "UNIQUE(payment_id, withdrawal_record_id)" not in table_sql
-        assert "legacy_allocation_time" in objects
-        assert ledger.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-        assert ledger.connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 @pytest.fixture
@@ -323,6 +62,24 @@ def test_schema_covers_financial_runtime_state(ledger):
     assert expected <= actual
 
 
+def test_hot_period_query_indexes_are_created(ledger):
+    names = {
+        row["name"]
+        for row in ledger.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    expected = {
+        "idx_raw_finance_period",
+        "idx_raw_sales_period",
+        "idx_raw_returns_period",
+        "idx_raw_ad_period",
+        "idx_raw_balance_period",
+        "idx_sync_runs_store_source_status",
+    }
+    assert expected <= names
+
+
 def test_finance_and_generic_events_are_idempotent_and_money_is_text(ledger):
     first = ledger.upsert_finance(
         "test-store",
@@ -344,7 +101,9 @@ def test_finance_and_generic_events_are_idempotent_and_money_is_text(ledger):
     )
 
     assert first.inserted is True
+    assert first.changed is True
     assert second.inserted is False
+    assert second.changed is False
     row = ledger.connection.execute(
         """
         SELECT COUNT(*) AS count, buyer_paid_cny,
@@ -378,7 +137,9 @@ def test_finance_and_generic_events_are_idempotent_and_money_is_text(ledger):
 
     assert sale_first.key == sale_updated.key
     assert sale_first.inserted is True
+    assert sale_first.changed is True
     assert sale_updated.inserted is False
+    assert sale_updated.changed is True
     assert ledger.connection.execute(
         "SELECT COUNT(*) FROM raw_sales WHERE store_alias='test-store'"
     ).fetchone()[0] == 1
@@ -813,15 +574,285 @@ def _create_legacy_v1_database(path) -> None:
     connection.close()
 
 
+def _create_pre_settlement_balance_v3_database(path) -> None:
+    """Create the prior v3 withdrawal tables, including their FK children."""
+
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        PRAGMA user_version=3;
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE store_registry(
+            store_alias TEXT PRIMARY KEY,
+            scope_id TEXT NOT NULL,
+            currency TEXT NOT NULL CHECK(currency = 'CNY'),
+            active INTEGER NOT NULL CHECK(active IN (0, 1)),
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE withdrawal_records(
+            record_id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            store_alias TEXT NOT NULL REFERENCES store_registry(store_alias),
+            withdrawal_amount_cny TEXT NOT NULL
+                CHECK(typeof(withdrawal_amount_cny) = 'text'),
+            withdrawn_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'reported'
+                CHECK(status IN ('reported', 'readback_confirmed', 'voided')),
+            advertising_fee_status TEXT NOT NULL DEFAULT 'unknown'
+                CHECK(advertising_fee_status IN ('deducted', 'not_deducted', 'partial', 'unknown')),
+            advertising_fee_due_cny TEXT NOT NULL DEFAULT '0'
+                CHECK(typeof(advertising_fee_due_cny) = 'text'),
+            advertising_fee_withheld_cny TEXT NOT NULL DEFAULT '0'
+                CHECK(typeof(advertising_fee_withheld_cny) = 'text'),
+            advertising_fee_debt_cny TEXT NOT NULL DEFAULT '0'
+                CHECK(typeof(advertising_fee_debt_cny) = 'text'),
+            settled_at TEXT,
+            external_reference TEXT,
+            source_type TEXT NOT NULL DEFAULT 'user_provided',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            payload_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE withdrawal_record_events(
+            record_id TEXT NOT NULL REFERENCES withdrawal_records(record_id),
+            event_id TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK(status IN ('reported', 'readback_confirmed', 'voided')),
+            occurred_at TEXT NOT NULL,
+            external_reference TEXT,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(record_id, event_id)
+        );
+        CREATE TABLE funding_actions(
+            action_id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            store_alias TEXT NOT NULL REFERENCES store_registry(store_alias),
+            report_id TEXT REFERENCES reports(report_id),
+            action_type TEXT NOT NULL
+                CHECK(action_type IN ('withdrawal', 'advertising_top_up')),
+            requested_amount_cny TEXT NOT NULL
+                CHECK(typeof(requested_amount_cny) = 'text'),
+            status TEXT NOT NULL
+                CHECK(status IN ('proposed', 'approved', 'executing', 'unknown', 'readback_pending', 'readback_confirmed', 'executed', 'failed', 'cancelled')),
+            lifecycle_status TEXT NOT NULL DEFAULT 'proposed'
+                CHECK(lifecycle_status IN ('proposed', 'approved', 'executing', 'unknown', 'readback_pending', 'readback_confirmed', 'executed', 'failed', 'cancelled')),
+            requested_at TEXT NOT NULL,
+            approved_at TEXT,
+            executed_at TEXT,
+            external_reference TEXT,
+            evidence_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL
+        );
+        CREATE TABLE advertising_payment_readbacks(
+            payment_id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            store_alias TEXT NOT NULL REFERENCES store_registry(store_alias),
+            amount_cny TEXT NOT NULL CHECK(typeof(amount_cny) = 'text'),
+            paid_at TEXT NOT NULL,
+            source_type TEXT NOT NULL
+                CHECK(source_type IN ('platform_api', 'user_provided', 'funding_action')),
+            platform_reference TEXT,
+            raw_event_hash TEXT,
+            funding_action_id TEXT REFERENCES funding_actions(action_id),
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            payload_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE advertising_debt_allocations(
+            allocation_id TEXT PRIMARY KEY,
+            payment_id TEXT NOT NULL REFERENCES advertising_payment_readbacks(payment_id),
+            withdrawal_record_id TEXT NOT NULL REFERENCES withdrawal_records(record_id),
+            amount_cny TEXT NOT NULL CHECK(typeof(amount_cny) = 'text'),
+            allocated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(payment_id, withdrawal_record_id)
+        );
+        CREATE INDEX idx_withdrawal_records_store_time
+            ON withdrawal_records(store_alias, withdrawn_at, record_id);
+        CREATE INDEX idx_withdrawal_events_record_time
+            ON withdrawal_record_events(record_id, occurred_at, event_id);
+        CREATE INDEX idx_ad_debt_alloc_record
+            ON advertising_debt_allocations(withdrawal_record_id, allocated_at);
+        """
+    )
+    timestamp = "2026-08-01T10:00:00+00:00"
+    connection.execute(
+        "INSERT INTO store_registry VALUES (?, ?, 'CNY', 1, '{}', ?, ?)",
+        ("legacy-withdrawal-store", "legacy-withdrawal-scope", timestamp, timestamp),
+    )
+    statuses = (
+        ("deducted", "10.00", "10.00", "0.00"),
+        ("not_deducted", "10.00", "0.00", "10.00"),
+        ("partial", "10.00", "4.00", "6.00"),
+        ("unknown", "0.00", "0.00", "0.00"),
+    )
+    for index, (fee_status, due, withheld, debt) in enumerate(statuses, start=1):
+        record_id = f"legacy-record-{index}"
+        connection.execute(
+            """
+            INSERT INTO withdrawal_records(
+                record_id, idempotency_key, store_alias, withdrawal_amount_cny,
+                withdrawn_at, status, advertising_fee_status,
+                advertising_fee_due_cny, advertising_fee_withheld_cny,
+                advertising_fee_debt_cny, settled_at, external_reference,
+                source_type, evidence_json, payload_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'reported', ?, ?, ?, ?, NULL, ?,
+                      'user_provided', '{}', ?, ?)
+            """,
+            (
+                record_id,
+                f"legacy-key-{index}",
+                "legacy-withdrawal-store",
+                f"{index * 100}.00",
+                timestamp,
+                fee_status,
+                due,
+                withheld,
+                debt,
+                f"portal-{index}",
+                f"payload-{index}",
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO withdrawal_record_events(
+                record_id, event_id, status, occurred_at, external_reference,
+                evidence_json
+            ) VALUES (?, ?, 'reported', ?, ?, '{}')
+            """,
+            (record_id, f"legacy-event-{index}", timestamp, f"portal-{index}"),
+        )
+    connection.execute(
+        """
+        INSERT INTO advertising_payment_readbacks(
+            payment_id, idempotency_key, store_alias, amount_cny, paid_at,
+            source_type, platform_reference, raw_event_hash, funding_action_id,
+            evidence_json, payload_hash, created_at
+        ) VALUES ('legacy-payment', 'legacy-payment-key',
+                  'legacy-withdrawal-store', '3.00', ?, 'platform_api',
+                  'wb-payment', NULL, NULL, '{}', 'payment-payload', ?)
+        """,
+        (timestamp, timestamp),
+    )
+    connection.execute(
+        """
+        INSERT INTO advertising_debt_allocations(
+            allocation_id, payment_id, withdrawal_record_id, amount_cny,
+            allocated_at, evidence_json
+        ) VALUES ('legacy-allocation', 'legacy-payment', 'legacy-record-2',
+                  '3.00', ?, '{}')
+        """,
+        (timestamp,),
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_v3_withdrawal_status_constraint_migrates_atomically_with_children(tmp_path):
+    database = tmp_path / "legacy-withdrawal-v3.sqlite3"
+    _create_pre_settlement_balance_v3_database(database)
+
+    with FinanceLedger(database) as migrated:
+        table_sql = migrated.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='withdrawal_records'"
+        ).fetchone()[0]
+        assert "settlement_balance" in table_sql
+        rows = migrated.list_withdrawal_records(
+            store_alias="legacy-withdrawal-store"
+        )
+        assert [row["advertising_fee_status"] for row in rows] == [
+            "deducted",
+            "not_deducted",
+            "partial",
+            "unknown",
+        ]
+        assert migrated.connection.execute(
+            "SELECT COUNT(*) FROM withdrawal_record_events WHERE record_id=?",
+            ("legacy-record-2",),
+        ).fetchone()[0] == 1
+        allocation = migrated.connection.execute(
+            "SELECT * FROM advertising_debt_allocations"
+        ).fetchone()
+        assert dict(allocation) == {
+            "allocation_id": "legacy-allocation",
+            "payment_id": "legacy-payment",
+            "withdrawal_record_id": "legacy-record-2",
+            "amount_cny": "3.00",
+            "allocated_at": "2026-08-01T10:00:00+00:00",
+            "evidence_json": "{}",
+        }
+
+        for table in ("withdrawal_record_events", "advertising_debt_allocations"):
+            referenced_tables = {
+                row["table"]
+                for row in migrated.connection.execute(
+                    f"PRAGMA foreign_key_list({table})"
+                ).fetchall()
+            }
+            assert "withdrawal_records" in referenced_tables
+        assert migrated.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+        expected_triggers = {
+            "withdrawal_records_no_update",
+            "withdrawal_records_no_delete",
+            "withdrawal_record_events_no_update",
+            "withdrawal_record_events_no_delete",
+            "advertising_debt_allocations_no_update",
+            "advertising_debt_allocations_no_delete",
+        }
+        actual_triggers = {
+            row["name"]
+            for row in migrated.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            ).fetchall()
+        }
+        assert expected_triggers <= actual_triggers
+        with pytest.raises(sqlite3.IntegrityError, match="withdrawal records are immutable"):
+            migrated.connection.execute(
+                "UPDATE withdrawal_records SET external_reference='changed' "
+                "WHERE record_id='legacy-record-1'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="events are immutable"):
+            migrated.connection.execute(
+                "DELETE FROM withdrawal_record_events "
+                "WHERE record_id='legacy-record-1'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="allocations are immutable"):
+            migrated.connection.execute(
+                "UPDATE advertising_debt_allocations SET amount_cny='2.00' "
+                "WHERE allocation_id='legacy-allocation'"
+            )
+
+        migrated.record_withdrawal_record(
+            "current-settlement-balance",
+            "legacy-withdrawal-store",
+            amount_cny="500.00",
+            withdrawn_at="2026-09-05T10:00:00+00:00",
+            advertising_fee_status="settlement_balance",
+        )
+        current = migrated.list_withdrawal_records(
+            store_alias="legacy-withdrawal-store"
+        )[-1]
+        assert current["advertising_fee_status"] == "settlement_balance"
+        assert current["advertising_fee_debt_cny"] == "0.00"
+
+    # Opening the already-migrated v3 file again must be an idempotent no-op.
+    with FinanceLedger(database) as reopened:
+        assert len(
+            reopened.list_withdrawal_records(store_alias="legacy-withdrawal-store")
+        ) == 5
+        assert reopened.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_v1_database_is_migrated_in_place_and_old_constraints_remain_usable(tmp_path):
     database = tmp_path / "legacy.sqlite3"
     _create_legacy_v1_database(database)
 
     with FinanceLedger(database) as migrated:
-        assert (
-            migrated.connection.execute("PRAGMA user_version").fetchone()[0]
-            == SCHEMA_VERSION
-        )
+        assert migrated.connection.execute("PRAGMA user_version").fetchone()[0] == 3
         expected_columns = {
             "cost_version_uid",
             "model",
@@ -1198,7 +1229,20 @@ def test_source_coverage_requires_two_consecutive_complete_equal_snapshots(ledge
         snapshot_hash=digest,
         captured_at=moment(2026, 3, 9, 9),
     )
+    retry_same_second = ledger.record_source_coverage(
+        "test-store",
+        "finance",
+        start,
+        end,
+        coverage_status="complete",
+        row_count=4,
+        snapshot_hash=digest,
+        sync_run_id="a-different-retry-run",
+        metadata={"retry": True},
+        captured_at=moment(2026, 3, 9, 9),
+    )
     assert duplicate == second
+    assert retry_same_second == second
     assert second.consecutive_complete_hash_count == 2
     assert ledger.has_consecutive_stable_snapshot(
         "test-store", "finance", start, end

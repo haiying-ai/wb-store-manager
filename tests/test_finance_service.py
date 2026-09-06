@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
 import json
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -11,7 +10,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from wb_manager.client import ApiResult
-from wb_manager.finance_funds import build_advertising_deposit_plan
+from wb_manager.finance_funds import (
+    AdvertisingAccrual,
+    build_advertising_deposit_plan,
+    build_funding_plan,
+)
 from wb_manager.finance_service import (
     FinanceService,
     FinanceServiceError,
@@ -22,6 +25,57 @@ from wb_manager.finance_sync import _balance_amounts
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def test_default_output_root_uses_portable_reporting_standard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("WB_FINANCE_REPORT_ROOT", raising=False)
+    service = FinanceService(db_path=tmp_path / "finance.sqlite3")
+    try:
+        assert service.output_root == (
+            Path(__file__).resolve().parents[1] / "outputs" / "wb-finance-reports"
+        ).resolve()
+    finally:
+        service.close()
+
+
+def _write_fake_complete_report_artifacts(
+    paths: dict[str, Path],
+    report_id: str,
+    *,
+    payload: dict | None = None,
+) -> None:
+    paths["json"].parent.mkdir(parents=True, exist_ok=True)
+    report_payload = payload or {"reportId": report_id, "status": "FINAL"}
+    paths["json"].write_text(json.dumps(report_payload), encoding="utf-8")
+    paths["markdown"].write_text("report\n", encoding="utf-8")
+    paths["workbook"].write_bytes(b"workbook")
+    paths["previews"].mkdir(parents=True, exist_ok=True)
+    rendered = []
+    for index in range(7):
+        preview = paths["previews"] / f"sheet-{index + 1}.png"
+        preview.write_bytes(b"png")
+        rendered.append(str(preview.resolve()))
+    paths["verification"].write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "formulaErrorCount": 0,
+                "renderedSheets": rendered,
+                "reportId": report_id,
+                "workbookStatus": (
+                    "PENDING_DATA"
+                    if report_payload.get("status") == "PENDING_DATA"
+                    else "FINAL"
+                ),
+                "checkFailures": [],
+                "consistencyFailures": [],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_live_shape_cny_seller_balance_uses_minor_units():
@@ -35,11 +89,7 @@ def test_live_shape_cny_seller_balance_uses_minor_units():
     assert advertising is None
 
 
-def _registry(
-    path: Path,
-    *,
-    financial_timezone: str = "Europe/Moscow",
-) -> Path:
+def _registry(path: Path) -> Path:
     path.write_text(
         json.dumps(
             {
@@ -47,7 +97,7 @@ def _registry(
                 "registryId": "test-registry",
                 "status": "active",
                 "reportingCurrency": "CNY",
-                "financialTimezone": financial_timezone,
+                "financialTimezone": "Europe/Moscow",
                 "schedulerTimezone": "Asia/Shanghai",
                 "officialHistoryStart": "2026-07-01",
                 "fundingActivationAt": "2026-08-28T00:00:00+08:00",
@@ -280,78 +330,23 @@ def _service(tmp_path: Path, monkeypatch, now: datetime) -> FinanceService:
         now=now,
         source_factory=lambda client, alias: FakeSources(alias),
     )
-    service._write_report = lambda payload, period: {"json": "verified-by-artifact-tests"}
+
+    def write_verified_stub(payload, period):
+        report_id = str(payload["reportId"])
+        paths = service._report_artifact_paths(
+            period.kind,
+            str(period.start.year),
+            report_id,
+        )
+        _write_fake_complete_report_artifacts(
+            paths,
+            report_id,
+            payload=payload,
+        )
+        return {"json": "verified-by-artifact-tests"}
+
+    service._write_report = write_verified_stub
     return service
-
-
-def _enable_modern_settlement_policy(service: FinanceService) -> None:
-    raw = deepcopy(service.policy.raw)
-    raw["effectiveFrom"] = "2026-09-05"
-    raw.setdefault("funding", {}).setdefault("advertisingDeposit", {}).update(
-        {
-            "fundingSource": "balance",
-            "platformBalanceField": "net",
-            "platformRequestType": 1,
-            "deductionMode": "future_sales_settlement_netting",
-            "separateWithdrawalRequired": False,
-            "manualCashTopUpRequired": False,
-            "actualDeductionEvidenceRequired": True,
-        }
-    )
-    raw["funding"]["withdrawalAdvertisingDebt"] = {
-        "cutoverEffectiveFrom": "2026-09-05",
-        "modeFromCutover": "not_applicable_to_withdrawal",
-        "preserveHistoricalRecords": True,
-        "noRetroactiveClearing": True,
-    }
-    service.policy = replace(
-        service.policy,
-        effective_from="2026-09-05",
-        settlement_balance_contract_enabled=True,
-        advertising_funding_source="balance",
-        advertising_balance_field="net",
-        advertising_request_type=1,
-        advertising_deduction_mode="future_sales_settlement_netting",
-        withdrawal_advertising_debt_cutover=date(2026, 9, 5),
-        raw=raw,
-    )
-
-
-def test_debt_reconcile_date_bounds_use_financial_timezone_and_inclusive_through(
-    tmp_path, monkeypatch
-):
-    service = _service(
-        tmp_path,
-        monkeypatch,
-        datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
-    )
-    captured = {}
-
-    def fake_import(ledger, store_alias, *, period_start, period_end):
-        captured.update(
-            store_alias=store_alias,
-            period_start=period_start,
-            period_end=period_end,
-        )
-        return {"importedCount": 0}
-
-    monkeypatch.setattr(
-        "wb_manager.finance_service.import_advertising_payment_events_from_ledger",
-        fake_import,
-    )
-    try:
-        result = service.reconcile_advertising_debt(
-            store_alias="owner-store",
-            period_start="2026-09-04",
-            period_end="2026-09-05",
-        )
-    finally:
-        service.close()
-
-    assert result == {"importedCount": 0}
-    assert captured["store_alias"] == "owner-store"
-    assert captured["period_start"].isoformat() == "2026-09-04T00:00:00+03:00"
-    assert captured["period_end"].isoformat() == "2026-09-06T00:00:00+03:00"
 
 
 def _import_costs(service: FinanceService, tmp_path: Path):
@@ -371,11 +366,12 @@ def _import_costs(service: FinanceService, tmp_path: Path):
         effective_from="2026-07-04",
         approved_by="tester",
         rub_per_cny="11.5",
+        source_currency="RUB",
     )
     assert result["rowCount"] == 2
 
 
-def test_withdrawal_cutover_defaults_to_settlement_balance_and_preserves_history(
+def test_withdrawal_policy_defaults_new_records_to_settlement_balance(
     tmp_path, monkeypatch
 ):
     service = _service(
@@ -383,34 +379,22 @@ def test_withdrawal_cutover_defaults_to_settlement_balance_and_preserves_history
         monkeypatch,
         datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
     )
-    _enable_modern_settlement_policy(service)
     try:
-        service.withdrawal_record(
-            store_alias="owner-store",
-            record_key="legacy-withdrawal",
-            amount_cny="100.00",
-            withdrawn_at="2026-09-04T12:00:00+03:00",
-            advertising_fee_due_cny="10.00",
-            advertising_fee_withheld_cny="0.00",
-            advertising_fee_status="not_deducted",
-        )
-        service.withdrawal_record(
+        result = service.withdrawal_record(
             store_alias="owner-store",
             record_key="post-cutover-withdrawal",
-            amount_cny="200.00",
+            amount_cny="100.00",
             withdrawn_at="2026-09-05T12:00:00+03:00",
         )
-        rows = service.ledger.list_withdrawal_records(store_alias="owner-store")
-        assert rows[0]["advertising_fee_debt_cny"] == "10.00"
-        assert rows[1]["advertising_fee_status"] == "settlement_balance"
-        assert rows[1]["advertising_fee_due_cny"] == "0.00"
-        assert rows[1]["advertising_fee_withheld_cny"] == "0.00"
-        assert rows[1]["advertising_fee_debt_cny"] == "0.00"
+        assert result["recordId"]
+        row = service.ledger.list_withdrawal_records(store_alias="owner-store")[0]
+        assert row["advertising_fee_status"] == "settlement_balance"
+        assert row["advertising_fee_debt_cny"] == "0.00"
 
         with pytest.raises(FinanceServiceError, match="policy cutover"):
             service.withdrawal_record(
                 store_alias="owner-store",
-                record_key="invalid-current",
+                record_key="invalid-post-cutover-withdrawal",
                 amount_cny="100.00",
                 withdrawn_at="2026-09-06T12:00:00+03:00",
                 advertising_fee_status="unknown",
@@ -418,143 +402,10 @@ def test_withdrawal_cutover_defaults_to_settlement_balance_and_preserves_history
         with pytest.raises(FinanceServiceError, match="pre-cutover"):
             service.withdrawal_record(
                 store_alias="owner-store",
-                record_key="invalid-legacy",
+                record_key="invalid-pre-cutover-withdrawal",
                 amount_cny="100.00",
                 withdrawn_at="2026-09-04T12:00:00+03:00",
                 advertising_fee_status="settlement_balance",
-            )
-    finally:
-        service.close()
-
-
-def test_legacy_policy_disables_money_actions_and_withdrawal_debt_writes(
-    tmp_path,
-    monkeypatch,
-):
-    service = _service(
-        tmp_path,
-        monkeypatch,
-        datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
-    )
-    approved_at = service._now()
-    plan = build_advertising_deposit_plan(
-        report_id="report-placeholder",
-        store="owner-store",
-        campaign=1234567,
-        amount_cny="10",
-        source="balance",
-        currency="CNY",
-        source_balance_cny="100",
-        source_balance_evidence_at=approved_at,
-        policy_cap_cny="10",
-        available_advertising_reserve_cny="10",
-        approved_by="boss",
-        approved_at=approved_at,
-        expires_at=approved_at + timedelta(minutes=15),
-    )
-    plan_path = tmp_path / "legacy-policy-deposit-plan.json"
-    plan_path.write_text(json.dumps(plan.as_dict()), encoding="utf-8")
-    client = _FakeFundingClient()
-    monkeypatch.setattr("wb_manager.finance_service.WbClient", lambda token: client)
-    try:
-        assert service.policy.settlement_balance_contract_enabled is False
-        with pytest.raises(FinanceServiceError, match="not enabled"):
-            service.ads_deposit(
-                plan_path=plan_path,
-                approved_by="boss",
-                confirm_live=False,
-            )
-        assert client.calls == []
-
-        with pytest.raises(FinanceServiceError, match="not enabled"):
-            service.withdrawal_record(
-                store_alias="owner-store",
-                record_key="legacy-policy-post-cutover-unknown",
-                amount_cny="100.00",
-                withdrawn_at="2026-09-06T12:00:00+03:00",
-            )
-        assert service.ledger.list_withdrawal_records(store_alias="owner-store") == []
-    finally:
-        service.close()
-
-
-@pytest.mark.parametrize(
-    ("financial_timezone", "withdrawn_at", "expected_status"),
-    [
-        ("Asia/Tokyo", "2026-09-04T15:30:00+00:00", "settlement_balance"),
-        ("America/New_York", "2026-09-05T03:30:00+00:00", "unknown"),
-    ],
-)
-def test_withdrawal_cutover_uses_configured_financial_timezone_boundary(
-    tmp_path,
-    monkeypatch,
-    financial_timezone,
-    withdrawn_at,
-    expected_status,
-):
-    monkeypatch.setenv("TEST_OWNER_TOKEN", "owner-token")
-    monkeypatch.setenv("TEST_NEW_TOKEN", "new-token")
-    registry_path = _registry(
-        tmp_path / "stores.json",
-        financial_timezone=financial_timezone,
-    )
-    monkeypatch.setattr(
-        "wb_manager.finance_service.read_registry",
-        lambda path: json.loads(Path(path).read_text(encoding="utf-8-sig")),
-    )
-    service = FinanceService(
-        db_path=tmp_path / "finance.sqlite3",
-        registry_path=registry_path,
-        output_root=tmp_path / "reports",
-        now=datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
-        source_factory=lambda client, alias: FakeSources(alias),
-    )
-    _enable_modern_settlement_policy(service)
-    try:
-        assert service.financial_timezone.key == financial_timezone
-        service.withdrawal_record(
-            store_alias="owner-store",
-            record_key=f"timezone-boundary-{financial_timezone}",
-            amount_cny="100.00",
-            withdrawn_at=withdrawn_at,
-        )
-        row = service.ledger.list_withdrawal_records(store_alias="owner-store")[0]
-        assert row["advertising_fee_status"] == expected_status
-    finally:
-        service.close()
-
-
-def test_ads_deposit_rejects_non_settlement_balance_source(tmp_path, monkeypatch):
-    service = _service(
-        tmp_path,
-        monkeypatch,
-        datetime(2026, 9, 6, 9, 30, tzinfo=SHANGHAI),
-    )
-    _enable_modern_settlement_policy(service)
-    approved_at = service._now()
-    plan = build_advertising_deposit_plan(
-        report_id="report-placeholder",
-        store="owner-store",
-        campaign=1234567,
-        amount_cny="10",
-        source="account",
-        currency="CNY",
-        source_balance_cny="100",
-        source_balance_evidence_at=approved_at,
-        policy_cap_cny="10",
-        available_advertising_reserve_cny="10",
-        approved_by="boss",
-        approved_at=approved_at,
-        expires_at=approved_at + timedelta(minutes=15),
-    )
-    plan_path = tmp_path / "account-source-plan.json"
-    plan_path.write_text(json.dumps(plan.as_dict()), encoding="utf-8")
-    try:
-        with pytest.raises(FinanceServiceError, match="balance/net/type=1"):
-            service.ads_deposit(
-                plan_path=plan_path,
-                approved_by="boss",
-                confirm_live=False,
             )
     finally:
         service.close()
@@ -570,6 +421,7 @@ def test_daily_is_idempotent_and_second_stable_capture_finalizes_week(tmp_path, 
     assert bootstrap["status"] == "FINAL", bootstrap
     weekly = next(item for item in first["reports"] if item["period"]["to"] == "2026-08-23")
     assert weekly["status"] == "PENDING_DATA"
+    assert weekly["artifacts"] is None  # Friday capture; Monday is the publish date.
     assert any(item["code"] == "SOURCE_NOT_STABLE_TWICE" for item in weekly["blockers"])
     assert service.ledger.connection.execute("SELECT COUNT(*) FROM raw_finance").fetchone()[0] == 5
     service.close()
@@ -592,6 +444,601 @@ def test_daily_is_idempotent_and_second_stable_capture_finalizes_week(tmp_path, 
     second.close()
 
 
+def test_daily_publishes_open_item_reports_only_on_weekly_or_monthly_schedule(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "monday").mkdir()
+    monday = _service(
+        tmp_path / "monday",
+        monkeypatch,
+        datetime(2026, 8, 31, 9, 30, tzinfo=SHANGHAI),
+    )
+    _import_costs(monday, tmp_path / "monday")
+    monday_result = monday.daily(through="2026-08-30")
+    monday_weekly = next(
+        item for item in monday_result["reports"] if item["reportKey"].startswith("weekly:")
+    )
+    monday_monthly = next(
+        item for item in monday_result["reports"] if item["reportKey"].startswith("monthly:")
+    )
+    assert monday_weekly["status"] == "PENDING_DATA"
+    assert monday_weekly["artifacts"] == {"json": "verified-by-artifact-tests"}
+    assert monday_monthly["artifacts"] is None
+    assert monday_result["performance"]["correctionWindowDays"] == 120
+    monday.close()
+
+    (tmp_path / "month-start").mkdir()
+    month_start = _service(
+        tmp_path / "month-start",
+        monkeypatch,
+        datetime(2026, 9, 1, 9, 30, tzinfo=SHANGHAI),
+    )
+    _import_costs(month_start, tmp_path / "month-start")
+    month_result = month_start.daily(through="2026-08-31")
+    bootstrap = next(
+        item for item in month_result["reports"] if item["reportKey"].startswith("bootstrap:")
+    )
+    monthly = next(
+        item for item in month_result["reports"] if item["reportKey"].startswith("monthly:")
+    )
+    weekly = next(
+        item for item in month_result["reports"] if item["reportKey"].startswith("weekly:")
+    )
+    assert bootstrap["period"]["cumulative"] is True
+    assert bootstrap["period"]["to"] == "2026-08-31"
+    assert monthly["period"] == {
+        "from": "2026-08-01",
+        "to": "2026-08-31",
+        "timezone": "Europe/Moscow",
+        "cumulative": False,
+    }
+    assert monthly["artifacts"] == {"json": "verified-by-artifact-tests"}
+    assert weekly["artifacts"] is None
+    assert month_result["performance"]["correctionWindowDays"] == 120
+    month_start.close()
+
+
+def test_daily_reports_performance_and_reuses_evidence_snapshot(tmp_path, monkeypatch):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
+    )
+    _import_costs(service, tmp_path)
+
+    result = service.daily(through="2026-08-27")
+
+    performance = result["performance"]
+    assert performance["correctionWindowDays"] == 30
+    assert performance["phaseTimingsMs"]["sync"] >= 0
+    assert performance["phaseTimingsMs"]["weeklyReport"] >= 0
+    assert performance["cacheEntries"]["rawEvidence"] == 1
+    assert performance["cacheEntries"]["grouping"] == 1
+    assert performance["cacheHits"].get("rawEvidence", 0) >= 1
+    assert performance["cacheHits"].get("grouping", 0) >= 1
+    assert performance["totalMs"] >= performance["phaseTimingsMs"]["sync"]
+    service.close()
+
+
+def test_idempotent_pending_candidate_does_not_expose_missing_artifact_paths(
+    tmp_path, monkeypatch
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
+    )
+    pending = {
+        "report_id": "pending-report",
+        "report_key": "weekly:2026-08-17:2026-08-23",
+        "report_version": "candidate-deadbeef",
+        "report_type": "weekly",
+        "report_status": "PENDING_DATA",
+        "period_start": "2026-08-17T00:00:00+03:00",
+        "metadata": {"period": {"from": "2026-08-17", "to": "2026-08-23"}},
+        "orders": [],
+    }
+    result = service._existing_report_result(pending)
+    assert result["artifacts"] is None
+    service.close()
+
+
+@pytest.mark.parametrize(
+    ("artifact_case", "is_complete"),
+    [
+        ("complete", True),
+        ("missing_markdown", False),
+        ("verification_fail", False),
+        ("verification_report_id_mismatch", False),
+        ("verification_report_id_wrong_type", False),
+        ("verification_schema_missing", False),
+        ("missing_preview", False),
+        ("payload_report_id_mismatch", False),
+    ],
+)
+def test_existing_report_result_requires_complete_verified_artifacts(
+    tmp_path,
+    monkeypatch,
+    artifact_case,
+    is_complete,
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
+    )
+    report_id = "artifact-qualification-report"
+    paths = service._report_artifact_paths("weekly", "2026", report_id)
+    _write_fake_complete_report_artifacts(paths, report_id)
+    verification = json.loads(paths["verification"].read_text(encoding="utf-8"))
+    if artifact_case == "missing_markdown":
+        paths["markdown"].unlink()
+    elif artifact_case == "verification_fail":
+        verification["status"] = "FAIL"
+    elif artifact_case == "verification_report_id_mismatch":
+        verification["reportId"] = "another-report"
+    elif artifact_case == "verification_report_id_wrong_type":
+        verification["reportId"] = 123
+    elif artifact_case == "verification_schema_missing":
+        verification.pop("consistencyFailures")
+    elif artifact_case == "missing_preview":
+        next(paths["previews"].glob("*.png")).unlink()
+    elif artifact_case == "payload_report_id_mismatch":
+        paths["json"].write_text(
+            json.dumps({"reportId": "another-report", "status": "FINAL"}),
+            encoding="utf-8",
+        )
+    paths["verification"].write_text(
+        json.dumps(verification),
+        encoding="utf-8",
+    )
+    report = {
+        "report_id": report_id,
+        "report_key": "weekly:2026-08-17:2026-08-23",
+        "report_version": "v1",
+        "report_type": "weekly",
+        "report_status": "FINAL",
+        "period_start": "2026-08-17T00:00:00+03:00",
+        "metadata": {"period": {"from": "2026-08-17", "to": "2026-08-23"}},
+        "orders": [],
+    }
+
+    result = service._existing_report_result(report)
+
+    if is_complete:
+        assert set(result["artifacts"]) == {
+            "json",
+            "markdown",
+            "workbook",
+            "verification",
+            "previews",
+        }
+    else:
+        assert result["artifacts"] is None
+    service.close()
+
+
+def test_write_report_rebuilds_partial_artifact_set(tmp_path, monkeypatch):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
+    )
+    report_id = "partial-report"
+    period = type(
+        "TestPeriod",
+        (),
+        {"kind": "weekly", "start": datetime(2026, 8, 17).date()},
+    )()
+    paths = service._report_artifact_paths("weekly", "2026", report_id)
+    paths["json"].parent.mkdir(parents=True, exist_ok=True)
+    paths["json"].write_text("stale", encoding="utf-8")
+    paths["inspection"].write_text("stale", encoding="utf-8")
+    paths["previews"].mkdir(parents=True, exist_ok=True)
+    (paths["previews"] / "stale.png").write_bytes(b"stale")
+    calls = []
+
+    def write_artifacts(payload, output, *, repair_incomplete=False):
+        calls.append((deepcopy(payload), output))
+        assert repair_incomplete is True
+        assert paths["json"].exists()
+        paths["json"].unlink()
+        paths["inspection"].unlink()
+        for preview in paths["previews"].glob("*"):
+            preview.unlink()
+        paths["previews"].rmdir()
+        _write_fake_complete_report_artifacts(paths, report_id, payload=payload)
+        paths["workbook"].write_bytes(b"rebuilt")
+
+    monkeypatch.setattr(
+        "wb_manager.finance_service.write_report_artifacts",
+        write_artifacts,
+    )
+
+    result = FinanceService._write_report(
+        service,
+        {"reportId": report_id, "status": "FINAL"},
+        period,
+    )
+
+    assert len(calls) == 1
+    assert set(result) == {
+        "json",
+        "markdown",
+        "workbook",
+        "verification",
+        "previews",
+    }
+    assert paths["workbook"].read_bytes() == b"rebuilt"
+    service.close()
+
+
+def test_same_snapshot_final_repairs_incomplete_artifacts_without_new_ledger_row(
+    tmp_path,
+    monkeypatch,
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
+    )
+    _import_costs(service, tmp_path)
+    first = service.daily(through="2026-08-27")
+    original = next(item for item in first["reports"] if item["period"]["cumulative"])
+    paths = service._report_artifact_paths("bootstrap", "2026", original["reportId"])
+    paths["workbook"].unlink()
+    report_count = service.ledger.connection.execute(
+        "SELECT COUNT(*) FROM reports WHERE report_key = ?",
+        (original["reportKey"],),
+    ).fetchone()[0]
+    calls = []
+    write_report = service._write_report
+
+    def tracked_write(payload, period):
+        calls.append(str(payload["reportId"]))
+        return write_report(payload, period)
+
+    service._write_report = tracked_write
+
+    repeated = service.report(kind="bootstrap", period="auto")
+
+    assert repeated["reportId"] == original["reportId"]
+    assert repeated["idempotent"] is True
+    assert calls == [original["reportId"]]
+    assert paths["workbook"].exists()
+    assert service.ledger.connection.execute(
+        "SELECT COUNT(*) FROM reports WHERE report_key = ?",
+        (original["reportKey"],),
+    ).fetchone()[0] == report_count
+    service.close()
+
+
+def test_same_snapshot_pending_repairs_partial_started_publication(
+    tmp_path,
+    monkeypatch,
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
+    )
+    _import_costs(service, tmp_path)
+    service._source_blockers = lambda _selected, _evidence: [
+        {"code": "TEST_OPEN_ITEM", "message": "keep candidate pending"}
+    ]
+    candidate = service.report(
+        kind="weekly",
+        period="2026-W34",
+        _publish_open_items=False,
+    )
+    paths = service._report_artifact_paths("weekly", "2026", candidate["reportId"])
+    paths["json"].parent.mkdir(parents=True, exist_ok=True)
+    paths["json"].write_text("partial", encoding="utf-8")
+    calls = []
+    write_report = service._write_report
+
+    def tracked_write(payload, period):
+        calls.append(str(payload["reportId"]))
+        return write_report(payload, period)
+
+    service._write_report = tracked_write
+
+    repeated = service.report(
+        kind="weekly",
+        period="2026-W34",
+        _publish_open_items=False,
+    )
+
+    assert repeated["reportId"] == candidate["reportId"]
+    assert repeated["idempotent"] is True
+    assert calls == [candidate["reportId"]]
+    assert paths["verification"].exists()
+    service.close()
+
+
+def test_previous_report_payload_skips_newer_incompatible_artifact_set(
+    tmp_path,
+    monkeypatch,
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 9, 1, 9, 30, tzinfo=SHANGHAI),
+    )
+    totals = {
+        "revenue_cny": "0",
+        "cost_cny": "0",
+        "profit_cny": "0",
+        "managed_operations_cny": "0",
+        "return_fee_cny": "0",
+        "advertising_cny": "0",
+    }
+    complete_id = service.ledger.create_report(
+        "weekly:2026-08-10:2026-08-16",
+        "v1",
+        report_type="weekly",
+        period_start="2026-08-10T00:00:00+03:00",
+        period_end="2026-08-17T00:00:00+03:00",
+        policy_id=service.policy.reporting_policy_id,
+        totals=totals,
+        orders=[],
+        generated_at="2026-08-18T10:00:00+03:00",
+        metadata={"calculationHash": "complete"},
+        report_status="FINAL",
+    )
+    incomplete_id = service.ledger.create_report(
+        "weekly:2026-08-17:2026-08-23",
+        "v1",
+        report_type="weekly",
+        period_start="2026-08-17T00:00:00+03:00",
+        period_end="2026-08-24T00:00:00+03:00",
+        policy_id=service.policy.reporting_policy_id,
+        totals=totals,
+        orders=[],
+        generated_at="2026-08-25T10:00:00+03:00",
+        metadata={"calculationHash": "incomplete"},
+        report_status="FINAL",
+    )
+    complete_paths = service._report_artifact_paths("weekly", "2026", complete_id)
+    _write_fake_complete_report_artifacts(
+        complete_paths,
+        complete_id,
+        payload={
+            "reportId": complete_id,
+            "status": "FINAL",
+            "kind": "weekly",
+            "period": {
+                "from": "2026-08-10",
+                "to": "2026-08-16",
+                "cumulative": False,
+            },
+            "totals": {
+                "confirmedOrderCount": 0,
+                "salesAmountGCny": "0.00",
+                "managedOperationsCny": "0.00",
+                "combinedAdvertisingAndReturnPoolCny": "0.00",
+                "strictOwnerProfitCny": "0.00",
+            },
+            "orders": [],
+        },
+    )
+    incompatible_paths = service._report_artifact_paths(
+        "weekly", "2026", incomplete_id
+    )
+    _write_fake_complete_report_artifacts(
+        incompatible_paths,
+        incomplete_id,
+        payload={
+            "reportId": incomplete_id,
+            "status": "FINAL",
+            "kind": "weekly",
+            "period": {
+                "from": "2026-08-17",
+                "to": "2026-08-23",
+                "cumulative": False,
+            },
+            # A formally published file set that cannot support the v2 bridge
+            # must not suppress the next older compatible baseline.
+            "totals": {},
+            "orders": [],
+        },
+    )
+    current_period = type(
+        "TestPeriod",
+        (),
+        {
+            "kind": "weekly",
+            "start": datetime(2026, 8, 24).date(),
+            "end": datetime(2026, 8, 30).date(),
+            "cumulative": False,
+        },
+    )()
+
+    previous = service._previous_published_report_payload(current_period)
+
+    assert previous["reportId"] == complete_id
+    service.close()
+
+
+def test_previous_report_payload_honors_explicit_restatement_predecessor(
+    tmp_path,
+    monkeypatch,
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 9, 1, 9, 30, tzinfo=SHANGHAI),
+    )
+    ledger_totals = {
+        "revenue_cny": "0",
+        "cost_cny": "0",
+        "profit_cny": "0",
+        "managed_operations_cny": "0",
+        "return_fee_cny": "0",
+        "advertising_cny": "0",
+    }
+
+    def add_report(start: str, end: str, generated: str) -> str:
+        report_id = service.ledger.create_report(
+            f"weekly:{start}:{end}",
+            "v1",
+            report_type="weekly",
+            period_start=f"{start}T00:00:00+03:00",
+            period_end=(
+                datetime.fromisoformat(end) + timedelta(days=1)
+            ).date().isoformat()
+            + "T00:00:00+03:00",
+            policy_id=service.policy.reporting_policy_id,
+            totals=ledger_totals,
+            orders=[],
+            generated_at=generated,
+            metadata={"calculationHash": generated},
+            report_status="FINAL",
+        )
+        paths = service._report_artifact_paths("weekly", "2026", report_id)
+        _write_fake_complete_report_artifacts(
+            paths,
+            report_id,
+            payload={
+                "reportId": report_id,
+                "status": "FINAL",
+                "kind": "weekly",
+                "period": {"from": start, "to": end, "cumulative": False},
+                "totals": {
+                    "confirmedOrderCount": 0,
+                    "salesAmountGCny": "0.00",
+                    "managedOperationsCny": "0.00",
+                    "combinedAdvertisingAndReturnPoolCny": "0.00",
+                    "strictOwnerProfitCny": "0.00",
+                },
+                "orders": [],
+            },
+        )
+        return report_id
+
+    predecessor_id = add_report(
+        "2026-08-10",
+        "2026-08-16",
+        "2026-08-18T10:00:00+03:00",
+    )
+    add_report(
+        "2026-08-17",
+        "2026-08-23",
+        "2026-08-25T10:00:00+03:00",
+    )
+    current_period = type(
+        "TestPeriod",
+        (),
+        {
+            "kind": "weekly",
+            "start": datetime(2026, 8, 24).date(),
+            "end": datetime(2026, 8, 30).date(),
+            "cumulative": False,
+        },
+    )()
+
+    previous = service._previous_published_report_payload(
+        current_period,
+        preferred_report_id=predecessor_id,
+    )
+
+    assert previous["reportId"] == predecessor_id
+    service.close()
+
+
+def test_explicit_report_publishes_missing_idempotent_pending_candidate(
+    tmp_path, monkeypatch
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
+    )
+    written = []
+
+    def write_report(payload, _period):
+        written.append(deepcopy(payload))
+        return {
+            "json": "pending-report.json",
+            "markdown": "pending-report.md",
+            "workbook": "pending-report.xlsx",
+            "verification": "pending-report.verification.json",
+        }
+
+    service._write_report = write_report
+    try:
+        candidate = service.report(
+            kind="weekly",
+            period="2026-W34",
+            _publish_open_items=False,
+        )
+        assert candidate["status"] == "PENDING_DATA"
+        assert candidate["artifacts"] is None
+        assert written == []
+
+        explicit = service.report(kind="weekly", period="2026-W34")
+
+        assert explicit["reportId"] == candidate["reportId"]
+        assert explicit["reportVersion"] == candidate["reportVersion"]
+        assert explicit["status"] == candidate["status"]
+        assert explicit["idempotent"] is True
+        assert set(explicit["artifacts"]) == {
+            "json",
+            "markdown",
+            "workbook",
+            "verification",
+        }
+        assert len(written) == 1
+        assert written[0]["reportId"] == candidate["reportId"]
+        assert written[0]["reportVersion"] == candidate["reportVersion"]
+        assert written[0]["status"] == candidate["status"]
+        assert written[0]["blockers"] == explicit["blockers"]
+    finally:
+        service.close()
+
+
+def test_daily_does_not_publish_missing_idempotent_pending_candidate(
+    tmp_path, monkeypatch
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
+    )
+    _import_costs(service, tmp_path)
+    service._source_blockers = lambda _selected, _evidence: [
+        {"code": "TEST_OPEN_ITEM", "message": "keep candidate pending"}
+    ]
+    written_report_ids = []
+
+    def write_report(payload, _period):
+        written_report_ids.append(payload["reportId"])
+        return {"json": "unexpected.json"}
+
+    service._write_report = write_report
+    try:
+        first = service.daily(through="2026-08-27")
+        first_weekly = next(
+            item for item in first["reports"] if item["reportKey"].startswith("weekly:")
+        )
+        assert first_weekly["status"] == "PENDING_DATA"
+        assert first_weekly["artifacts"] is None
+        assert first_weekly["reportId"] not in written_report_ids
+
+        second = service.daily(through="2026-08-27")
+        second_weekly = next(
+            item for item in second["reports"] if item["reportKey"].startswith("weekly:")
+        )
+        assert second_weekly["reportId"] == first_weekly["reportId"]
+        assert second_weekly["reportVersion"] == first_weekly["reportVersion"]
+        assert second_weekly["status"] == "PENDING_DATA"
+        assert second_weekly["artifacts"] is None
+        assert second_weekly["reportId"] not in written_report_ids
+    finally:
+        service.close()
+
+
 def test_cost_import_replay_keeps_version_and_approval_timestamp(tmp_path, monkeypatch):
     service = _service(
         tmp_path,
@@ -610,6 +1057,74 @@ def test_cost_import_replay_keeps_version_and_approval_timestamp(tmp_path, monke
     service.close()
 
 
+def test_cost_import_requires_explicit_exchange_rate(tmp_path, monkeypatch):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 31, 9, 30, tzinfo=SHANGHAI),
+    )
+    quote = tmp_path / "quote.json"
+    quote.write_text(
+        json.dumps([{"规格": "iPhone 13-128gb-Black", "成本价格": 4600}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FinanceServiceError, match="explicit --rub-per-cny"):
+        service.cost_import(
+            quote=quote,
+            effective_from="2026-08-31T00:00:00+03:00",
+            approved_by="tester",
+            rub_per_cny=None,
+            source_currency="RUB",
+        )
+    service.close()
+
+
+def test_cost_import_accepts_cny_source_and_preserves_rub_evidence(
+    tmp_path, monkeypatch
+):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 9, 6, 18, 30, tzinfo=SHANGHAI),
+    )
+    quote = tmp_path / "0830.json"
+    quote.write_text(
+        json.dumps(
+            [
+                {
+                    "规格": "iPhone 13-128gb-Black",
+                    "人民币报价（¥）": 400,
+                    "卢布报价": 4600,
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.cost_import(
+        quote=quote,
+        effective_from="2026-09-06T13:08:38+03:00",
+        approved_by="tester",
+        source_currency="CNY",
+    )
+    selected = service.ledger.select_cost_version(
+        "IPHONE 13-128GB-BLACK", "2026-09-06T13:08:38+03:00"
+    )
+    evidence = service.ledger.connection.execute(
+        "SELECT source_currency, purchase_cost_rub FROM cost_versions"
+    ).fetchone()
+
+    assert result["rowCount"] == 1
+    assert result["sourceCurrency"] == "CNY"
+    assert result["exchangeRateRubPerCny"] == "11.5"
+    assert selected.purchase_cost_cny == Decimal("400.00")
+    assert evidence["source_currency"] == "CNY"
+    assert Decimal(evidence["purchase_cost_rub"]) == Decimal("4600")
+    service.close()
+
+
 def _finalized_weekly_service(tmp_path, monkeypatch):
     first_now = datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI)
     first = _service(tmp_path, monkeypatch, first_now)
@@ -622,6 +1137,27 @@ def _finalized_weekly_service(tmp_path, monkeypatch):
     weekly = next(item for item in result["reports"] if item["period"]["to"] == "2026-08-23")
     assert weekly["status"] == "FINAL"
     return second, weekly
+
+
+def test_pending_weekly_report_allows_settled_only_funds_plan(tmp_path, monkeypatch):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
+    )
+    _import_costs(service, tmp_path)
+    result = service.daily(through="2026-08-27")
+    weekly = next(
+        item for item in result["reports"] if item["reportKey"].startswith("weekly:")
+    )
+    assert weekly["status"] == "PENDING_DATA"
+
+    plan = service.funds_plan(report_id=weekly["reportId"])
+
+    assert plan["reportEvidenceStatus"] == "PENDING_DATA"
+    assert plan["allocationMode"] == "SETTLED_ONLY_WITH_OPEN_ITEMS"
+    assert len(plan["stores"]) == 2
+    service.close()
 
 
 def test_late_finance_correction_requires_two_new_stable_captures_and_restates(
@@ -655,6 +1191,35 @@ def test_late_finance_correction_requires_two_new_stable_captures_and_restates(
     repeated = service.report(kind="weekly", period="2026-W34")
     assert repeated["reportId"] == restated["reportId"]
     assert repeated["idempotent"] is True
+    service.close()
+
+
+def test_pending_historical_candidate_is_revisited_after_window_moves(
+    tmp_path,
+    monkeypatch,
+):
+    service, original = _finalized_weekly_service(tmp_path, monkeypatch)
+    monkeypatch.setattr(FakeSources, "return_logistics_cny", "8")
+
+    service.now = datetime(2026, 9, 12, 10, 30, tzinfo=SHANGHAI)
+    first = service.daily(through="2026-09-11")
+    pending = next(
+        item for item in first["reports"] if item["period"]["to"] == "2026-08-23"
+    )
+    assert pending["status"] == "PENDING_DATA"
+
+    # The next scheduled run advances the rolling sync window and therefore
+    # must still revisit the pending historical candidate instead of dropping
+    # it when it no longer overlaps the new API window.
+    service.now = datetime(2026, 9, 13, 10, 30, tzinfo=SHANGHAI)
+    second = service.daily(through="2026-09-12")
+    restated = next(
+        item for item in second["reports"] if item["period"]["to"] == "2026-08-23"
+    )
+    assert restated["status"] == "RESTATED"
+    assert restated["reportVersion"] == "v2"
+    report = service.ledger.get_report(restated["reportId"])
+    assert report["previous_report_id"] == original["reportId"]
     service.close()
 
 
@@ -817,10 +1382,15 @@ def test_funds_plan_uses_only_latest_weekly_versions_and_post_activation_accrual
     )
 
     accruals = service._advertising_accruals("owner-store")
-    assert len(accruals) == 2  # the monthly copy and zero-value returned order are excluded
+    assert len(accruals) == 2  # the monthly copy is excluded
     historical = next(item for item in accruals if item.accrued_at.date().isoformat() == "2026-08-20")
     eligible = next(item for item in accruals if item.accrued_at.date().isoformat() == "2026-08-29")
-    assert historical.amount_cny == eligible.amount_cny
+    # The historical week has one completed sale (30 CNY pool) and one
+    # returned order with 16 CNY actual logistics, so its store-period reserve
+    # is 14 CNY after aggregate pool consumption.  The synthetic later week
+    # contributes a separate 30 CNY store-period reserve.
+    assert historical.amount_cny == Decimal("14.00")
+    assert eligible.amount_cny == Decimal("30.00")
     assert historical.allocated_cny == 0
     assert eligible.allocated_cny == 10
 
@@ -830,7 +1400,7 @@ def test_funds_plan_uses_only_latest_weekly_versions_and_post_activation_accrual
     plan = service.funds_plan(report_id=latest_id)
     owner = next(item for item in plan["stores"] if item["store"] == "owner-store")
     assert owner["components"]["postActivationUnallocatedAdvertisingAccrualCny"] == "20.00"
-    assert owner["components"]["historicalAdvertisingAccrualExcludedCny"] == "30.00"
+    assert owner["components"]["historicalAdvertisingAccrualExcludedCny"] == "14.00"
     assert owner["suggestedWithdrawalCny"] == "4980.00"
     service.close()
 
@@ -961,7 +1531,6 @@ def _advertising_deposit_plan_file(
     tmp_path: Path,
     report_id: str,
 ) -> Path:
-    _enable_modern_settlement_policy(service)
     approved_at = service._now()
     plan = build_advertising_deposit_plan(
         report_id=report_id,
@@ -984,6 +1553,252 @@ def _advertising_deposit_plan_file(
         encoding="utf-8",
     )
     return path
+
+
+def _weekly_funds_plan_file(
+    service: FinanceService,
+    tmp_path: Path,
+    report_id: str,
+    *,
+    reserve_cny: str = "120",
+) -> Path:
+    plan = build_funding_plan(
+        report_id=report_id,
+        store="owner-store",
+        platform_available_balance_cny="5000",
+        balance_evidence_at=service._now(),
+        formal_activation_at="2026-08-28T00:00:00+08:00",
+        advertising_accruals=[
+            AdvertisingAccrual(
+                accrual_id="test-current-reserve",
+                amount_cny=Decimal(reserve_cny),
+                allocated_cny=Decimal("0"),
+                accrued_at=service._now(),
+            )
+        ],
+    )
+    payload = {
+        "schemaVersion": 1,
+        "planType": "weekly_funding",
+        "reportId": report_id,
+        "generatedAt": service._now().isoformat(),
+        "withdrawalExecutionSupported": False,
+        "stores": [plan.as_dict()],
+    }
+    path = tmp_path / "weekly-funds-plan.json"
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _synthetic_final_weekly_service(tmp_path, monkeypatch):
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        datetime(2026, 9, 3, 10, 0, tzinfo=SHANGHAI),
+    )
+    report_id = service.ledger.create_report(
+        "weekly:2026-08-24:2026-08-30",
+        "v1",
+        report_type="weekly",
+        period_start="2026-08-24T00:00:00+03:00",
+        period_end="2026-08-31T00:00:00+03:00",
+        policy_id=service.policy.reporting_policy_id,
+        totals={
+            "revenue_cny": "0",
+            "cost_cny": "0",
+            "profit_cny": "0",
+            "managed_operations_cny": "0",
+            "return_fee_cny": "0",
+            "advertising_cny": "0",
+        },
+        orders=[],
+        generated_at=service._now(),
+        metadata={"calculationHash": "synthetic-funding-test"},
+        report_status="FINAL",
+    )
+    return service, {"reportId": report_id}
+
+
+def test_ads_deposit_plan_is_get_only_balance_forced_and_executor_compatible(
+    tmp_path,
+    monkeypatch,
+):
+    service, weekly = _synthetic_final_weekly_service(tmp_path, monkeypatch)
+    funds_path = _weekly_funds_plan_file(
+        service,
+        tmp_path,
+        weekly["reportId"],
+    )
+    client = _FakeFundingClient(source_balance="500")
+    monkeypatch.setattr("wb_manager.finance_service.WbClient", lambda token: client)
+    monkeypatch.setattr(
+        service,
+        "_available_advertising_reserve_cny",
+        lambda store_alias, *, exclude_action_id=None: Decimal("120.00"),
+    )
+
+    result = service.ads_deposit_plan(
+        funds_plan_path=funds_path,
+        store_alias="owner-store",
+        campaign=1234567,
+        amount_cny=100,
+        approved_by="boss",
+    )
+
+    assert result["status"] == "immutable_plan_created"
+    assert result["networkWriteAttempted"] is False
+    assert result["source"] == "balance"
+    assert [call[0] for call in client.calls] == ["GET", "GET", "GET", "GET"]
+    assert not any("/adv/v1/budget/deposit" in call[1] for call in client.calls)
+    assert service.ledger.query_funding_actions(
+        store_alias="owner-store", action_type="advertising_top_up"
+    ) == []
+
+    plan = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+    assert plan["store"] == "owner-store"
+    assert plan["campaign"] == 1234567
+    assert plan["amountCny"] == "100.00"
+    assert plan["source"] == "balance"
+    assert plan["currency"] == "CNY"
+    assert plan["sourceBalanceCny"] == "500.00"
+    assert plan["policyCapCny"] == "120.00"
+    assert plan["availableAdvertisingReserveCny"] == "120.00"
+    assert datetime.fromisoformat(plan["expiresAt"]) - datetime.fromisoformat(
+        plan["approvedAt"]
+    ) == timedelta(minutes=15)
+
+    evidence = json.loads(Path(result["preflightPath"]).read_text(encoding="utf-8"))
+    assert evidence["networkWriteAttempted"] is False
+    assert evidence["planFingerprint"] == plan["fingerprint"]
+    assert evidence["livePreflight"]["campaignBudgetBeforeCny"] == "40.00"
+    assert evidence["livePreflight"]["source"] == "balance"
+
+    proposal = service.ads_deposit(
+        plan_path=Path(result["path"]),
+        approved_by="boss",
+        confirm_live=False,
+    )
+    assert proposal["status"] == "proposal_recorded"
+    assert [call[0] for call in client.calls] == ["GET", "GET", "GET", "GET"]
+    service.close()
+
+
+@pytest.mark.parametrize(
+    ("amount", "message"),
+    [
+        ("100.5", "whole positive CNY"),
+        (121, "ledger-derived available reserve"),
+    ],
+)
+def test_ads_deposit_plan_rejects_invalid_amount_before_live_reads(
+    tmp_path,
+    monkeypatch,
+    amount,
+    message,
+):
+    service, weekly = _synthetic_final_weekly_service(tmp_path, monkeypatch)
+    funds_path = _weekly_funds_plan_file(service, tmp_path, weekly["reportId"])
+    client = _FakeFundingClient()
+    monkeypatch.setattr("wb_manager.finance_service.WbClient", lambda token: client)
+    monkeypatch.setattr(
+        service,
+        "_available_advertising_reserve_cny",
+        lambda store_alias, *, exclude_action_id=None: Decimal("120.00"),
+    )
+
+    with pytest.raises(FinanceServiceError, match=message):
+        service.ads_deposit_plan(
+            funds_plan_path=funds_path,
+            store_alias="owner-store",
+            campaign=1234567,
+            amount_cny=amount,
+            approved_by="boss",
+        )
+    assert client.calls == []
+    service.close()
+
+
+def test_ads_deposit_plan_rejects_stale_funds_plan_and_insufficient_live_balance(
+    tmp_path,
+    monkeypatch,
+):
+    service, weekly = _synthetic_final_weekly_service(tmp_path, monkeypatch)
+    funds_path = _weekly_funds_plan_file(service, tmp_path, weekly["reportId"])
+    client = _FakeFundingClient(source_balance="99")
+    monkeypatch.setattr("wb_manager.finance_service.WbClient", lambda token: client)
+    monkeypatch.setattr(
+        service,
+        "_available_advertising_reserve_cny",
+        lambda store_alias, *, exclude_action_id=None: Decimal("119.00"),
+    )
+    with pytest.raises(FinanceServiceError, match="no longer matches"):
+        service.ads_deposit_plan(
+            funds_plan_path=funds_path,
+            store_alias="owner-store",
+            campaign=1234567,
+            amount_cny=100,
+            approved_by="boss",
+        )
+    assert client.calls == []
+
+    monkeypatch.setattr(
+        service,
+        "_available_advertising_reserve_cny",
+        lambda store_alias, *, exclude_action_id=None: Decimal("120.00"),
+    )
+    with pytest.raises(FinanceServiceError, match="live WB balance source"):
+        service.ads_deposit_plan(
+            funds_plan_path=funds_path,
+            store_alias="owner-store",
+            campaign=1234567,
+            amount_cny=100,
+            approved_by="boss",
+        )
+    assert [call[0] for call in client.calls] == ["GET", "GET", "GET", "GET"]
+    assert not any("/adv/v1/budget/deposit" in call[1] for call in client.calls)
+    service.close()
+
+
+def test_ads_deposit_executor_rejects_bonus_plan_before_recording_proposal(
+    tmp_path,
+    monkeypatch,
+):
+    service, weekly = _synthetic_final_weekly_service(tmp_path, monkeypatch)
+    approved_at = service._now()
+    plan = build_advertising_deposit_plan(
+        report_id=weekly["reportId"],
+        store="owner-store",
+        campaign=1234567,
+        amount_cny="100",
+        source="bonus",
+        currency="CNY",
+        source_balance_cny="500",
+        source_balance_evidence_at=approved_at - timedelta(minutes=5),
+        policy_cap_cny="120",
+        available_advertising_reserve_cny="120",
+        approved_by="boss",
+        approved_at=approved_at,
+        expires_at=approved_at + timedelta(minutes=15),
+    )
+    path = tmp_path / "bonus-plan.json"
+    path.write_text(
+        json.dumps(plan.as_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FinanceServiceError, match="must use WB balance"):
+        service.ads_deposit(
+            plan_path=path,
+            approved_by="boss",
+            confirm_live=False,
+        )
+    assert service.ledger.query_funding_actions(
+        store_alias="owner-store", action_type="advertising_top_up"
+    ) == []
+    service.close()
 
 
 def test_ads_deposit_rechecks_all_live_evidence_and_confirms_exact_readback(
@@ -1066,86 +1881,6 @@ def test_ads_deposit_confirm_live_requires_prior_dry_run_proposal(tmp_path, monk
             approved_by="boss",
             confirm_live=True,
         )
-    assert client.calls == []
-    service.close()
-
-
-@pytest.mark.parametrize("lifecycle_status", ["executing", "unknown"])
-def test_ads_deposit_existing_execution_state_allows_readback_after_policy_fallback(
-    tmp_path,
-    monkeypatch,
-    lifecycle_status,
-):
-    service, weekly = _finalized_weekly_service(tmp_path, monkeypatch)
-    plan_path = _advertising_deposit_plan_file(service, tmp_path, weekly["reportId"])
-    monkeypatch.setattr(
-        service,
-        "_available_advertising_reserve_cny",
-        lambda store_alias, *, exclude_action_id=None: Decimal("120"),
-    )
-    proposal = service.ads_deposit(
-        plan_path=plan_path,
-        approved_by="boss",
-        confirm_live=False,
-    )
-    service.ledger.update_funding_action_status(
-        proposal["actionId"],
-        lifecycle_status,
-        occurred_at=service._now(),
-        evidence={"livePreflight": {"campaignBudgetBeforeCny": "40.00"}},
-    )
-    service.policy = replace(
-        service.policy,
-        settlement_balance_contract_enabled=False,
-    )
-    client = _FakeFundingClient()
-    client.budget_reads = 1
-    monkeypatch.setattr("wb_manager.finance_service.WbClient", lambda token: client)
-
-    result = service.ads_deposit(
-        plan_path=plan_path,
-        approved_by="boss",
-        confirm_live=True,
-    )
-
-    assert result["status"] == "readback_confirmed"
-    assert result["readbackOnly"] is True
-    assert [call[0] for call in client.calls] == ["GET"]
-    assert "/adv/v1/budget?id=" in client.calls[0][1]
-    assert not any(call[0] == "POST" for call in client.calls)
-    service.close()
-
-
-def test_ads_deposit_proposed_action_cannot_post_after_policy_fallback(
-    tmp_path,
-    monkeypatch,
-):
-    service, weekly = _finalized_weekly_service(tmp_path, monkeypatch)
-    plan_path = _advertising_deposit_plan_file(service, tmp_path, weekly["reportId"])
-    monkeypatch.setattr(
-        service,
-        "_available_advertising_reserve_cny",
-        lambda store_alias, *, exclude_action_id=None: Decimal("120"),
-    )
-    service.ads_deposit(
-        plan_path=plan_path,
-        approved_by="boss",
-        confirm_live=False,
-    )
-    service.policy = replace(
-        service.policy,
-        settlement_balance_contract_enabled=False,
-    )
-    client = _FakeFundingClient()
-    monkeypatch.setattr("wb_manager.finance_service.WbClient", lambda token: client)
-
-    with pytest.raises(FinanceServiceError, match="not enabled"):
-        service.ads_deposit(
-            plan_path=plan_path,
-            approved_by="boss",
-            confirm_live=True,
-        )
-
     assert client.calls == []
     service.close()
 

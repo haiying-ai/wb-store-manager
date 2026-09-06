@@ -105,12 +105,17 @@ active private financial policy. The methodology only requires that:
   evidence, not today's price, a converted display price, or the settlement
   amount itself;
 - platform deductions and direct settlement reconcile to one another;
-- policy-derived operating and advertising/return reserves use the same
-  order-time basis and are retained with their evidence;
+- effective-dated reporting policies are selected by `orderCreatedAt`; every
+  operating, return-risk, promotion, or legacy shared reserve uses that same
+  order-time basis and retains its policy ID, rates, and evidence;
 - actual return logistics is linked from all applicable WB finance rows and is
   allocated once at store-and-period scope;
-- the reserve remaining after actual return logistics is reported as the
-  advertising allocation, while any excess return loss is shown separately;
+- when the selected policy separates return risk and promotion, actual return
+  logistics reconciles only against the return-risk reserve, the promotion
+  reserve remains independent, and any excess return loss is shown separately;
+- when an older selected policy uses a shared advertising/return pool, retain
+  that historical allocation behavior instead of restating the order under the
+  newest policy;
 - actual advertising spend is reconciliation evidence and is never deducted a
   second time outside the policy reserve;
 - planned/template values and actual settlement values occupy separate fields.

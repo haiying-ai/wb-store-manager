@@ -20,13 +20,68 @@ def add_finance_parser(subparsers: Any) -> None:
     bootstrap.add_argument(
         "--through", default="yesterday", help="Inclusive finance date, YYYY-MM-DD or yesterday"
     )
+    bootstrap.add_argument(
+        "--max-store-workers",
+        type=int,
+        default=2,
+        help=(
+            "Maximum concurrent store API readers. Stores sharing a token are "
+            "always serialized; use 1 if the platform applies a global limit."
+        ),
+    )
 
     daily = commands.add_parser(
-        "daily", help="Repair missing periods, sync through yesterday, and close due reports"
+        "daily",
+        help="Repair/sync through the cutoff, close due reports, and append the canonical workbook",
     )
     _add_runtime_paths(daily)
     daily.add_argument(
         "--through", default="yesterday", help="Inclusive finance date, YYYY-MM-DD or yesterday"
+    )
+    daily.add_argument(
+        "--skip-workbook",
+        action="store_true",
+        help="Skip the canonical iterative workbook append (diagnostic/tests only)",
+    )
+    daily.add_argument(
+        "--correction-window-days",
+        type=int,
+        default=None,
+        help=(
+            "Override the daily historical correction window.  By default, "
+            "ordinary days use 30 days and Monday/month-start use 120 days."
+        ),
+    )
+    daily.add_argument(
+        "--max-store-workers",
+        type=int,
+        default=2,
+        help=(
+            "Maximum concurrent store API readers. Stores sharing a token are "
+            "always serialized; use 1 if the platform applies a global limit."
+        ),
+    )
+
+    workbook_sync = commands.add_parser(
+        "workbook-sync",
+        help="Append immutable finance report artifacts to the configured canonical workbook",
+    )
+    _add_runtime_paths(workbook_sync, output=False)
+    workbook_sync.add_argument(
+        "--through", default="yesterday", help="Only include report periods through this date"
+    )
+    workbook_sync.add_argument(
+        "--report",
+        action="append",
+        default=[],
+        help="Specific report JSON artifact; repeatable. Omit to discover latest artifacts.",
+    )
+    workbook_sync.add_argument("--canonical", default=None, help="Override canonical XLSX path")
+    workbook_sync.add_argument("--report-root", default=None, help="Override report artifact root")
+    workbook_sync.add_argument(
+        "--debt-json",
+        default=None,
+        help="Optional advertising-debt snapshot JSON (for manual withdrawal reconciliation)",
     )
 
     cost_import = commands.add_parser(
@@ -41,8 +96,14 @@ def add_finance_parser(subparsers: Any) -> None:
     )
     cost_import.add_argument("--approved-by", required=True, help="Person confirming this cost version")
     cost_import.add_argument(
+        "--source-currency",
+        choices=("RUB", "CNY"),
+        required=True,
+        help="Currency of the selected source-cost column",
+    )
+    cost_import.add_argument(
         "--rub-per-cny",
-        help="RUB per CNY; defaults to the current approved financial policy",
+        help="Required for RUB source costs; optional cross-check when CNY and RUB evidence coexist",
     )
 
     report = commands.add_parser(
@@ -63,13 +124,50 @@ def add_finance_parser(subparsers: Any) -> None:
         "funds-plan", help="Create a plan-only withdrawal and advertising-reserve calculation"
     )
     _add_runtime_paths(funds)
-    funds.add_argument("--report-id", required=True, help="A FINAL or RESTATED weekly report ID")
+    funds.add_argument(
+        "--report-id",
+        required=True,
+        help="Latest allocation-ready weekly report ID; open items are excluded",
+    )
+
+    deposit_plan = commands.add_parser(
+        "ads-deposit-plan",
+        help="Create one immutable balance-funded campaign-budget allocation plan from current read-only evidence",
+    )
+    _add_runtime_paths(deposit_plan)
+    deposit_plan.add_argument(
+        "--funds-plan",
+        required=True,
+        help="Exact weekly funding-plan JSON produced by finance funds-plan",
+    )
+    deposit_plan.add_argument(
+        "--store",
+        required=True,
+        help="One enabled store alias; plans never span stores",
+    )
+    deposit_plan.add_argument(
+        "--campaign",
+        required=True,
+        type=int,
+        help="One WB advertising campaign ID",
+    )
+    deposit_plan.add_argument(
+        "--amount-cny",
+        required=True,
+        type=int,
+        help="Whole-CNY amount; funding source is forced to WB balance (type=1)",
+    )
+    deposit_plan.add_argument(
+        "--approved-by",
+        required=True,
+        help="Approver for this exact store, campaign and amount",
+    )
 
     deposit = commands.add_parser(
-        "ads-deposit", help="Execute one explicitly approved campaign deposit plan"
+        "ads-deposit", help="Execute one explicitly approved balance-funded campaign-budget allocation plan"
     )
     _add_runtime_paths(deposit, output=False)
-    deposit.add_argument("--plan", required=True, help="Exact immutable advertising deposit plan JSON")
+    deposit.add_argument("--plan", required=True, help="Exact immutable campaign-budget allocation plan JSON")
     deposit.add_argument("--approved-by", required=True, help="Approver name recorded in the action log")
     deposit.add_argument(
         "--confirm-live",
@@ -77,20 +175,41 @@ def add_finance_parser(subparsers: Any) -> None:
         help="Required for the live campaign-budget write; otherwise validate only",
     )
 
-    withdrawal = commands.add_parser(
+    withdrawal_record = commands.add_parser(
         "withdrawal-record",
-        help="Record a human-executed withdrawal without moving money",
+        help=(
+            "Record a human-executed withdrawal; use settlement_balance when "
+            "advertising is paid from WB balance and is unrelated to withdrawal"
+        ),
     )
-    _add_runtime_paths(withdrawal, output=False)
-    withdrawal.add_argument("--store", required=True, help="Enabled store alias")
-    withdrawal.add_argument("--record-key", required=True, help="Stable idempotency key")
-    withdrawal.add_argument("--amount-cny", required=True, help="Actual withdrawal amount")
-    withdrawal.add_argument(
+    _add_runtime_paths(withdrawal_record, output=False)
+    withdrawal_record.add_argument("--store", required=True, help="Enabled store alias")
+    withdrawal_record.add_argument(
+        "--record-key",
+        required=True,
+        help="Stable user/platform withdrawal reference; reusing it is idempotent",
+    )
+    withdrawal_record.add_argument("--amount-cny", required=True, help="Actual withdrawn amount")
+    withdrawal_record.add_argument(
         "--withdrawn-at", required=True, help="Timezone-aware withdrawal timestamp"
     )
-    withdrawal.add_argument("--ad-fee-due-cny", default=None)
-    withdrawal.add_argument("--ad-fee-withheld-cny", default=None)
-    withdrawal.add_argument(
+    withdrawal_record.add_argument(
+        "--ad-fee-due-cny",
+        default=None,
+        help=(
+            "Historical advertising fee that should have been retained. Omit for "
+            "settlement_balance; otherwise omission means unknown/PENDING_DATA"
+        ),
+    )
+    withdrawal_record.add_argument(
+        "--ad-fee-withheld-cny",
+        default=None,
+        help=(
+            "Historical advertising fee actually withheld. Omit for "
+            "settlement_balance; otherwise omission means unknown/PENDING_DATA"
+        ),
+    )
+    withdrawal_record.add_argument(
         "--ad-fee-status",
         choices=(
             "deducted",
@@ -101,43 +220,38 @@ def add_finance_parser(subparsers: Any) -> None:
         ),
         default=None,
         help=(
-            "Post-2026-09-05 withdrawals default to settlement_balance; "
-            "due/withheld/debt are then zero"
+            "Use settlement_balance for the current model: due/withheld/debt are "
+            "zero and platform advertising cycle deductions are reconciled separately"
         ),
     )
-    withdrawal.add_argument("--settled-at")
-    withdrawal.add_argument("--external-reference")
-    withdrawal.add_argument("--evidence-json", default=None)
+    withdrawal_record.add_argument("--settled-at", help="Optional portal settlement timestamp")
+    withdrawal_record.add_argument("--external-reference", help="Portal withdrawal ID")
+    withdrawal_record.add_argument(
+        "--evidence-json",
+        default=None,
+        help="Optional JSON object containing screenshot/portal evidence metadata",
+    )
 
     debt_status = commands.add_parser(
-        "ads-debt-status", help="Show legacy withdrawal advertising-fee debt"
+        "ads-debt-status",
+        help="Show historical advertising-fee debt and FIFO evidence",
     )
     _add_runtime_paths(debt_status, output=False)
-    debt_status.add_argument("--store", default=None)
-    debt_status.add_argument("--as-of", default=None)
+    debt_status.add_argument("--store", default=None, help="One store alias; omit for all stores")
+    debt_status.add_argument("--as-of", default=None, help="Optional timezone-aware cutoff")
 
     debt_reconcile = commands.add_parser(
         "ads-debt-reconcile",
         aliases=("ads-payment-reconcile",),
-        help="Import synced advertising-payment readbacks and reconcile legacy debt",
-    )
-    _add_runtime_paths(debt_reconcile, output=False)
-    debt_reconcile.add_argument("--store", required=True)
-    debt_reconcile.add_argument(
-        "--from",
-        dest="period_start",
-        default=None,
-        help="Financial date (YYYY-MM-DD) or exact ISO datetime",
-    )
-    debt_reconcile.add_argument(
-        "--through",
-        dest="period_end",
-        default=None,
         help=(
-            "Inclusive financial date (YYYY-MM-DD); an ISO datetime is an "
-            "exclusive boundary"
+            "Import synced WB advertising payment readbacks and settle historical "
+            "debt (read-only)"
         ),
     )
+    _add_runtime_paths(debt_reconcile, output=False)
+    debt_reconcile.add_argument("--store", required=True, help="Enabled store alias")
+    debt_reconcile.add_argument("--from", dest="period_start", default=None)
+    debt_reconcile.add_argument("--through", dest="period_end", default=None)
 
 
 def dispatch_finance(args: argparse.Namespace) -> int:
@@ -153,20 +267,56 @@ def dispatch_finance(args: argparse.Namespace) -> int:
     try:
         command = args.finance_command
         if command == "bootstrap":
+            # The constructor default remains available to library callers;
+            # the CLI exposes an explicit bounded-concurrency override.
+            service.max_store_workers = max(
+                1, int(getattr(args, "max_store_workers", service.max_store_workers))
+            )
             result = service.bootstrap(through=args.through)
         elif command == "daily":
-            result = service.daily(through=args.through)
+            result = service.daily(
+                through=args.through,
+                sync_workbook=not bool(getattr(args, "skip_workbook", False)),
+                correction_window_days=getattr(args, "correction_window_days", None),
+                max_store_workers=getattr(args, "max_store_workers", None),
+            )
+        elif command == "workbook-sync":
+            from .finance_workbook import sync_canonical_workbook
+
+            debt_snapshot = None
+            if args.debt_json:
+                debt_snapshot = json.loads(Path(args.debt_json).read_text(encoding="utf-8-sig"))
+                if not isinstance(debt_snapshot, dict):
+                    raise ValueError("--debt-json must contain a JSON object")
+            result = sync_canonical_workbook(
+                report_paths=args.report,
+                through=args.through,
+                canonical=args.canonical,
+                report_root=args.report_root,
+                registry=Path(args.store_registry),
+                debt_snapshot=debt_snapshot,
+                repo_root=Path(__file__).resolve().parents[1],
+            )
         elif command == "cost-import":
             result = service.cost_import(
                 quote=Path(args.quote),
                 effective_from=args.effective_from,
                 approved_by=args.approved_by,
                 rub_per_cny=args.rub_per_cny,
+                source_currency=args.source_currency,
             )
         elif command == "report":
             result = service.report(kind=args.kind, period=args.period, reason=args.reason)
         elif command == "funds-plan":
             result = service.funds_plan(report_id=args.report_id)
+        elif command == "ads-deposit-plan":
+            result = service.ads_deposit_plan(
+                funds_plan_path=Path(args.funds_plan),
+                store_alias=args.store,
+                campaign=args.campaign,
+                amount_cny=args.amount_cny,
+                approved_by=args.approved_by,
+            )
         elif command == "ads-deposit":
             result = service.ads_deposit(
                 plan_path=Path(args.plan),
@@ -196,7 +346,8 @@ def dispatch_finance(args: argparse.Namespace) -> int:
             )
         elif command == "ads-debt-status":
             result = service.advertising_debt_status(
-                store_alias=args.store, as_of=args.as_of
+                store_alias=args.store,
+                as_of=args.as_of,
             )
         elif command in {"ads-debt-reconcile", "ads-payment-reconcile"}:
             result = service.reconcile_advertising_debt(

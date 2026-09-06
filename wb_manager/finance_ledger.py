@@ -6,15 +6,18 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 DEFAULT_FINANCE_DB = Path("data/finance/wb_finance.sqlite3")
-SCHEMA_VERSION = 4
+# The public schema version remains 3 for backwards compatibility with the
+# existing workbook/ledger migration contract.  The withdrawal/ad-debt tables
+# added in this revision are additive and are created idempotently below, so a
+# pre-existing v3 database can be opened without a destructive migration.
+SCHEMA_VERSION = 3
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SYNC_STATUSES = {"running", "complete", "failed", "partial"}
 _REPORT_STATUSES = {"PENDING_DATA", "FINAL", "RESTATED"}
@@ -61,6 +64,12 @@ class ReportImmutableError(FinanceLedgerError):
 class UpsertResult:
     key: str
     inserted: bool
+    # ``changed`` describes a content change, not merely an idempotent replay.
+    # ``inserted`` is retained as the public compatibility field used by
+    # existing callers; a replay with the same payload is therefore
+    # ``inserted=False, changed=False`` while a corrected existing row is
+    # ``inserted=False, changed=True``.
+    changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -373,6 +382,12 @@ class FinanceLedger:
                 PRIMARY KEY(action_id, event_id)
             );
 
+            -- Human-executed withdrawals are kept separately from funding
+            -- *plans*.  The row is immutable; corrections/status changes are
+            -- represented by withdrawal_record_events.  This lets the owner
+            -- paste a seller-portal withdrawal record after somebody else
+            -- performs the withdrawal without pretending that our system
+            -- executed it.
             CREATE TABLE IF NOT EXISTS withdrawal_records(
                 record_id TEXT PRIMARY KEY,
                 idempotency_key TEXT NOT NULL UNIQUE,
@@ -409,6 +424,10 @@ class FinanceLedger:
                 PRIMARY KEY(record_id, event_id)
             );
 
+            -- A payment/readback is a positive amount actually credited to a
+            -- WB advertising balance.  It may be discovered by the platform
+            -- API after a manual top-up, or linked to one of our approved
+            -- funding actions.  It is deliberately not a P&L expense.
             CREATE TABLE IF NOT EXISTS advertising_payment_readbacks(
                 payment_id TEXT PRIMARY KEY,
                 idempotency_key TEXT NOT NULL UNIQUE,
@@ -425,13 +444,17 @@ class FinanceLedger:
                 created_at TEXT NOT NULL
             );
 
+            -- FIFO allocations are explicit, immutable audit rows.  The
+            -- unallocated remainder of a payment is visible in the debt
+            -- summary and can settle a debt entered later.
             CREATE TABLE IF NOT EXISTS advertising_debt_allocations(
                 allocation_id TEXT PRIMARY KEY,
                 payment_id TEXT NOT NULL REFERENCES advertising_payment_readbacks(payment_id),
                 withdrawal_record_id TEXT NOT NULL REFERENCES withdrawal_records(record_id),
                 amount_cny TEXT NOT NULL CHECK(typeof(amount_cny) = 'text'),
                 allocated_at TEXT NOT NULL,
-                evidence_json TEXT NOT NULL DEFAULT '{}'
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(payment_id, withdrawal_record_id)
             );
 
             CREATE TABLE IF NOT EXISTS source_coverage(
@@ -474,6 +497,8 @@ class FinanceLedger:
             CREATE INDEX IF NOT EXISTS idx_sales_order ON raw_sales(store_alias, order_id, srid);
             CREATE INDEX IF NOT EXISTS idx_returns_order ON raw_returns(store_alias, order_id, srid, shk_id);
             CREATE INDEX IF NOT EXISTS idx_sync_gaps_open ON sync_gaps(store_alias, source, status, gap_from);
+            CREATE INDEX IF NOT EXISTS idx_source_coverage_latest
+                ON source_coverage(store_alias, source, captured_at DESC, coverage_id DESC);
             CREATE INDEX IF NOT EXISTS idx_cost_lookup ON cost_versions(sku, effective_from, effective_to);
             CREATE INDEX IF NOT EXISTS idx_profit_period ON order_profit(store_alias, completed_at, order_created_at);
 
@@ -600,6 +625,9 @@ class FinanceLedger:
                   AND lifecycle_status='proposed'
                 """
             )
+            # Additive debt-ledger columns/tables are intentionally kept
+            # compatible with v3 databases that may have been opened by an
+            # earlier build of this feature.
             withdrawal_columns = self._table_columns("withdrawal_records")
             if withdrawal_columns and "advertising_fee_status" not in withdrawal_columns:
                 self.connection.execute(
@@ -608,7 +636,6 @@ class FinanceLedger:
                        CHECK(advertising_fee_status IN ('deducted', 'not_deducted', 'partial', 'unknown', 'settlement_balance'))"""
                 )
             self._migrate_withdrawal_advertising_fee_status_constraint()
-            self._migrate_advertising_debt_allocations_append_only()
             self._migrate_funding_status_constraints()
             self._backfill_cost_version_metadata()
             self.connection.executescript(
@@ -617,76 +644,59 @@ class FinanceLedger:
                     ON cost_versions(cost_version_uid) WHERE cost_version_uid IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_report_period
                     ON reports(report_type, report_status, period_start, period_end);
+                -- ``report_status`` is added by the legacy-schema migration
+                -- above, so this index must be created after column
+                -- additions rather than in the initial CREATE TABLE script.
+                CREATE INDEX IF NOT EXISTS idx_reports_status_period
+                    ON reports(report_status, period_end, generated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_funding_query
                     ON funding_actions(store_alias, lifecycle_status, action_type, requested_at);
                 CREATE INDEX IF NOT EXISTS idx_coverage_period
                     ON source_coverage(store_alias, source, period_start, period_end, captured_at);
-                CREATE INDEX IF NOT EXISTS idx_snapshot_stability
+                -- Period scans are the hot path during reconciliation/report
+                -- refresh.  Keep the store key first so the index is useful
+                -- for both single-store and multi-store reads.
+                CREATE INDEX IF NOT EXISTS idx_raw_finance_period
+                    ON raw_finance(store_alias, occurred_at);
+                CREATE INDEX IF NOT EXISTS idx_raw_sales_period
+                    ON raw_sales(store_alias, occurred_at);
+                CREATE INDEX IF NOT EXISTS idx_raw_returns_period
+                    ON raw_returns(store_alias, occurred_at);
+                CREATE INDEX IF NOT EXISTS idx_raw_ad_period
+                    ON raw_ad(store_alias, occurred_at, campaign_id);
+                CREATE INDEX IF NOT EXISTS idx_raw_balance_period
+                    ON raw_balance(store_alias, observed_at, fetched_at);
+                CREATE INDEX IF NOT EXISTS idx_sync_runs_store_source_status
+                    ON sync_runs(store_alias, source, status, requested_through);
+            CREATE INDEX IF NOT EXISTS idx_snapshot_stability
                     ON source_snapshot_history(store_alias, source, period_start, period_end, captured_at);
-                CREATE INDEX IF NOT EXISTS idx_withdrawal_records_store_time
+            CREATE INDEX IF NOT EXISTS idx_withdrawal_records_store_time
                     ON withdrawal_records(store_alias, withdrawn_at, record_id);
-                CREATE INDEX IF NOT EXISTS idx_withdrawal_events_record_time
+            CREATE INDEX IF NOT EXISTS idx_withdrawal_events_record_time
                     ON withdrawal_record_events(record_id, occurred_at, event_id);
-                CREATE INDEX IF NOT EXISTS idx_ad_payment_store_time
+            CREATE INDEX IF NOT EXISTS idx_ad_payment_store_time
                     ON advertising_payment_readbacks(store_alias, paid_at, payment_id);
-                CREATE INDEX IF NOT EXISTS idx_ad_debt_alloc_record
+            CREATE INDEX IF NOT EXISTS idx_ad_debt_alloc_record
                     ON advertising_debt_allocations(withdrawal_record_id, allocated_at);
                 """
             )
             self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def _migrate_withdrawal_advertising_fee_status_constraint(self) -> None:
-        """Add ``settlement_balance`` while preserving legacy audit children."""
+        """Add ``settlement_balance`` without losing immutable audit children.
+
+        SQLite cannot alter a CHECK constraint in place.  Keep foreign-key
+        enforcement enabled and rebuild the parent plus both dependent tables
+        inside a savepoint.  Capturing explicit indexes/triggers before the
+        rename also preserves any site-local audit objects, not only the ones
+        declared by this package.
+        """
 
         table_row = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='withdrawal_records'"
         ).fetchone()
         if table_row is None or "settlement_balance" in str(table_row["sql"] or ""):
             return
-
-        required_tables = {
-            "withdrawal_record_events",
-            "advertising_payment_readbacks",
-            "advertising_debt_allocations",
-        }
-        existing_tables = {
-            str(row["name"])
-            for row in self.connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        missing = sorted(required_tables - existing_tables)
-        if missing:
-            raise FinanceLedgerError(
-                "Cannot migrate legacy withdrawal records without dependent tables: "
-                + ", ".join(missing)
-            )
-
-        rebuilt_tables = {
-            "withdrawal_records",
-            "withdrawal_record_events",
-            "advertising_debt_allocations",
-        }
-        unsafe_dependents: list[str] = []
-        for item in self.connection.execute(
-            """
-            SELECT type, name, tbl_name, sql
-            FROM sqlite_master
-            WHERE type IN ('trigger', 'view') AND sql IS NOT NULL
-            ORDER BY type, name
-            """
-        ).fetchall():
-            owner = str(item["tbl_name"] or "")
-            if item["type"] == "trigger" and owner in rebuilt_tables:
-                continue
-            sql = str(item["sql"] or "")
-            if any(_sql_references_table(sql, table) for table in rebuilt_tables):
-                unsafe_dependents.append(f"{item['type']}:{item['name']}")
-        if unsafe_dependents:
-            raise FinanceLedgerError(
-                "Cannot safely migrate legacy withdrawal records while external schema "
-                "objects reference rebuilt tables: " + ", ".join(unsafe_dependents)
-            )
 
         schema_objects = self.connection.execute(
             """
@@ -702,6 +712,7 @@ class FinanceLedger:
             ORDER BY CASE type WHEN 'index' THEN 0 ELSE 1 END, name
             """
         ).fetchall()
+
         savepoint = "migrate_withdrawal_ad_fee_status"
         self.connection.execute(f"SAVEPOINT {savepoint}")
         try:
@@ -710,6 +721,8 @@ class FinanceLedger:
                 name = '"' + str(item["name"]).replace('"', '""') + '"'
                 self.connection.execute(f"DROP {kind.upper()} IF EXISTS {name}")
 
+            # Rename children first.  With foreign_keys=ON, renaming the parent
+            # then redirects only the old children to the old parent name.
             self.connection.execute(
                 "ALTER TABLE withdrawal_record_events "
                 "RENAME TO withdrawal_record_events_before_settlement_balance"
@@ -722,20 +735,26 @@ class FinanceLedger:
                 "ALTER TABLE withdrawal_records "
                 "RENAME TO withdrawal_records_before_settlement_balance"
             )
+
             self.connection.execute(
                 """
                 CREATE TABLE withdrawal_records(
                     record_id TEXT PRIMARY KEY,
                     idempotency_key TEXT NOT NULL UNIQUE,
                     store_alias TEXT NOT NULL REFERENCES store_registry(store_alias),
-                    withdrawal_amount_cny TEXT NOT NULL CHECK(typeof(withdrawal_amount_cny) = 'text'),
+                    withdrawal_amount_cny TEXT NOT NULL
+                        CHECK(typeof(withdrawal_amount_cny) = 'text'),
                     withdrawn_at TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'reported' CHECK(status IN ('reported', 'readback_confirmed', 'voided')),
+                    status TEXT NOT NULL DEFAULT 'reported'
+                        CHECK(status IN ('reported', 'readback_confirmed', 'voided')),
                     advertising_fee_status TEXT NOT NULL DEFAULT 'unknown'
                         CHECK(advertising_fee_status IN ('deducted', 'not_deducted', 'partial', 'unknown', 'settlement_balance')),
-                    advertising_fee_due_cny TEXT NOT NULL DEFAULT '0' CHECK(typeof(advertising_fee_due_cny) = 'text'),
-                    advertising_fee_withheld_cny TEXT NOT NULL DEFAULT '0' CHECK(typeof(advertising_fee_withheld_cny) = 'text'),
-                    advertising_fee_debt_cny TEXT NOT NULL DEFAULT '0' CHECK(typeof(advertising_fee_debt_cny) = 'text'),
+                    advertising_fee_due_cny TEXT NOT NULL DEFAULT '0'
+                        CHECK(typeof(advertising_fee_due_cny) = 'text'),
+                    advertising_fee_withheld_cny TEXT NOT NULL DEFAULT '0'
+                        CHECK(typeof(advertising_fee_withheld_cny) = 'text'),
+                    advertising_fee_debt_cny TEXT NOT NULL DEFAULT '0'
+                        CHECK(typeof(advertising_fee_debt_cny) = 'text'),
                     settled_at TEXT,
                     external_reference TEXT,
                     source_type TEXT NOT NULL DEFAULT 'user_provided',
@@ -750,7 +769,8 @@ class FinanceLedger:
                 CREATE TABLE withdrawal_record_events(
                     record_id TEXT NOT NULL REFERENCES withdrawal_records(record_id),
                     event_id TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('reported', 'readback_confirmed', 'voided')),
+                    status TEXT NOT NULL
+                        CHECK(status IN ('reported', 'readback_confirmed', 'voided')),
                     occurred_at TEXT NOT NULL,
                     external_reference TEXT,
                     evidence_json TEXT NOT NULL DEFAULT '{}',
@@ -766,7 +786,8 @@ class FinanceLedger:
                     withdrawal_record_id TEXT NOT NULL REFERENCES withdrawal_records(record_id),
                     amount_cny TEXT NOT NULL CHECK(typeof(amount_cny) = 'text'),
                     allocated_at TEXT NOT NULL,
-                    evidence_json TEXT NOT NULL DEFAULT '{}'
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    UNIQUE(payment_id, withdrawal_record_id)
                 )
                 """
             )
@@ -800,6 +821,7 @@ class FinanceLedger:
                 f"SELECT {allocation_columns} "
                 "FROM advertising_debt_allocations_before_settlement_balance"
             )
+
             self.connection.execute(
                 "DROP TABLE withdrawal_record_events_before_settlement_balance"
             )
@@ -809,6 +831,7 @@ class FinanceLedger:
             self.connection.execute(
                 "DROP TABLE withdrawal_records_before_settlement_balance"
             )
+
             for item in schema_objects:
                 self.connection.execute(str(item["sql"]))
 
@@ -819,131 +842,12 @@ class FinanceLedger:
                 "advertising_debt_allocations",
             ):
                 violations.extend(
-                    self.connection.execute(
-                        f"PRAGMA foreign_key_check({table})"
-                    ).fetchall()
+                    self.connection.execute(f"PRAGMA foreign_key_check({table})").fetchall()
                 )
             if violations:
+                details = [tuple(row) for row in violations]
                 raise FinanceLedgerError(
-                    "Withdrawal status migration produced foreign-key violations: "
-                    + repr([tuple(row) for row in violations])
-                )
-        except Exception:
-            self.connection.execute(f"ROLLBACK TO {savepoint}")
-            self.connection.execute(f"RELEASE {savepoint}")
-            raise
-        else:
-            self.connection.execute(f"RELEASE {savepoint}")
-
-    def _migrate_advertising_debt_allocations_append_only(self) -> None:
-        """Allow append-only reallocation events for an existing payment/debt pair."""
-
-        table_row = self.connection.execute(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type='table' AND name='advertising_debt_allocations'"
-        ).fetchone()
-        if table_row is None:
-            return
-        compact_sql = re.sub(
-            r"[\s\"`\[\]]+", "", str(table_row["sql"] or "").casefold()
-        )
-        if "unique(payment_id,withdrawal_record_id)" not in compact_sql:
-            return
-
-        rebuilt_tables = {"advertising_debt_allocations"}
-        unsafe_dependents: list[str] = []
-        for item in self.connection.execute(
-            """
-            SELECT type, name, tbl_name, sql
-            FROM sqlite_master
-            WHERE type IN ('trigger', 'view') AND sql IS NOT NULL
-            ORDER BY type, name
-            """
-        ).fetchall():
-            owner = str(item["tbl_name"] or "")
-            if item["type"] == "trigger" and owner in rebuilt_tables:
-                continue
-            if any(
-                _sql_references_table(str(item["sql"] or ""), table)
-                for table in rebuilt_tables
-            ):
-                unsafe_dependents.append(f"{item['type']}:{item['name']}")
-        for item in self.connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall():
-            table_name = str(item["name"])
-            if table_name in rebuilt_tables:
-                continue
-            quoted_name = '"' + table_name.replace('"', '""') + '"'
-            for foreign_key in self.connection.execute(
-                f"PRAGMA foreign_key_list({quoted_name})"
-            ).fetchall():
-                if str(foreign_key["table"]) in rebuilt_tables:
-                    unsafe_dependents.append(f"foreign-key:{table_name}")
-                    break
-        if unsafe_dependents:
-            raise FinanceLedgerError(
-                "Cannot safely migrate advertising debt allocations while external "
-                "schema objects reference the table: "
-                + ", ".join(sorted(set(unsafe_dependents)))
-            )
-
-        schema_objects = self.connection.execute(
-            """
-            SELECT type, name, sql
-            FROM sqlite_master
-            WHERE type IN ('index', 'trigger')
-              AND tbl_name='advertising_debt_allocations'
-              AND sql IS NOT NULL
-            ORDER BY CASE type WHEN 'index' THEN 0 ELSE 1 END, name
-            """
-        ).fetchall()
-        savepoint = "migrate_ad_debt_alloc_append_only"
-        self.connection.execute(f"SAVEPOINT {savepoint}")
-        try:
-            for item in schema_objects:
-                kind = str(item["type"])
-                name = '"' + str(item["name"]).replace('"', '""') + '"'
-                self.connection.execute(f"DROP {kind.upper()} IF EXISTS {name}")
-            self.connection.execute(
-                "ALTER TABLE advertising_debt_allocations "
-                "RENAME TO advertising_debt_allocations_before_append_only"
-            )
-            self.connection.execute(
-                """
-                CREATE TABLE advertising_debt_allocations(
-                    allocation_id TEXT PRIMARY KEY,
-                    payment_id TEXT NOT NULL
-                        REFERENCES advertising_payment_readbacks(payment_id),
-                    withdrawal_record_id TEXT NOT NULL
-                        REFERENCES withdrawal_records(record_id),
-                    amount_cny TEXT NOT NULL CHECK(typeof(amount_cny) = 'text'),
-                    allocated_at TEXT NOT NULL,
-                    evidence_json TEXT NOT NULL DEFAULT '{}'
-                )
-                """
-            )
-            allocation_columns = (
-                "allocation_id, payment_id, withdrawal_record_id, amount_cny, "
-                "allocated_at, evidence_json"
-            )
-            self.connection.execute(
-                f"INSERT INTO advertising_debt_allocations({allocation_columns}) "
-                f"SELECT {allocation_columns} "
-                "FROM advertising_debt_allocations_before_append_only"
-            )
-            self.connection.execute(
-                "DROP TABLE advertising_debt_allocations_before_append_only"
-            )
-            for item in schema_objects:
-                self.connection.execute(str(item["sql"]))
-            violations = self.connection.execute(
-                "PRAGMA foreign_key_check(advertising_debt_allocations)"
-            ).fetchall()
-            if violations:
-                raise FinanceLedgerError(
-                    "Advertising debt allocation migration produced foreign-key "
-                    "violations: " + repr([tuple(row) for row in violations])
+                    f"Withdrawal status migration produced foreign-key violations: {details}"
                 )
         except Exception:
             self.connection.execute(f"ROLLBACK TO {savepoint}")
@@ -1109,10 +1013,35 @@ class FinanceLedger:
         payload_hash = sha256_text(serialized)
         fetched = normalize_iso(fetched_at or datetime.now(timezone.utc))
         occurred = normalize_iso(occurred_at) if occurred_at is not None else None
-        existed = self.connection.execute(
-            "SELECT 1 FROM raw_finance WHERE store_alias=? AND rrd_id=?",
+        normalized_values = {
+            "order_id": _optional_text(order_id),
+            "srid": _optional_text(srid),
+            "shk_id": _optional_text(shk_id),
+            "occurred_at": occurred,
+            "buyer_paid_cny": decimal_text(buyer_paid_cny),
+            "for_pay_cny": decimal_text(for_pay_cny),
+            "commission_cny": decimal_text(commission_cny),
+            "logistics_cny": decimal_text(logistics_cny),
+            "return_logistics_cny": decimal_text(return_logistics_cny),
+            "acquiring_fee_cny": decimal_text(acquiring_fee_cny),
+            "other_cost_cny": decimal_text(other_cost_cny),
+        }
+        existing = self.connection.execute(
+            """
+            SELECT payload_hash, order_id, srid, shk_id, occurred_at,
+                   buyer_paid_cny, for_pay_cny, commission_cny, logistics_cny,
+                   return_logistics_cny, acquiring_fee_cny, other_cost_cny
+            FROM raw_finance WHERE store_alias=? AND rrd_id=?
+            """,
             (alias, key),
-        ).fetchone() is not None
+        ).fetchone()
+        existed = existing is not None
+        changed = not existed or str(existing["payload_hash"] or "") != payload_hash
+        if existing is not None and not changed:
+            changed = any(
+                existing[column] != value
+                for column, value in normalized_values.items()
+            )
         with self.connection:
             self.connection.execute(
                 """
@@ -1134,15 +1063,15 @@ class FinanceLedger:
                     fetched_at=excluded.fetched_at
                 """,
                 (
-                    alias, key, _optional_text(order_id), _optional_text(srid),
-                    _optional_text(shk_id), occurred,
-                    decimal_text(buyer_paid_cny), decimal_text(for_pay_cny),
-                    decimal_text(commission_cny), decimal_text(logistics_cny),
-                    decimal_text(return_logistics_cny), decimal_text(acquiring_fee_cny),
-                    decimal_text(other_cost_cny), serialized, payload_hash, fetched,
+                    alias, key, normalized_values["order_id"], normalized_values["srid"],
+                    normalized_values["shk_id"], normalized_values["occurred_at"],
+                    normalized_values["buyer_paid_cny"], normalized_values["for_pay_cny"],
+                    normalized_values["commission_cny"], normalized_values["logistics_cny"],
+                    normalized_values["return_logistics_cny"], normalized_values["acquiring_fee_cny"],
+                    normalized_values["other_cost_cny"], serialized, payload_hash, fetched,
                 ),
             )
-        return UpsertResult(key=key, inserted=not existed)
+        return UpsertResult(key=key, inserted=not existed, changed=changed)
 
     def upsert_sale(
         self,
@@ -1280,10 +1209,17 @@ class FinanceLedger:
         fetched = normalize_iso(fetched_at or datetime.now(timezone.utc))
         serialized = canonical_json(dict(payload))
         payload_hash = sha256_text(serialized)
-        existed = self.connection.execute(
-            f"SELECT 1 FROM {table} WHERE store_alias=? AND event_hash=?",
+        existing = self.connection.execute(
+            f"SELECT payload_hash, {', '.join(columns)}, {time_column} "
+            f"FROM {table} WHERE store_alias=? AND event_hash=?",
             (alias, event_hash),
-        ).fetchone() is not None
+        ).fetchone()
+        existed = existing is not None
+        changed = not existed or str(existing["payload_hash"] or "") != payload_hash
+        if existing is not None and not changed:
+            changed = any(
+                existing[column] != values[column] for column in columns
+            ) or existing[time_column] != occurred
         all_columns = ["store_alias", "event_hash", *columns, time_column, "payload_json", "payload_hash", "fetched_at"]
         placeholders = ", ".join("?" for _ in all_columns)
         updates = ", ".join(
@@ -1297,7 +1233,7 @@ class FinanceLedger:
                 f"ON CONFLICT(store_alias, event_hash) DO UPDATE SET {updates}",
                 params,
             )
-        return UpsertResult(key=event_hash, inserted=not existed)
+        return UpsertResult(key=event_hash, inserted=not existed, changed=changed)
 
     def start_sync(
         self,
@@ -2310,6 +2246,14 @@ class FinanceLedger:
                 existing["snapshot_hash"], existing["consecutive_complete_hash_count"],
                 existing["sync_run_id"], existing["metadata_json"],
             )
+            # ``captured_at`` is intentionally normalized to seconds for
+            # stable period evidence.  A fast retry can therefore reuse the
+            # same capture key with a new sync-run ID/diagnostic metadata.  If
+            # the evidence itself is identical, treat that retry as an
+            # idempotent replay rather than attempting to overwrite an
+            # immutable row (the separate sync_run already records the retry).
+            if actual[:4] == expected[:4]:
+                return _coverage_from_row(existing)
             if actual != expected:
                 raise FinanceLedgerError("A source coverage capture cannot be overwritten")
             return _coverage_from_row(existing)
@@ -2381,6 +2325,28 @@ class FinanceLedger:
             key = (str(row["store_alias"]), str(row["source"]))
             latest.setdefault(key, dict(row))
         return list(latest.values())
+
+    def get_latest_source_coverage(
+        self, store_alias: str, source: str
+    ) -> dict[str, Any] | None:
+        """Return the most recent coverage capture for one store/source.
+
+        This is intentionally a read-only helper used by the incremental
+        synchronizer to decide whether a source snapshot changed.  It avoids
+        inferring change from row counts alone and keeps the comparison tied
+        to the immutable coverage history.
+        """
+
+        row = self.connection.execute(
+            """
+            SELECT * FROM source_coverage
+            WHERE store_alias=? AND source=?
+            ORDER BY captured_at DESC, coverage_id DESC
+            LIMIT 1
+            """,
+            (str(store_alias), str(source)),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     def has_consecutive_stable_snapshot(
         self,
@@ -2619,846 +2585,6 @@ class FinanceLedger:
             Decimal("0"),
         )
 
-    # Human-executed withdrawals are distinct from funding plans/API attempts.
-    # They and their later reconciliation evidence are append-only.
-    def record_withdrawal_record(
-        self,
-        idempotency_key: str,
-        store_alias: str,
-        *,
-        amount_cny: Any | None = None,
-        withdrawal_amount_cny: Any | None = None,
-        withdrawn_at: datetime | str,
-        advertising_fee_due_cny: Any | None = None,
-        advertising_fee_withheld_cny: Any | None = None,
-        advertising_fee_status: str | None = None,
-        status: str = "reported",
-        settled_at: datetime | str | None = None,
-        external_reference: str | None = None,
-        source_type: str = "user_provided",
-        evidence: Mapping[str, Any] | None = None,
-        advertising_fee_cutover: date | str | None = None,
-        financial_timezone: str | ZoneInfo | None = None,
-    ) -> str:
-        key = _required_text(idempotency_key, "idempotency_key")
-        alias = _required_text(store_alias, "store_alias")
-        raw_amount = amount_cny if amount_cny is not None else withdrawal_amount_cny
-        if raw_amount is None:
-            raise FinanceLedgerError("withdrawal amount_cny is required")
-        amount = _money_decimal(raw_amount, "withdrawal amount_cny", positive=True)
-        withdrawn = normalize_iso(withdrawn_at)
-        due_supplied = _money_value_supplied(advertising_fee_due_cny)
-        withheld_supplied = _money_value_supplied(advertising_fee_withheld_cny)
-        due = (
-            _money_decimal(
-                advertising_fee_due_cny,
-                "advertising_fee_due_cny",
-                non_negative=True,
-            )
-            if due_supplied
-            else Decimal("0.00")
-        )
-        withheld = (
-            _money_decimal(
-                advertising_fee_withheld_cny,
-                "advertising_fee_withheld_cny",
-                non_negative=True,
-            )
-            if withheld_supplied
-            else Decimal("0.00")
-        )
-        if withheld > due:
-            raise FinanceLedgerError(
-                "advertising_fee_withheld_cny cannot exceed advertising_fee_due_cny"
-            )
-        if advertising_fee_status is None or not str(advertising_fee_status).strip():
-            fee_status = (
-                "unknown"
-                if not due_supplied or not withheld_supplied
-                else _normalise_advertising_fee_status(None, due=due, withheld=withheld)
-            )
-        else:
-            fee_status = _normalise_advertising_fee_status(
-                advertising_fee_status,
-                due=due,
-                withheld=withheld,
-            )
-        cutover_context = _withdrawal_cutover_context(
-            advertising_fee_cutover,
-            financial_timezone,
-        )
-        cutover, business_timezone = cutover_context
-        if fee_status == "settlement_balance":
-            if parse_aware_datetime(withdrawn).astimezone(business_timezone).date() < cutover:
-                raise FinanceLedgerError(
-                    "settlement_balance cannot be applied to a pre-cutover withdrawal"
-                )
-            if due != Decimal("0") or withheld != Decimal("0"):
-                raise FinanceLedgerError(
-                    "settlement_balance withdrawal records require zero advertising "
-                    "fee due and withheld amounts"
-            )
-            due = withheld = Decimal("0.00")
-        else:
-            if (
-                parse_aware_datetime(withdrawn)
-                .astimezone(business_timezone)
-                .date()
-                >= cutover
-            ):
-                raise FinanceLedgerError(
-                    "Withdrawals on or after the advertising fee cutover must use "
-                    "settlement_balance"
-                )
-            if not due_supplied and fee_status != "unknown":
-                raise FinanceLedgerError(
-                    "advertising_fee_due_cny is required for an explicit legacy fee status"
-                )
-            if fee_status in {"deducted", "partial"} and not withheld_supplied:
-                raise FinanceLedgerError(
-                    "advertising_fee_withheld_cny is required for deducted/partial status"
-                )
-            if fee_status == "deducted" and (
-                due <= Decimal("0") or withheld != due
-            ):
-                raise FinanceLedgerError(
-                    "deducted withdrawal records require due > 0 and withheld == due"
-                )
-            if fee_status == "not_deducted" and (
-                due <= Decimal("0") or withheld != Decimal("0")
-            ):
-                raise FinanceLedgerError(
-                    "not_deducted withdrawal records require due > 0 and withheld == 0"
-                )
-            if fee_status == "partial" and not (
-                Decimal("0") < withheld < due
-            ):
-                raise FinanceLedgerError(
-                    "partial withdrawal records require 0 < withheld < due"
-                )
-
-        lifecycle = str(status or "").strip().lower()
-        if lifecycle not in _WITHDRAWAL_RECORD_STATUSES:
-            raise FinanceLedgerError(f"Unsupported withdrawal record status: {status}")
-        settled = normalize_iso(settled_at) if settled_at is not None else None
-        source = _required_text(source_type, "source_type")
-        reference = _optional_text(external_reference)
-        evidence_payload = dict(evidence or {})
-        evidence_payload["advertisingFeeCutover"] = cutover.isoformat()
-        evidence_payload["financialTimezone"] = business_timezone.key
-        evidence_payload.setdefault("advertisingFeeStatus", fee_status)
-        payload = {
-            "idempotencyKey": key,
-            "storeAlias": alias,
-            "withdrawalAmountCny": _money_text(amount),
-            "withdrawnAt": withdrawn,
-            "status": lifecycle,
-            "advertisingFeeStatus": fee_status,
-            "advertisingFeeDueCny": _money_text(due),
-            "advertisingFeeWithheldCny": _money_text(withheld),
-            "advertisingFeeDebtCny": _money_text(due - withheld),
-            "settledAt": settled,
-            "externalReference": reference,
-            "sourceType": source,
-            "evidence": evidence_payload,
-        }
-        payload_hash = sha256_text(canonical_json(payload))
-        record_id = stable_event_hash(
-            alias, "withdrawal-record", {"idempotencyKey": key}
-        )
-        existing = self.connection.execute(
-            "SELECT record_id, payload_hash FROM withdrawal_records WHERE idempotency_key=?",
-            (key,),
-        ).fetchone()
-        if existing is not None:
-            if str(existing["payload_hash"]) != payload_hash:
-                raise FinanceLedgerError(
-                    "Withdrawal record idempotency key has different content"
-                )
-            self._allocate_unapplied_advertising_payments(alias)
-            return str(existing["record_id"])
-
-        created = normalize_iso(datetime.now(timezone.utc))
-        with self.connection:
-            self.connection.execute(
-                """
-                INSERT INTO withdrawal_records(
-                    record_id, idempotency_key, store_alias, withdrawal_amount_cny,
-                    withdrawn_at, status, advertising_fee_status,
-                    advertising_fee_due_cny, advertising_fee_withheld_cny,
-                    advertising_fee_debt_cny, settled_at, external_reference,
-                    source_type, evidence_json, payload_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record_id,
-                    key,
-                    alias,
-                    _money_text(amount),
-                    withdrawn,
-                    lifecycle,
-                    fee_status,
-                    _money_text(due),
-                    _money_text(withheld),
-                    _money_text(due - withheld),
-                    settled,
-                    reference,
-                    source,
-                    canonical_json(evidence_payload),
-                    payload_hash,
-                    created,
-                ),
-            )
-            self._insert_withdrawal_record_event(
-                record_id,
-                lifecycle,
-                withdrawn,
-                external_reference=reference,
-                evidence={**evidence_payload, "source": "withdrawal_record"},
-            )
-        self._allocate_unapplied_advertising_payments(alias)
-        return record_id
-
-    def update_withdrawal_record_status(
-        self,
-        record_id: str,
-        status: str,
-        *,
-        occurred_at: datetime | str | None = None,
-        external_reference: str | None = None,
-        evidence: Mapping[str, Any] | None = None,
-    ) -> None:
-        identifier = _required_text(record_id, "record_id")
-        lifecycle = str(status or "").strip().lower()
-        if lifecycle not in _WITHDRAWAL_RECORD_STATUSES:
-            raise FinanceLedgerError(f"Unsupported withdrawal record status: {status}")
-        found = self.connection.execute(
-            "SELECT store_alias, status FROM withdrawal_records WHERE record_id=?",
-            (identifier,),
-        ).fetchone()
-        if found is None:
-            raise FinanceLedgerError(f"Unknown withdrawal record: {identifier}")
-        if self._withdrawal_is_voided(identifier) and lifecycle != "voided":
-            raise FinanceLedgerError(
-                "A voided withdrawal record is terminal and cannot be restored"
-            )
-        occurred = normalize_iso(occurred_at or datetime.now(timezone.utc))
-        with self.connection:
-            self._insert_withdrawal_record_event(
-                identifier,
-                lifecycle,
-                occurred,
-                external_reference=_optional_text(external_reference),
-                evidence=dict(evidence or {}),
-            )
-        self._allocate_unapplied_advertising_payments(
-            str(found["store_alias"]),
-            effective_at=occurred if lifecycle == "voided" else None,
-        )
-
-    def _insert_withdrawal_record_event(
-        self,
-        record_id: str,
-        status: str,
-        occurred_at: str,
-        *,
-        external_reference: str | None,
-        evidence: Mapping[str, Any],
-    ) -> None:
-        event_id = stable_event_hash(
-            record_id,
-            "withdrawal-status",
-            {
-                "status": status,
-                "occurredAt": occurred_at,
-                "externalReference": external_reference,
-                "evidence": dict(evidence),
-            },
-        )
-        self.connection.execute(
-            """
-            INSERT OR IGNORE INTO withdrawal_record_events(
-                record_id, event_id, status, occurred_at,
-                external_reference, evidence_json
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                record_id,
-                event_id,
-                status,
-                occurred_at,
-                external_reference,
-                canonical_json(dict(evidence)),
-            ),
-        )
-
-    def record_advertising_payment_readback(
-        self,
-        idempotency_key: str,
-        store_alias: str,
-        *,
-        amount_cny: Any,
-        paid_at: datetime | str,
-        source_type: str = "platform_api",
-        platform_reference: str | None = None,
-        raw_event_hash: str | None = None,
-        funding_action_id: str | None = None,
-        evidence: Mapping[str, Any] | None = None,
-        legacy_debt_payment: bool = False,
-    ) -> str:
-        key = _required_text(idempotency_key, "idempotency_key")
-        alias = _required_text(store_alias, "store_alias")
-        amount = _money_decimal(amount_cny, "amount_cny", positive=True)
-        paid = normalize_iso(paid_at)
-        source = str(source_type or "").strip().lower()
-        source = {
-            "api": "platform_api",
-            "platform": "platform_api",
-            "manual": "user_provided",
-            "user": "user_provided",
-        }.get(source, source)
-        if source not in _ADVERTISING_PAYMENT_SOURCES:
-            raise FinanceLedgerError(
-                f"Unsupported advertising payment source: {source_type}"
-            )
-        reference = _optional_text(platform_reference)
-        event_hash = _optional_text(raw_event_hash)
-        action_id = _optional_text(funding_action_id)
-        if action_id is not None:
-            action_row = self.connection.execute(
-                "SELECT store_alias FROM funding_actions WHERE action_id=?", (action_id,)
-            ).fetchone()
-            if action_row is None or str(action_row["store_alias"]) != alias:
-                raise FinanceLedgerError(
-                    "Advertising payment funding action is missing or belongs to another store"
-                )
-        if not isinstance(legacy_debt_payment, bool):
-            raise FinanceLedgerError("legacy_debt_payment must be a boolean")
-        evidence_payload = dict(evidence or {})
-        declared_legacy_payment = evidence_payload.get("legacyDebtPayment")
-        if (
-            declared_legacy_payment is not None
-            and declared_legacy_payment is not legacy_debt_payment
-        ):
-            raise FinanceLedgerError(
-                "legacy debt payment evidence conflicts with the declared payment type"
-            )
-        evidence_payload["legacyDebtPayment"] = legacy_debt_payment
-        evidence_payload.setdefault("readbackOnly", True)
-        payload = {
-            "idempotencyKey": key,
-            "storeAlias": alias,
-            "amountCny": _money_text(amount),
-            "paidAt": paid,
-            "sourceType": source,
-            "platformReference": reference,
-            "rawEventHash": event_hash,
-            "fundingActionId": action_id,
-            "evidence": evidence_payload,
-        }
-        payload_hash = sha256_text(canonical_json(payload))
-        payment_id = stable_event_hash(
-            alias, "advertising-payment-readback", {"idempotencyKey": key}
-        )
-        existing = self.connection.execute(
-            "SELECT payment_id, payload_hash FROM advertising_payment_readbacks WHERE idempotency_key=?",
-            (key,),
-        ).fetchone()
-        if existing is not None:
-            if str(existing["payload_hash"]) != payload_hash:
-                raise FinanceLedgerError(
-                    "Advertising payment idempotency key has different content"
-                )
-            self._allocate_unapplied_advertising_payments(alias)
-            return str(existing["payment_id"])
-        with self.connection:
-            self.connection.execute(
-                """
-                INSERT INTO advertising_payment_readbacks(
-                    payment_id, idempotency_key, store_alias, amount_cny, paid_at,
-                    source_type, platform_reference, raw_event_hash,
-                    funding_action_id, evidence_json, payload_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    payment_id,
-                    key,
-                    alias,
-                    _money_text(amount),
-                    paid,
-                    source,
-                    reference,
-                    event_hash,
-                    action_id,
-                    canonical_json(evidence_payload),
-                    payload_hash,
-                    normalize_iso(datetime.now(timezone.utc)),
-                ),
-            )
-        self._allocate_unapplied_advertising_payments(alias)
-        return payment_id
-
-    def list_withdrawal_records(
-        self,
-        *,
-        store_alias: str | None = None,
-        include_voided: bool = False,
-        as_of: datetime | str | None = None,
-    ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if store_alias is not None:
-            clauses.append("wr.store_alias=?")
-            params.append(store_alias)
-        if as_of is not None:
-            clauses.append("wr.withdrawn_at<=?")
-            params.append(normalize_iso(as_of))
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = self.connection.execute(
-            f"SELECT wr.* FROM withdrawal_records wr {where} "
-            "ORDER BY wr.store_alias, wr.withdrawn_at, wr.record_id",
-            params,
-        ).fetchall()
-        output: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            latest = self._latest_withdrawal_record_event(
-                str(item["record_id"]), as_of=as_of
-            )
-            current_status = (
-                "voided"
-                if self._withdrawal_is_voided(str(item["record_id"]), as_of=as_of)
-                else str((latest or item).get("status") or item["status"])
-            )
-            if not include_voided and current_status == "voided":
-                continue
-            item["current_status"] = current_status
-            item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
-            debt = _money_decimal(
-                item["advertising_fee_debt_cny"],
-                "advertising_fee_debt_cny",
-                non_negative=True,
-            )
-            settled = self._withdrawal_settled_amount(str(item["record_id"]), as_of=as_of)
-            item["withdrawal_amount_cny"] = _money_text(item["withdrawal_amount_cny"])
-            item["advertising_fee_due_cny"] = _money_text(item["advertising_fee_due_cny"])
-            item["advertising_fee_withheld_cny"] = _money_text(
-                item["advertising_fee_withheld_cny"]
-            )
-            item["advertising_fee_debt_cny"] = _money_text(debt)
-            item["settled_advertising_fee_cny"] = _money_text(settled)
-            item["outstanding_advertising_fee_cny"] = _money_text(
-                max(Decimal("0"), debt - settled)
-            )
-            output.append(item)
-        return output
-
-    def list_advertising_payment_readbacks(
-        self,
-        *,
-        store_alias: str | None = None,
-        as_of: datetime | str | None = None,
-    ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if store_alias is not None:
-            clauses.append("store_alias=?")
-            params.append(store_alias)
-        if as_of is not None:
-            clauses.append("paid_at<=?")
-            params.append(normalize_iso(as_of))
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = self.connection.execute(
-            f"SELECT * FROM advertising_payment_readbacks {where} "
-            "ORDER BY store_alias, paid_at, payment_id",
-            params,
-        ).fetchall()
-        output: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            amount = _money_decimal(item["amount_cny"], "amount_cny", positive=True)
-            applied = self._payment_applied_amount(str(item["payment_id"]), as_of=as_of)
-            item["amount_cny"] = _money_text(amount)
-            item["applied_cny"] = _money_text(applied)
-            item["unapplied_cny"] = _money_text(max(Decimal("0"), amount - applied))
-            item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
-            output.append(item)
-        return output
-
-    def advertising_debt_summary(
-        self,
-        *,
-        store_alias: str | None = None,
-        as_of: datetime | str | None = None,
-    ) -> dict[str, Any]:
-        aliases = (
-            [store_alias]
-            if store_alias is not None
-            else [
-                str(row["store_alias"])
-                for row in self.connection.execute(
-                    "SELECT store_alias FROM store_registry WHERE active=1 ORDER BY store_alias"
-                ).fetchall()
-            ]
-        )
-        stores: list[dict[str, Any]] = []
-        for alias in aliases:
-            withdrawals = self.list_withdrawal_records(
-                store_alias=alias, include_voided=False, as_of=as_of
-            )
-            payments = self.list_advertising_payment_readbacks(
-                store_alias=alias, as_of=as_of
-            )
-            due = sum(
-                (
-                    _money_decimal(
-                        row["advertising_fee_due_cny"], "due", non_negative=True
-                    )
-                    for row in withdrawals
-                ),
-                Decimal("0"),
-            )
-            withheld = sum(
-                (
-                    _money_decimal(
-                        row["advertising_fee_withheld_cny"],
-                        "withheld",
-                        non_negative=True,
-                    )
-                    for row in withdrawals
-                ),
-                Decimal("0"),
-            )
-            debt = sum(
-                (
-                    _money_decimal(
-                        row["advertising_fee_debt_cny"], "debt", non_negative=True
-                    )
-                    for row in withdrawals
-                ),
-                Decimal("0"),
-            )
-            settled = sum(
-                (
-                    _money_decimal(
-                        row["settled_advertising_fee_cny"],
-                        "settled",
-                        non_negative=True,
-                    )
-                    for row in withdrawals
-                ),
-                Decimal("0"),
-            )
-            payment_total = sum(
-                (
-                    _money_decimal(row["amount_cny"], "payment", positive=True)
-                    for row in payments
-                ),
-                Decimal("0"),
-            )
-            applied = sum(
-                (
-                    _money_decimal(row["applied_cny"], "applied", non_negative=True)
-                    for row in payments
-                ),
-                Decimal("0"),
-            )
-            unverified = sum(
-                str(row.get("advertising_fee_status") or "unknown") == "unknown"
-                for row in withdrawals
-            )
-            stores.append(
-                {
-                    "storeAlias": alias,
-                    "withdrawalCount": len(withdrawals),
-                    "withdrawalAmountCny": _money_text(
-                        sum(
-                            (
-                                _money_decimal(
-                                    row["withdrawal_amount_cny"],
-                                    "withdrawal",
-                                    positive=True,
-                                )
-                                for row in withdrawals
-                            ),
-                            Decimal("0"),
-                        )
-                    ),
-                    "advertisingFeeDueCny": _money_text(due),
-                    "advertisingFeeWithheldCny": _money_text(withheld),
-                    "advertisingFeeDebtCny": _money_text(debt),
-                    "advertisingFeeSettledCny": _money_text(settled),
-                    "advertisingDebtOutstandingCny": _money_text(
-                        max(Decimal("0"), debt - settled)
-                    ),
-                    "advertisingPaymentReadbackCny": _money_text(payment_total),
-                    "advertisingPaymentAppliedCny": _money_text(applied),
-                    "advertisingPaymentUnappliedCny": _money_text(
-                        max(Decimal("0"), payment_total - applied)
-                    ),
-                    "advertisingFeeUnverifiedCount": unverified,
-                    "advertisingDebtStatus": "PENDING_DATA" if unverified else "KNOWN",
-                    "advertisingDebtAmountKnown": unverified == 0,
-                    "withdrawals": withdrawals,
-                    "payments": payments,
-                }
-            )
-        money_keys = (
-            "withdrawalAmountCny",
-            "advertisingFeeDueCny",
-            "advertisingFeeWithheldCny",
-            "advertisingFeeDebtCny",
-            "advertisingFeeSettledCny",
-            "advertisingDebtOutstandingCny",
-            "advertisingPaymentReadbackCny",
-            "advertisingPaymentAppliedCny",
-            "advertisingPaymentUnappliedCny",
-        )
-        totals: dict[str, Any] = {
-            key: _money_text(
-                sum(
-                    (
-                        _money_decimal(row[key], key, non_negative=True)
-                        for row in stores
-                    ),
-                    Decimal("0"),
-                )
-            )
-            for key in money_keys
-        }
-        totals["withdrawalCount"] = sum(row["withdrawalCount"] for row in stores)
-        totals["advertisingFeeUnverifiedCount"] = sum(
-            row["advertisingFeeUnverifiedCount"] for row in stores
-        )
-        totals["advertisingDebtStatus"] = (
-            "PENDING_DATA" if totals["advertisingFeeUnverifiedCount"] else "KNOWN"
-        )
-        totals["advertisingDebtAmountKnown"] = (
-            totals["advertisingFeeUnverifiedCount"] == 0
-        )
-        return {
-            "schemaVersion": 1,
-            "currency": "CNY",
-            "asOf": normalize_iso(as_of) if as_of is not None else None,
-            "stores": stores,
-            "totals": totals,
-        }
-
-    def _latest_withdrawal_record_event(
-        self, record_id: str, *, as_of: datetime | str | None = None
-    ) -> dict[str, Any] | None:
-        params: list[Any] = [record_id]
-        clause = ""
-        if as_of is not None:
-            clause = " AND occurred_at<=?"
-            params.append(normalize_iso(as_of))
-        row = self.connection.execute(
-            "SELECT * FROM withdrawal_record_events WHERE record_id=?"
-            + clause
-            + " ORDER BY occurred_at DESC, event_id DESC LIMIT 1",
-            params,
-        ).fetchone()
-        return dict(row) if row is not None else None
-
-    def _withdrawal_is_active(
-        self, record_id: str, *, as_of: datetime | str | None = None
-    ) -> bool:
-        row = self.connection.execute(
-            "SELECT status FROM withdrawal_records WHERE record_id=?", (record_id,)
-        ).fetchone()
-        if row is None:
-            return False
-        return not self._withdrawal_is_voided(record_id, as_of=as_of)
-
-    def _withdrawal_is_voided(
-        self, record_id: str, *, as_of: datetime | str | None = None
-    ) -> bool:
-        clauses = ["record_id=?", "status='voided'"]
-        params: list[Any] = [record_id]
-        if as_of is not None:
-            clauses.append("occurred_at<=?")
-            params.append(normalize_iso(as_of))
-        if self.connection.execute(
-            "SELECT 1 FROM withdrawal_record_events WHERE "
-            + " AND ".join(clauses)
-            + " LIMIT 1",
-            params,
-        ).fetchone():
-            return True
-        row = self.connection.execute(
-            "SELECT status, withdrawn_at FROM withdrawal_records WHERE record_id=?",
-            (record_id,),
-        ).fetchone()
-        if row is None or str(row["status"]) != "voided":
-            return False
-        return as_of is None or str(row["withdrawn_at"]) <= normalize_iso(as_of)
-
-    def _withdrawal_settled_amount(
-        self, record_id: str, *, as_of: datetime | str | None = None
-    ) -> Decimal:
-        clauses = ["a.withdrawal_record_id=?"]
-        params: list[Any] = [record_id]
-        if as_of is not None:
-            cutoff = normalize_iso(as_of)
-            clauses.extend(("a.allocated_at<=?", "p.paid_at<=?"))
-            params.extend((cutoff, cutoff))
-        rows = self.connection.execute(
-            "SELECT a.amount_cny FROM advertising_debt_allocations a "
-            "JOIN advertising_payment_readbacks p ON p.payment_id=a.payment_id "
-            f"WHERE {' AND '.join(clauses)}",
-            params,
-        ).fetchall()
-        return sum(
-            (
-                _money_decimal(row["amount_cny"], "allocation", non_negative=True)
-                for row in rows
-            ),
-            Decimal("0"),
-        ).quantize(Decimal("0.01"))
-
-    def _payment_applied_amount(
-        self, payment_id: str, *, as_of: datetime | str | None = None
-    ) -> Decimal:
-        clauses = ["a.payment_id=?"]
-        params: list[Any] = [payment_id]
-        if as_of is not None:
-            cutoff = normalize_iso(as_of)
-            clauses.extend(("a.allocated_at<=?", "p.paid_at<=?"))
-            params.extend((cutoff, cutoff))
-        rows = self.connection.execute(
-            "SELECT a.amount_cny, a.withdrawal_record_id "
-            "FROM advertising_debt_allocations a "
-            "JOIN advertising_payment_readbacks p ON p.payment_id=a.payment_id "
-            f"WHERE {' AND '.join(clauses)}",
-            params,
-        ).fetchall()
-        return sum(
-            (
-                _money_decimal(row["amount_cny"], "allocation", non_negative=True)
-                for row in rows
-                if self._withdrawal_is_active(
-                    str(row["withdrawal_record_id"]), as_of=as_of
-                )
-            ),
-            Decimal("0"),
-        ).quantize(Decimal("0.01"))
-
-    def _allocate_unapplied_advertising_payments(
-        self,
-        store_alias: str,
-        *,
-        effective_at: datetime | str | None = None,
-    ) -> None:
-        alias = _required_text(store_alias, "store_alias")
-        reallocation_effective_at = (
-            normalize_iso(effective_at) if effective_at is not None else None
-        )
-        payment_rows = self.connection.execute(
-            "SELECT * FROM advertising_payment_readbacks WHERE store_alias=? "
-            "ORDER BY paid_at, payment_id",
-            (alias,),
-        ).fetchall()
-        payments = []
-        for payment in payment_rows:
-            try:
-                payment_evidence = json.loads(payment["evidence_json"] or "{}")
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if (
-                isinstance(payment_evidence, Mapping)
-                and payment_evidence.get("legacyDebtPayment") is True
-            ):
-                payments.append(payment)
-        debts = [
-            {
-                "record_id": str(row["record_id"]),
-                "withdrawn_at": str(row["withdrawn_at"]),
-                "remaining": _money_decimal(
-                    row["outstanding_advertising_fee_cny"],
-                    "outstanding advertising fee",
-                    non_negative=True,
-                ),
-            }
-            for row in self.list_withdrawal_records(store_alias=alias)
-            if _money_decimal(
-                row["outstanding_advertising_fee_cny"],
-                "outstanding advertising fee",
-                non_negative=True,
-            )
-            > Decimal("0")
-        ]
-        debts.sort(key=lambda row: (row["withdrawn_at"], row["record_id"]))
-        if not payments or not debts:
-            return
-        with self.connection:
-            for payment in payments:
-                payment_id = str(payment["payment_id"])
-                remaining_payment = _money_decimal(
-                    payment["amount_cny"], "payment amount", positive=True
-                ) - self._payment_applied_amount(payment_id)
-                if remaining_payment <= Decimal("0"):
-                    continue
-                for debt in debts:
-                    if remaining_payment <= Decimal("0"):
-                        break
-                    if debt["remaining"] <= Decimal("0"):
-                        continue
-                    if debt["withdrawn_at"] > str(payment["paid_at"]):
-                        continue
-                    allocation = min(remaining_payment, debt["remaining"]).quantize(
-                        Decimal("0.01")
-                    )
-                    allocation_effective_at = str(payment["paid_at"])
-                    if (
-                        reallocation_effective_at is not None
-                        and reallocation_effective_at > allocation_effective_at
-                    ):
-                        allocation_effective_at = reallocation_effective_at
-                    prior_pair_count = int(
-                        self.connection.execute(
-                            "SELECT COUNT(*) FROM advertising_debt_allocations "
-                            "WHERE payment_id=? AND withdrawal_record_id=?",
-                            (payment_id, debt["record_id"]),
-                        ).fetchone()[0]
-                    )
-                    allocation_sequence = prior_pair_count + 1
-                    allocation_id = stable_event_hash(
-                        alias,
-                        "advertising-debt-allocation",
-                        {
-                            "paymentId": payment_id,
-                            "withdrawalRecordId": debt["record_id"],
-                            "allocationSequence": allocation_sequence,
-                            "amountCny": _money_text(allocation),
-                            "effectiveAt": allocation_effective_at,
-                        },
-                    )
-                    reconciled_at = normalize_iso(datetime.now(timezone.utc))
-                    self.connection.execute(
-                        """
-                        INSERT INTO advertising_debt_allocations(
-                            allocation_id, payment_id, withdrawal_record_id,
-                            amount_cny, allocated_at, evidence_json
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            allocation_id,
-                            payment_id,
-                            debt["record_id"],
-                            _money_text(allocation),
-                            allocation_effective_at,
-                            canonical_json(
-                                {
-                                    "method": "fifo",
-                                    "allocationSequence": allocation_sequence,
-                                    "reconciledAt": reconciled_at,
-                                }
-                            ),
-                        ),
-                    )
-                    remaining_payment -= allocation
-                    debt["remaining"] -= allocation
-
     def query_funding_actions(
         self,
         *,
@@ -3511,6 +2637,753 @@ class FinanceLedger:
             (action_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Human-executed withdrawal / historical advertising-fee debt ledger
+    # ------------------------------------------------------------------
+    # These methods intentionally live beside (but not inside) funding_actions.
+    # funding_actions represents plans and API attempts owned by this tool;
+    # withdrawal_records represents a cash movement performed by somebody else
+    # and later supplied by the owner.  The latter is append-only and all
+    # subsequent status/settlement facts are separate immutable rows.
+
+    def record_withdrawal_record(
+        self,
+        idempotency_key: str,
+        store_alias: str,
+        *,
+        amount_cny: Any | None = None,
+        withdrawal_amount_cny: Any | None = None,
+        withdrawn_at: datetime | str,
+        advertising_fee_due_cny: Any | None = None,
+        advertising_fee_withheld_cny: Any | None = None,
+        advertising_fee_status: str | None = None,
+        status: str = "reported",
+        settled_at: datetime | str | None = None,
+        external_reference: str | None = None,
+        source_type: str = "user_provided",
+        evidence: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Record one externally executed withdrawal without executing money.
+
+        Historical statuses retain the advertising/return reserve facts and any
+        auditable debt exactly as supplied.  New withdrawals funded from the WB
+        settlement balance use ``settlement_balance``: fee due, withheld, and
+        debt are all zero because advertising is no longer linked to withdrawal.
+        A genuinely missing historical fact remains explicit ``unknown`` and is
+        never silently converted to known zero debt.
+        """
+
+        key = _required_text(idempotency_key, "idempotency_key")
+        alias = _required_text(store_alias, "store_alias")
+        raw_amount = amount_cny if amount_cny is not None else withdrawal_amount_cny
+        if raw_amount is None:
+            raise FinanceLedgerError("withdrawal amount_cny is required")
+        amount = _money_decimal(raw_amount, "withdrawal amount_cny", positive=True)
+        withdrawn = normalize_iso(withdrawn_at)
+        # ``None`` means the operator did not provide an advertising-fee
+        # amount.  It is deliberately different from an explicit numeric
+        # zero: a portal withdrawal record alone does not prove that no fee
+        # was due or withheld.  Persist zero in the legacy numeric columns,
+        # but carry the distinction in ``advertising_fee_status=unknown`` and
+        # the summary's PENDING_DATA marker.
+        due_supplied = _money_value_supplied(advertising_fee_due_cny)
+        withheld_supplied = _money_value_supplied(advertising_fee_withheld_cny)
+        due = (
+            _money_decimal(
+                advertising_fee_due_cny, "advertising_fee_due_cny", non_negative=True
+            )
+            if due_supplied
+            else Decimal("0.00")
+        )
+        withheld = (
+            _money_decimal(
+                advertising_fee_withheld_cny,
+                "advertising_fee_withheld_cny",
+                non_negative=True,
+            )
+            if withheld_supplied
+            else Decimal("0.00")
+        )
+        if withheld > due:
+            raise FinanceLedgerError(
+                "advertising_fee_withheld_cny cannot exceed advertising_fee_due_cny"
+            )
+        explicit_fee_status = (
+            advertising_fee_status is not None
+            and bool(str(advertising_fee_status).strip())
+        )
+        if not explicit_fee_status and (not due_supplied or not withheld_supplied):
+            # Fail closed when the user only supplies a withdrawal amount.
+            # Do not infer ``not_deducted`` from an omitted withheld amount.
+            fee_status = "unknown"
+        else:
+            fee_status = _normalise_advertising_fee_status(
+                advertising_fee_status, due=due, withheld=withheld
+            )
+        if fee_status == "settlement_balance" and (
+            due != Decimal("0") or withheld != Decimal("0")
+        ):
+            raise FinanceLedgerError(
+                "settlement_balance withdrawal records require zero advertising "
+                "fee due and withheld amounts"
+            )
+        if not due_supplied and fee_status not in {"unknown", "settlement_balance"}:
+            raise FinanceLedgerError(
+                "advertising_fee_due_cny is required when advertising_fee_status "
+                f"is {fee_status!r}; omit the status (or use unknown) until the "
+                "advertising reserve is evidenced"
+            )
+        if (
+            fee_status in {"deducted", "partial"}
+            and not withheld_supplied
+        ):
+            raise FinanceLedgerError(
+                "advertising_fee_withheld_cny is required for deducted/partial "
+                "advertising fee status"
+            )
+        lifecycle = str(status or "").strip().lower()
+        if lifecycle not in _WITHDRAWAL_RECORD_STATUSES:
+            raise FinanceLedgerError(f"Unsupported withdrawal record status: {status}")
+        if fee_status == "not_deducted" and due <= Decimal("0"):
+            raise FinanceLedgerError(
+                "not_deducted withdrawal records require a positive advertising fee due"
+            )
+        settled = normalize_iso(settled_at) if settled_at is not None else None
+        source = _required_text(source_type, "source_type")
+        reference = _optional_text(external_reference)
+        evidence_payload = dict(evidence or {})
+        # Preserve the input facts in the immutable evidence payload so a
+        # future policy/rate change cannot rewrite what the operator reported.
+        evidence_payload.setdefault("recordedBy", "user")
+        evidence_payload.setdefault("advertisingFeeStatus", fee_status)
+        payload = {
+            "idempotencyKey": key,
+            "storeAlias": alias,
+            "withdrawalAmountCny": _money_text(amount),
+            "withdrawnAt": withdrawn,
+            "status": lifecycle,
+            "advertisingFeeStatus": fee_status,
+            "advertisingFeeDueCny": _money_text(due),
+            "advertisingFeeWithheldCny": _money_text(withheld),
+            "advertisingFeeDebtCny": _money_text(due - withheld),
+            "settledAt": settled,
+            "externalReference": reference,
+            "sourceType": source,
+            "evidence": evidence_payload,
+        }
+        payload_hash = sha256_text(canonical_json(payload))
+        record_id = stable_event_hash(
+            alias, "withdrawal-record", {"idempotencyKey": key}
+        )
+        existing = self.connection.execute(
+            "SELECT record_id, payload_hash FROM withdrawal_records WHERE idempotency_key=?",
+            (key,),
+        ).fetchone()
+        if existing is not None:
+            if str(existing["payload_hash"]) != payload_hash:
+                raise FinanceLedgerError(
+                    "Withdrawal record idempotency key has different content"
+                )
+            return str(existing["record_id"])
+
+        created = normalize_iso(datetime.now(timezone.utc))
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO withdrawal_records(
+                    record_id, idempotency_key, store_alias, withdrawal_amount_cny,
+                    withdrawn_at, status, advertising_fee_status,
+                    advertising_fee_due_cny, advertising_fee_withheld_cny,
+                    advertising_fee_debt_cny, settled_at, external_reference,
+                    source_type, evidence_json, payload_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record_id,
+                    key,
+                    alias,
+                    _money_text(amount),
+                    withdrawn,
+                    lifecycle,
+                    fee_status,
+                    _money_text(due),
+                    _money_text(withheld),
+                    _money_text(due - withheld),
+                    settled,
+                    reference,
+                    source,
+                    canonical_json(evidence_payload),
+                    payload_hash,
+                    created,
+                ),
+            )
+            self._insert_withdrawal_record_event(
+                record_id,
+                lifecycle,
+                withdrawn,
+                external_reference=reference,
+                evidence={**evidence_payload, "source": "withdrawal_record"},
+            )
+        # A payment may have been entered before the operator supplied this
+        # withdrawal.  Re-run deterministic FIFO allocation so that late entry
+        # does not leave a false outstanding balance.
+        self._allocate_unapplied_advertising_payments(alias)
+        return record_id
+
+    def update_withdrawal_record_status(
+        self,
+        record_id: str,
+        status: str,
+        *,
+        occurred_at: datetime | str | None = None,
+        external_reference: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Append a status/correction event for an immutable withdrawal row."""
+
+        identifier = _required_text(record_id, "record_id")
+        lifecycle = str(status or "").strip().lower()
+        if lifecycle not in _WITHDRAWAL_RECORD_STATUSES:
+            raise FinanceLedgerError(f"Unsupported withdrawal record status: {status}")
+        found = self.connection.execute(
+            "SELECT 1 FROM withdrawal_records WHERE record_id=?", (identifier,)
+        ).fetchone()
+        if found is None:
+            raise FinanceLedgerError(f"Unknown withdrawal record: {identifier}")
+        occurred = normalize_iso(occurred_at or datetime.now(timezone.utc))
+        with self.connection:
+            self._insert_withdrawal_record_event(
+                identifier,
+                lifecycle,
+                occurred,
+                external_reference=_optional_text(external_reference),
+                evidence=dict(evidence or {}),
+            )
+        self._allocate_unapplied_advertising_payments(
+            str(
+                self.connection.execute(
+                    "SELECT store_alias FROM withdrawal_records WHERE record_id=?",
+                    (identifier,),
+                ).fetchone()["store_alias"]
+            )
+        )
+
+    def _insert_withdrawal_record_event(
+        self,
+        record_id: str,
+        status: str,
+        occurred_at: str,
+        *,
+        external_reference: str | None,
+        evidence: Mapping[str, Any],
+    ) -> None:
+        event_id = stable_event_hash(
+            record_id,
+            "withdrawal-status",
+            {
+                "status": status,
+                "occurredAt": occurred_at,
+                "externalReference": external_reference,
+                "evidence": dict(evidence),
+            },
+        )
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO withdrawal_record_events(
+                record_id, event_id, status, occurred_at,
+                external_reference, evidence_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record_id,
+                event_id,
+                status,
+                occurred_at,
+                external_reference,
+                canonical_json(dict(evidence)),
+            ),
+        )
+
+    def record_advertising_payment_readback(
+        self,
+        idempotency_key: str,
+        store_alias: str,
+        *,
+        amount_cny: Any,
+        paid_at: datetime | str,
+        source_type: str = "platform_api",
+        platform_reference: str | None = None,
+        raw_event_hash: str | None = None,
+        funding_action_id: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Record a positive advertising-balance credit and settle debt FIFO.
+
+        This method is readback-only: it never calls WB and never posts money.
+        ``amount_cny`` must be the actual amount observed on the platform, not
+        the amount somebody intended to transfer.
+        """
+
+        key = _required_text(idempotency_key, "idempotency_key")
+        alias = _required_text(store_alias, "store_alias")
+        amount = _money_decimal(amount_cny, "amount_cny", positive=True)
+        paid = normalize_iso(paid_at)
+        source = str(source_type or "").strip().lower()
+        source = {
+            "api": "platform_api",
+            "platform": "platform_api",
+            "manual": "user_provided",
+            "user": "user_provided",
+        }.get(source, source)
+        if source not in _ADVERTISING_PAYMENT_SOURCES:
+            raise FinanceLedgerError(f"Unsupported advertising payment source: {source_type}")
+        reference = _optional_text(platform_reference)
+        event_hash = _optional_text(raw_event_hash)
+        action_id = _optional_text(funding_action_id)
+        if action_id is not None:
+            action_row = self.connection.execute(
+                "SELECT store_alias FROM funding_actions WHERE action_id=?", (action_id,)
+            ).fetchone()
+            if action_row is None:
+                raise FinanceLedgerError(f"Unknown funding action: {action_id}")
+            if str(action_row["store_alias"]) != alias:
+                raise FinanceLedgerError(
+                    "Advertising payment readback store does not match its funding action"
+                )
+        evidence_payload = dict(evidence or {})
+        evidence_payload.setdefault("readbackOnly", True)
+        payload = {
+            "idempotencyKey": key,
+            "storeAlias": alias,
+            "amountCny": _money_text(amount),
+            "paidAt": paid,
+            "sourceType": source,
+            "platformReference": reference,
+            "rawEventHash": event_hash,
+            "fundingActionId": action_id,
+            "evidence": evidence_payload,
+        }
+        payload_hash = sha256_text(canonical_json(payload))
+        payment_id = stable_event_hash(
+            alias, "advertising-payment-readback", {"idempotencyKey": key}
+        )
+        existing = self.connection.execute(
+            "SELECT payment_id, payload_hash FROM advertising_payment_readbacks WHERE idempotency_key=?",
+            (key,),
+        ).fetchone()
+        if existing is not None:
+            if str(existing["payload_hash"]) != payload_hash:
+                raise FinanceLedgerError(
+                    "Advertising payment idempotency key has different content"
+                )
+            return str(existing["payment_id"])
+        created = normalize_iso(datetime.now(timezone.utc))
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO advertising_payment_readbacks(
+                    payment_id, idempotency_key, store_alias, amount_cny, paid_at,
+                    source_type, platform_reference, raw_event_hash,
+                    funding_action_id, evidence_json, payload_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payment_id,
+                    key,
+                    alias,
+                    _money_text(amount),
+                    paid,
+                    source,
+                    reference,
+                    event_hash,
+                    action_id,
+                    canonical_json(evidence_payload),
+                    payload_hash,
+                    created,
+                ),
+            )
+        self._allocate_unapplied_advertising_payments(alias)
+        return payment_id
+
+    def list_withdrawal_records(
+        self,
+        *,
+        store_alias: str | None = None,
+        include_voided: bool = False,
+        as_of: datetime | str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return immutable withdrawal facts plus latest status and settlement."""
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if store_alias is not None:
+            clauses.append("wr.store_alias=?")
+            params.append(store_alias)
+        if as_of is not None:
+            clauses.append("wr.withdrawn_at<=?")
+            params.append(normalize_iso(as_of))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.connection.execute(
+            f"SELECT wr.* FROM withdrawal_records wr {where} "
+            "ORDER BY wr.store_alias, wr.withdrawn_at, wr.record_id",
+            params,
+        ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            latest = self._latest_withdrawal_record_event(item["record_id"], as_of=as_of)
+            current_status = str(latest.get("status") or item["status"])
+            if not include_voided and current_status == "voided":
+                continue
+            item["current_status"] = current_status
+            if latest is not None:
+                latest = dict(latest)
+                try:
+                    latest["evidence"] = json.loads(
+                        latest.pop("evidence_json") or "{}"
+                    )
+                except json.JSONDecodeError:
+                    latest["evidence"] = {}
+            item["latest_status_event"] = latest or None
+            item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+            item["advertising_fee_due_cny"] = _money_text(
+                _money_decimal(item["advertising_fee_due_cny"], "advertising_fee_due_cny", non_negative=True)
+            )
+            item["advertising_fee_withheld_cny"] = _money_text(
+                _money_decimal(item["advertising_fee_withheld_cny"], "advertising_fee_withheld_cny", non_negative=True)
+            )
+            item["advertising_fee_debt_cny"] = _money_text(
+                _money_decimal(item["advertising_fee_debt_cny"], "advertising_fee_debt_cny", non_negative=True)
+            )
+            item["settled_advertising_fee_cny"] = _money_text(
+                self._withdrawal_settled_amount(item["record_id"], as_of=as_of)
+            )
+            item["outstanding_advertising_fee_cny"] = _money_text(
+                max(
+                    Decimal("0"),
+                    _money_decimal(item["advertising_fee_debt_cny"], "advertising_fee_debt_cny", non_negative=True)
+                    - _money_decimal(item["settled_advertising_fee_cny"], "settled_advertising_fee_cny", non_negative=True),
+                )
+            )
+            output.append(item)
+        return output
+
+    def list_advertising_payment_readbacks(
+        self,
+        *,
+        store_alias: str | None = None,
+        as_of: datetime | str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if store_alias is not None:
+            clauses.append("store_alias=?")
+            params.append(store_alias)
+        if as_of is not None:
+            clauses.append("paid_at<=?")
+            params.append(normalize_iso(as_of))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.connection.execute(
+            f"SELECT * FROM advertising_payment_readbacks {where} "
+            "ORDER BY store_alias, paid_at, payment_id",
+            params,
+        ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+            amount = _money_decimal(item["amount_cny"], "amount_cny", positive=True)
+            item["amount_cny"] = _money_text(amount)
+            item["applied_cny"] = _money_text(
+                self._payment_applied_amount(item["payment_id"], as_of=as_of)
+            )
+            item["unapplied_cny"] = _money_text(
+                max(
+                    Decimal("0"),
+                    amount - _money_decimal(item["applied_cny"], "applied_cny", non_negative=True),
+                )
+            )
+            output.append(item)
+        return output
+
+    def advertising_debt_summary(
+        self,
+        *,
+        store_alias: str | None = None,
+        as_of: datetime | str | None = None,
+    ) -> dict[str, Any]:
+        """Return store-separated historical ad-fee debt and FIFO evidence."""
+
+        aliases = [store_alias] if store_alias is not None else [
+            str(row["store_alias"])
+            for row in self.connection.execute(
+                "SELECT store_alias FROM store_registry WHERE active=1 ORDER BY store_alias"
+            ).fetchall()
+        ]
+        stores: list[dict[str, Any]] = []
+        for alias in aliases:
+            withdrawals = self.list_withdrawal_records(
+                store_alias=alias, include_voided=False, as_of=as_of
+            )
+            payments = self.list_advertising_payment_readbacks(
+                store_alias=alias, as_of=as_of
+            )
+            due = sum(
+                (_money_decimal(row["advertising_fee_debt_cny"], "debt", non_negative=True) for row in withdrawals),
+                Decimal("0"),
+            )
+            settled = sum(
+                (_money_decimal(row["settled_advertising_fee_cny"], "settled", non_negative=True) for row in withdrawals),
+                Decimal("0"),
+            )
+            payment_total = sum(
+                (_money_decimal(row["amount_cny"], "payment", positive=True) for row in payments),
+                Decimal("0"),
+            )
+            payment_applied = sum(
+                (_money_decimal(row["applied_cny"], "applied", non_negative=True) for row in payments),
+                Decimal("0"),
+            )
+            unverified_count = sum(
+                1
+                for row in withdrawals
+                if str(row.get("advertising_fee_status") or "unknown").strip().lower()
+                == "unknown"
+            )
+            debt_status = "PENDING_DATA" if unverified_count else "KNOWN"
+            store_payload = {
+                "storeAlias": alias,
+                "withdrawalCount": len(withdrawals),
+                "withdrawalAmountCny": _money_text(
+                    sum((_money_decimal(row["withdrawal_amount_cny"], "withdrawal", positive=True) for row in withdrawals), Decimal("0"))
+                ),
+                "advertisingFeeDueCny": _money_text(due),
+                "advertisingFeeSettledCny": _money_text(settled),
+                "advertisingDebtOutstandingCny": _money_text(max(Decimal("0"), due - settled)),
+                "advertisingPaymentReadbackCny": _money_text(payment_total),
+                "advertisingPaymentAppliedCny": _money_text(payment_applied),
+                "advertisingPaymentUnappliedCny": _money_text(max(Decimal("0"), payment_total - payment_applied)),
+                "advertisingFeeUnverifiedCount": unverified_count,
+                # A zero numeric debt is not evidence that no advertising fee
+                # is owed when one or more withdrawal records omit the fee
+                # facts.  Keep the legacy numeric fields for compatibility,
+                # but expose an explicit state and an unknown amount marker.
+                "advertisingDebtStatus": debt_status,
+                "advertisingDebtAmountKnown": unverified_count == 0,
+                "advertisingDebtUnknownAmountCny": (
+                    None if unverified_count else "0.00"
+                ),
+                "withdrawals": withdrawals,
+                "payments": payments,
+            }
+            stores.append(store_payload)
+        total_keys = (
+            "withdrawalAmountCny",
+            "advertisingFeeDueCny",
+            "advertisingFeeSettledCny",
+            "advertisingDebtOutstandingCny",
+            "advertisingPaymentReadbackCny",
+            "advertisingPaymentAppliedCny",
+            "advertisingPaymentUnappliedCny",
+        )
+        totals = {
+            key: _money_text(
+                sum((_money_decimal(row[key], key, non_negative=True) for row in stores), Decimal("0"))
+            )
+            for key in total_keys
+        }
+        # Counts are kept alongside monetary totals so a report can distinguish
+        # a genuine zero debt from an empty/unverified withdrawal population.
+        totals["withdrawalCount"] = sum(
+            int(row.get("withdrawalCount") or 0) for row in stores
+        )
+        totals["advertisingFeeUnverifiedCount"] = sum(
+            int(row.get("advertisingFeeUnverifiedCount") or 0) for row in stores
+        )
+        totals["advertisingDebtStatus"] = (
+            "PENDING_DATA"
+            if totals["advertisingFeeUnverifiedCount"]
+            else "KNOWN"
+        )
+        totals["advertisingDebtAmountKnown"] = (
+            totals["advertisingFeeUnverifiedCount"] == 0
+        )
+        totals["advertisingDebtUnknownAmountCny"] = (
+            None
+            if totals["advertisingFeeUnverifiedCount"]
+            else "0.00"
+        )
+        return {
+            "schemaVersion": 1,
+            "currency": "CNY",
+            "asOf": normalize_iso(as_of) if as_of is not None else None,
+            "stores": stores,
+            "totals": totals,
+        }
+
+    def _latest_withdrawal_record_event(
+        self, record_id: str, *, as_of: datetime | str | None = None
+    ) -> dict[str, Any] | None:
+        params: list[Any] = [record_id]
+        clause = ""
+        if as_of is not None:
+            clause = " AND occurred_at<=?"
+            params.append(normalize_iso(as_of))
+        row = self.connection.execute(
+            "SELECT * FROM withdrawal_record_events WHERE record_id=?"
+            + clause
+            + " ORDER BY occurred_at DESC, event_id DESC LIMIT 1",
+            params,
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _withdrawal_is_active(
+        self, record_id: str, *, as_of: datetime | str | None = None
+    ) -> bool:
+        row = self.connection.execute(
+            "SELECT status FROM withdrawal_records WHERE record_id=?", (record_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        latest = self._latest_withdrawal_record_event(record_id, as_of=as_of)
+        return str((latest or row)["status"]) != "voided"
+
+    def _withdrawal_settled_amount(
+        self, record_id: str, *, as_of: datetime | str | None = None
+    ) -> Decimal:
+        clauses = ["a.withdrawal_record_id=?"]
+        params: list[Any] = [record_id]
+        if as_of is not None:
+            cutoff = normalize_iso(as_of)
+            clauses.append("a.allocated_at<=?")
+            params.append(cutoff)
+            clauses.append("p.paid_at<=?")
+            params.append(cutoff)
+        # Read individual text values rather than aggregating through SQLite
+        # REAL, preserving cent precision and avoiding floating-point drift.
+        rows = self.connection.execute(
+            "SELECT a.amount_cny FROM advertising_debt_allocations a "
+            "JOIN advertising_payment_readbacks p ON p.payment_id=a.payment_id "
+            f"WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchall()
+        return sum((_money_decimal(item["amount_cny"], "allocation", non_negative=True) for item in rows), Decimal("0")).quantize(Decimal("0.01"))
+
+    def _payment_applied_amount(
+        self, payment_id: str, *, as_of: datetime | str | None = None
+    ) -> Decimal:
+        clauses = ["a.payment_id=?"]
+        params: list[Any] = [payment_id]
+        if as_of is not None:
+            cutoff = normalize_iso(as_of)
+            clauses.append("a.allocated_at<=?")
+            params.append(cutoff)
+            clauses.append("p.paid_at<=?")
+            params.append(cutoff)
+        rows = self.connection.execute(
+            "SELECT a.amount_cny, a.withdrawal_record_id "
+            "FROM advertising_debt_allocations a "
+            "JOIN advertising_payment_readbacks p ON p.payment_id=a.payment_id "
+            f"WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchall()
+        total = Decimal("0")
+        for row in rows:
+            if self._withdrawal_is_active(str(row["withdrawal_record_id"]), as_of=as_of):
+                total += _money_decimal(row["amount_cny"], "allocation", non_negative=True)
+        return total.quantize(Decimal("0.01"))
+
+    def _allocate_unapplied_advertising_payments(self, store_alias: str) -> None:
+        """Allocate all currently unallocated credits to active debts FIFO."""
+
+        alias = _required_text(store_alias, "store_alias")
+        payments = self.connection.execute(
+            "SELECT * FROM advertising_payment_readbacks WHERE store_alias=? "
+            "ORDER BY paid_at, payment_id",
+            (alias,),
+        ).fetchall()
+        withdrawals = self.list_withdrawal_records(store_alias=alias)
+        # Keep only active records with positive outstanding debt and use a
+        # stable order, making repeated reconciliation deterministic.
+        debts = [
+            {
+                "recordId": str(row["record_id"]),
+                "withdrawnAt": str(row["withdrawn_at"]),
+                "paidAt": None,
+                "remaining": _money_decimal(
+                    row["outstanding_advertising_fee_cny"],
+                    "outstanding_advertising_fee_cny",
+                    non_negative=True,
+                ),
+            }
+            for row in withdrawals
+            if _money_decimal(row["outstanding_advertising_fee_cny"], "outstanding", non_negative=True) > Decimal("0")
+        ]
+        if not debts or not payments:
+            return
+        debts.sort(key=lambda item: (item["withdrawnAt"], item["recordId"]))
+        with self.connection:
+            for payment in payments:
+                payment_id = str(payment["payment_id"])
+                payment_amount = _money_decimal(payment["amount_cny"], "payment amount", positive=True)
+                applied = self._payment_applied_amount(payment_id)
+                remaining_payment = payment_amount - applied
+                if remaining_payment <= Decimal("0"):
+                    continue
+                paid_at = str(payment["paid_at"])
+                for debt in debts:
+                    if remaining_payment <= Decimal("0"):
+                        break
+                    if debt["remaining"] <= Decimal("0"):
+                        continue
+                    # A credit cannot settle a withdrawal that happened after
+                    # the credit; that would be a temporal accounting error.
+                    if str(debt["withdrawnAt"]) > paid_at:
+                        continue
+                    allocation = min(remaining_payment, debt["remaining"]).quantize(Decimal("0.01"))
+                    if allocation <= Decimal("0"):
+                        continue
+                    allocation_id = stable_event_hash(
+                        alias,
+                        "advertising-debt-allocation",
+                        {"paymentId": payment_id, "withdrawalRecordId": debt["recordId"]},
+                    )
+                    # Idempotent retries must not subtract an allocation that
+                    # is already present.  Check before INSERT OR IGNORE so a
+                    # repeated reconciliation cannot over-apply a payment.
+                    existing_allocation = self.connection.execute(
+                        "SELECT amount_cny FROM advertising_debt_allocations "
+                        "WHERE allocation_id=?",
+                        (allocation_id,),
+                    ).fetchone()
+                    if existing_allocation is not None:
+                        continue
+                    self.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO advertising_debt_allocations(
+                            allocation_id, payment_id, withdrawal_record_id,
+                            amount_cny, allocated_at, evidence_json
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            allocation_id,
+                            payment_id,
+                            debt["recordId"],
+                            _money_text(allocation),
+                            normalize_iso(datetime.now(timezone.utc)),
+                            canonical_json(
+                                {
+                                    "method": "fifo",
+                                    "paymentPaidAt": paid_at,
+                                    "withdrawalAt": debt["withdrawnAt"],
+                                }
+                            ),
+                        ),
+                    )
+                    actual = allocation
+                    remaining_payment -= actual
+                    debt["remaining"] = max(Decimal("0"), debt["remaining"] - actual)
 
     def acquire_lock(
         self,
@@ -3597,6 +3470,8 @@ def _money_decimal(
     positive: bool = False,
     non_negative: bool = False,
 ) -> Decimal:
+    """Parse a finite monetary value and normalize it to cents."""
+
     try:
         amount = value if isinstance(value, Decimal) else Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
@@ -3611,56 +3486,23 @@ def _money_decimal(
 
 
 def _money_value_supplied(value: Any) -> bool:
-    return value is not None and (not isinstance(value, str) or bool(value.strip()))
+    """Return whether a caller supplied a monetary fact rather than omitting it.
+
+    Empty strings are treated like ``None`` because they are what an optional
+    CLI/API field commonly becomes after form decoding.  Numeric zero remains
+    supplied and therefore means an explicit zero, not an unknown amount.
+    """
+
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    return True
 
 
 def _money_text(value: Any) -> str:
-    return format(_money_decimal(value, "money"), "f")
-
-
-def _withdrawal_cutover_context(
-    cutover: date | str | None,
-    financial_timezone: str | ZoneInfo | None,
-) -> tuple[date, ZoneInfo]:
-    if cutover is None or financial_timezone is None:
-        raise FinanceLedgerError(
-            "an authoritative advertising fee cutover and financial timezone are "
-            "required for every withdrawal record"
-        )
-    if isinstance(cutover, datetime):
-        raise FinanceLedgerError("advertising fee cutover must be an ISO calendar date")
-    if isinstance(cutover, date):
-        parsed_cutover = cutover
-    else:
-        try:
-            parsed_cutover = date.fromisoformat(str(cutover).strip())
-        except ValueError as exc:
-            raise FinanceLedgerError(
-                "advertising fee cutover must be an ISO calendar date"
-            ) from exc
-    if isinstance(financial_timezone, ZoneInfo):
-        parsed_timezone = financial_timezone
-    else:
-        try:
-            parsed_timezone = ZoneInfo(str(financial_timezone).strip())
-        except (ValueError, ZoneInfoNotFoundError) as exc:
-            raise FinanceLedgerError("financial timezone is invalid") from exc
-    return parsed_cutover, parsed_timezone
-
-
-def _sql_references_table(sql: str, table: str) -> bool:
-    identifier = re.escape(table)
-    quoted_identifier = rf'(?:{identifier}|"{identifier}"|`{identifier}`|\[{identifier}\])'
-    schema_identifier = r'(?:[A-Za-z_][A-Za-z0-9_$]*|"[^"]+"|`[^`]+`|\[[^\]]+\])'
-    return bool(
-        re.search(
-            rf"\b(?:from|join|update|into|references|on)\s+"
-            rf"(?:{schema_identifier}\s*\.\s*)?{quoted_identifier}"
-            rf"(?=\s|$|[,;)])",
-            sql,
-            flags=re.IGNORECASE,
-        )
-    )
+    amount = value if isinstance(value, Decimal) else Decimal(str(value))
+    return format(amount.quantize(Decimal("0.01")), "f")
 
 
 def _normalise_advertising_fee_status(
@@ -3668,14 +3510,19 @@ def _normalise_advertising_fee_status(
 ) -> str:
     if value is not None and str(value).strip():
         status = str(value).strip().lower()
-        status = {
+        aliases = {
+            "deducted": "deducted",
             "withheld": "deducted",
             "已扣": "deducted",
+            "not_deducted": "not_deducted",
             "not-deducted": "not_deducted",
             "none": "not_deducted",
             "未扣": "not_deducted",
+            "partial": "partial",
             "部分": "partial",
+            "unknown": "unknown",
             "未知": "unknown",
+            "settlement_balance": "settlement_balance",
             "settlement-balance": "settlement_balance",
             "settlement balance": "settlement_balance",
             "not_applicable": "settlement_balance",
@@ -3684,7 +3531,8 @@ def _normalise_advertising_fee_status(
             "n/a": "settlement_balance",
             "余额结算": "settlement_balance",
             "结算余额": "settlement_balance",
-        }.get(status, status)
+        }
+        status = aliases.get(status, status)
         if status not in _ADVERTISING_FEE_STATUSES:
             raise FinanceLedgerError(f"Unsupported advertising fee status: {value}")
         return status
