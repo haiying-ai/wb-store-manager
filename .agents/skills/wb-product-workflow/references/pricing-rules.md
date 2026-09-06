@@ -38,7 +38,7 @@ Use account-specific portal tariffs and actual settlement reports over generic A
 
 The current phone model is owner-profit accounting for WB FBS smartphones under the Hong Kong seller account.
 
-Active policy ID: `phone-hk-fbs-20260828-v5`
+Active policy ID: `phone-hk-fbs-20260906-v6`
 
 Canonical machine-readable source: `config/pricing/active_phone_pricing_policy.json`.
 
@@ -54,21 +54,22 @@ Variable costs based on buyer-paid price:
 
 - WB FBS smartphone commission: 15%
 - managed-operations commission: 2%
-- advertising-and-return combined pool: 3%
+- return-loss reserve: 2%
+- promotion reserve: 3%
 - payment/withdrawal reserve: 0.8%
-- total variable rate: 20.8%
-- retained-price factor: 79.2% (`0.792`)
+- total variable rate: 22.8%
+- retained-price factor: 77.2% (`0.772`)
 
 Fixed cost:
 
-- 12 CNY per unit, represented as 138 RUB at the template rate of 11.5 RUB/CNY.
+- freight: 12 CNY per unit, represented as 138 RUB at the template rate of 11.5 RUB/CNY.
 
-Advertising and return allocation:
+Promotion and return-loss allocation:
 
-- do not display or calculate a separate return-risk percentage line;
-- every returned/cancelled order consumes the actual signed return-logistics charge read from its WB finance rows; never assume 8 or 16 CNY;
-- the remaining pool is the advertising expense;
-- deduct the combined 3% pool once only: never add the same 8 CNY return logistics again outside the pool or inside fixed operations.
+- reserve 2% of buyer-paid price for return loss and 3% for promotion as separate planning lines;
+- read actual return logistics from WB finance rows for reconciliation; never assume a fixed 8 or 16 CNY charge;
+- do not deduct actual return logistics a second time from planning profit after the 2% return-loss reserve has already been included;
+- report any difference between the 2% reserve and actual return cost as reconciliation variance.
 
 Explicit exclusions:
 
@@ -78,15 +79,15 @@ Explicit exclusions:
 
 Profit target:
 
-- 80 CNY per unit for the product owner;
+- at least 100 CNY per unit for the product owner;
 - the 2% managed-operations commission is separately retained as operator service revenue.
 
 Final phone equations:
 
-- `ownerNetProfitCny = buyerPriceCny * 0.792 - purchaseCostCny - 12`
-- `minimumBuyerPriceCny = (purchaseCostCny + 12 + 80) / 0.792`
-- with the current planned 40% WB discount: `wbUploadPriceCny = ceil(minimumBuyerPriceCny / 0.60)`
+- `ownerNetProfitCny = buyerPriceCny * 0.772 - purchaseCostCny - 12`
+- `minimumBuyerPriceCny = (purchaseCostCny + 12 + 100) / 0.772`
+- current direct-price strategy: `wbUploadPriceCny = ceil(minimumBuyerPriceCny)` and `discountPercent = 0`
 
 The 15% smartphone commission took effect in the confirmed 2026-07-22 repricing plan and supersedes the 5% / 0.892 policy from 2026-07-19. Recalibrate these values from live commission, settlement, advertising, return, and logistics data by publishing a new versioned policy file; never edit historical policy evidence in place.
 
-The 2026-08-28 v5 allocation keeps advertising and returns in one 3% pool. Actual WB finance rows determine the return/cancellation logistics charge; the remainder of the pool is advertising provision. There is no separate return-risk line, fixed 8/16 CNY assumption, or extra logistics deduction outside the pool. Total variable rate remains 20.8%, and the retained-price factor remains 0.792, so this evidence rule does not itself require a live price change. Actual order-profit reporting is governed separately by `config/finance/active_phone_financial_reporting_policy.json`.
+The 2026-09-06 v6 policy supersedes v5. It separates a 2% return-loss reserve from the 3% promotion reserve, retains the 2% managed-operations commission, 15% WB commission, 0.8% payment/withdrawal reserve, and 12 CNY freight, and raises the owner's minimum profit target to 100 CNY. Total variable rate is 22.8% and the retained-price factor is 0.772. This policy activation does not itself authorize a live price write; refresh purchase costs, benchmark A, and both stores, then obtain joint approval before repricing.

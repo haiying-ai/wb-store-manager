@@ -211,6 +211,27 @@ def load_active_phone_online_price_formula(
         raise PricingPolicyError(
             f"Online-price formula must use direct integer price and zero discount: {policy_id}"
         )
+    if formula.get("buyerPriceCny") != "max(minimumSafePriceCny, preRepriceBuyerPriceCny)":
+        raise PricingPolicyError(
+            f"Online-price formula must use the approved cost/current-price rule: {policy_id}"
+        )
+    if formula.get("benchmarkAUsage") != "comparison evidence only; never overrides the approved cost/current-price formula":
+        raise PricingPolicyError(
+            f"Benchmark A must be evidence-only in the online-price formula: {policy_id}"
+        )
+    financial_gate = data.get("financialGate") or {}
+    try:
+        retained = float(financial_gate.get("retainedPriceFactor"))
+        fixed_cost = float(financial_gate.get("fixedCostCny"))
+        target_profit = float(financial_gate.get("targetOwnerProfitCny"))
+    except (TypeError, ValueError) as exc:
+        raise PricingPolicyError(
+            f"Online-price formula has an invalid financial gate: {policy_id}"
+        ) from exc
+    if not 0 < retained <= 1 or fixed_cost < 0 or target_profit < 0:
+        raise PricingPolicyError(
+            f"Online-price formula has an invalid financial gate: {policy_id}"
+        )
     model_rows = data.get("modelPriceTable") or []
     if not isinstance(model_rows, list) or not model_rows:
         raise PricingPolicyError(f"Online-price formula has no model price table: {policy_id}")
@@ -218,23 +239,89 @@ def load_active_phone_online_price_formula(
     for row in model_rows:
         key = str(row.get("modelCapacity") or "").strip()
         benchmark = row.get("benchmarkAPriceCny")
+        purchase_cost = row.get("purchaseCostCny")
+        row_fixed_cost = row.get("fixedCostCny")
+        pre_reprice = row.get("preRepriceBuyerPriceCny")
         floor = row.get("minimumSafePriceCny")
         calibrated = row.get("calibratedFormulaPriceCny")
         source = row.get("priceSource")
         if not key or key in model_prices:
             raise PricingPolicyError(f"Duplicate or missing model-capacity key in {policy_id}: {key}")
-        if not all(isinstance(value, int) and value > 0 for value in (benchmark, floor, calibrated)):
+        if not isinstance(purchase_cost, (int, float)) or purchase_cost <= 0:
+            raise PricingPolicyError(f"Invalid purchase cost for {key} in {policy_id}")
+        if not isinstance(row_fixed_cost, (int, float)) or not math.isclose(
+            float(row_fixed_cost), fixed_cost, abs_tol=1e-9
+        ):
+            raise PricingPolicyError(f"Row fixed cost does not match the financial gate for {key}")
+        if not all(isinstance(value, int) and value > 0 for value in (pre_reprice, floor, calibrated)):
             raise PricingPolicyError(f"Invalid integer price for {key} in {policy_id}")
-        if calibrated != max(benchmark, floor):
-            raise PricingPolicyError(f"Calibrated price does not equal max(A, floor) for {key}")
-        expected_source = "A_PRICE" if benchmark >= floor else "PROFIT_FLOOR"
+        expected_floor = math.ceil(
+            (float(purchase_cost) + fixed_cost + target_profit) / retained
+        )
+        if floor != expected_floor:
+            raise PricingPolicyError(f"Minimum safe price does not match the cost formula for {key}")
+        if calibrated != max(floor, pre_reprice):
+            raise PricingPolicyError(
+                f"Calibrated price does not equal max(floor, pre-reprice price) for {key}"
+            )
+        expected_source = "PROFIT_FLOOR" if floor >= pre_reprice else "CURRENT_PRICE"
         if source != expected_source:
             raise PricingPolicyError(f"Invalid price source for {key} in {policy_id}")
+        owner_profit = calibrated * retained - float(purchase_cost) - fixed_cost
+        if owner_profit + 1e-9 < target_profit:
+            raise PricingPolicyError(f"Calibrated price is below the owner-profit floor for {key}")
+        if row.get("benchmarkRole") != "EVIDENCE_ONLY":
+            raise PricingPolicyError(f"Benchmark A is not marked evidence-only for {key}")
+        candidates = row.get("benchmarkCandidatePricesCny")
+        if not isinstance(candidates, list) or any(
+            not isinstance(value, int) or value <= 0 for value in candidates
+        ):
+            raise PricingPolicyError(f"Invalid benchmark evidence for {key} in {policy_id}")
+        if benchmark is not None and (
+            not isinstance(benchmark, int)
+            or benchmark <= 0
+            or benchmark not in candidates
+        ):
+            raise PricingPolicyError(f"Invalid benchmark summary for {key} in {policy_id}")
         model_prices[key] = calibrated
+    validation = data.get("validation") or {}
+    if validation.get("status") != "two_store_uploaded_verified":
+        raise PricingPolicyError(f"Online-price formula lacks verified two-store readback: {policy_id}")
+    if validation.get("modelCapacityCount") != len(model_prices):
+        raise PricingPolicyError(f"Online-price formula model count is inconsistent: {policy_id}")
+    validation_stores = validation.get("stores") or {}
+    declared_stores = data.get("stores") or []
+    if set(validation_stores) != set(declared_stores):
+        raise PricingPolicyError(f"Online-price formula validation store scope is inconsistent: {policy_id}")
+    planned_total = 0
+    for alias in declared_stores:
+        store_validation = validation_stores.get(alias) or {}
+        planned = store_validation.get("plannedSkuCount")
+        if not isinstance(planned, int) or planned <= 0:
+            raise PricingPolicyError(f"Invalid planned SKU count for {alias} in {policy_id}")
+        for name in (
+            "uploadReadbackCount",
+            "independentReadbackCount",
+            "planMatchCount",
+            "discountZeroCount",
+        ):
+            if store_validation.get(name) != planned:
+                raise PricingPolicyError(
+                    f"Incomplete {name} validation for {alias} in {policy_id}"
+                )
+        if store_validation.get("mismatchCount") != 0:
+            raise PricingPolicyError(f"Price mismatches remain for {alias} in {policy_id}")
+        planned_total += planned
+    if validation.get("totalSkuCount") != planned_total:
+        raise PricingPolicyError(f"Online-price formula total SKU count is inconsistent: {policy_id}")
     governance = data.get("governance") or {}
     required_flags = (
         "currentPriceIsTimeBound",
+        "refreshPurchaseCostsBeforeEveryReprice",
         "refreshBenchmarkBeforeEveryReprice",
+        "benchmarkAIsEvidenceOnly",
+        "benchmarkACannotOverrideFormula",
+        "noPriceDecreaseFromPreRepriceSnapshot",
         "preflightBothStores",
         "requireExplicitJointApprovalBeforeLiveWrite",
         "readBackBothStoresAfterLiveWrite",
