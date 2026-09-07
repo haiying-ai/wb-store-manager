@@ -21,6 +21,7 @@ from wb_manager.finance_service import (
     _campaign_status_from_known_shapes,
 )
 from wb_manager.finance_sources import SourceResult
+from wb_manager.finance_periods import FinancePeriod
 from wb_manager.finance_sync import _balance_amounts
 
 
@@ -300,6 +301,7 @@ class FakeSources:
                     "storeAlias": self.alias,
                     "eventType": "advertising_expense",
                     "pnl": True,
+                    "paymentType": "Balance",
                     "amount": "20",
                     "advertId": 100,
                     "occurredAt": "2026-08-21T10:00:00+03:00",
@@ -613,9 +615,44 @@ def test_existing_report_result_requires_complete_verified_artifacts(
             "workbook",
             "verification",
             "previews",
+            "deliveryWorkbook",
         }
     else:
         assert result["artifacts"] is None
+    service.close()
+
+
+def test_idempotent_existing_report_exposes_readable_copy_without_rebuild(tmp_path, monkeypatch):
+    service = _service(
+        tmp_path, monkeypatch, datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI)
+    )
+    report_id = "existing-readable-report"
+    paths = service._report_artifact_paths("weekly", "2026", report_id)
+    _write_fake_complete_report_artifacts(paths, report_id)
+    immutable_bytes = paths["workbook"].read_bytes()
+    report = {
+        "report_id": report_id,
+        "report_key": "weekly:2026-08-17:2026-08-23",
+        "report_version": "v1",
+        "report_type": "weekly",
+        "report_status": "FINAL",
+        "period_start": "2026-08-17T00:00:00+03:00",
+        "metadata": {"period": {"from": "2026-08-17", "to": "2026-08-23"}},
+        "orders": [],
+    }
+
+    def forbidden_rebuild(*_args, **_kwargs):
+        pytest.fail("An idempotent hit must not rebuild the verified workbook")
+
+    monkeypatch.setattr("wb_manager.finance_service.write_report_artifacts", forbidden_rebuild)
+    first = service._existing_report_result(report)
+    second = service._existing_report_result(report)
+    delivery = Path(first["artifacts"]["deliveryWorkbook"])
+    assert first["idempotent"] is True
+    assert second["artifacts"]["deliveryWorkbook"] == str(delivery)
+    assert delivery.name == "WB双店财务周报_2026-08-17至2026-08-23.xlsx"
+    assert delivery.read_bytes() == immutable_bytes
+    assert paths["workbook"].read_bytes() == immutable_bytes
     service.close()
 
 
@@ -626,11 +663,9 @@ def test_write_report_rebuilds_partial_artifact_set(tmp_path, monkeypatch):
         datetime(2026, 8, 28, 9, 30, tzinfo=SHANGHAI),
     )
     report_id = "partial-report"
-    period = type(
-        "TestPeriod",
-        (),
-        {"kind": "weekly", "start": datetime(2026, 8, 17).date()},
-    )()
+    period = FinancePeriod(
+        "weekly", datetime(2026, 8, 17).date(), datetime(2026, 8, 23).date()
+    )
     paths = service._report_artifact_paths("weekly", "2026", report_id)
     paths["json"].parent.mkdir(parents=True, exist_ok=True)
     paths["json"].write_text("stale", encoding="utf-8")
@@ -669,8 +704,10 @@ def test_write_report_rebuilds_partial_artifact_set(tmp_path, monkeypatch):
         "workbook",
         "verification",
         "previews",
+        "deliveryWorkbook",
     }
     assert paths["workbook"].read_bytes() == b"rebuilt"
+    assert Path(result["deliveryWorkbook"]).read_bytes() == b"rebuilt"
     service.close()
 
 

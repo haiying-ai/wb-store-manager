@@ -29,6 +29,7 @@ const DATE_FMT = "yyyy-mm-dd";
 const DATETIME_FMT = "yyyy-mm-dd hh:mm";
 const MONEY_FMT = "#,##0.00;[Red](#,##0.00);-";
 const HEADER_CACHE = new Map();
+const BRIDGE_SCHEMA_VERSION = 2;
 const LANDING_SECTION_TITLES = [
   "结算余额广告储备与历史欠费对账",
   "广告欠费/提现对账",
@@ -51,17 +52,21 @@ const lockPath = `${canonical}.lock`;
 const sidecarPath = `${canonical}.bridge.json`;
 let lockHandle = null;
 
-try {
-  lockHandle = await acquireLock(lockPath);
-  const result = await run();
-  console.log(JSON.stringify(result, null, 2));
-} catch (error) {
-  console.error(`canonical workbook sync failed: ${error?.stack || error}`);
-  process.exitCode = 1;
-} finally {
-  if (lockHandle) {
-    try { await lockHandle.close(); } catch { /* best effort */ }
-    try { await fs.unlink(lockPath); } catch { /* best effort */ }
+const invokedAsMain = Boolean(process.argv[1])
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsMain) {
+  try {
+    lockHandle = await acquireLock(lockPath);
+    const result = await run();
+    console.log(JSON.stringify(result, null, 2));
+  } catch (error) {
+    console.error(`canonical workbook sync failed: ${error?.stack || error}`);
+    process.exitCode = 1;
+  } finally {
+    if (lockHandle) {
+      try { await lockHandle.close(); } catch { /* best effort */ }
+      try { await fs.unlink(lockPath); } catch { /* best effort */ }
+    }
   }
 }
 
@@ -98,7 +103,7 @@ async function run() {
   await ensureFile(canonical);
   const canonicalBefore = await statSnapshot(canonical);
   const priorState = await readJson(sidecarPath, null);
-  if (priorState?.schemaVersion === 1
+  if (priorState?.schemaVersion === BRIDGE_SCHEMA_VERSION
     && priorState?.status === "PASS"
     && priorState.canonical === path.resolve(canonical)
     && priorState.inputFingerprint === inputFingerprint
@@ -151,6 +156,7 @@ async function run() {
   // "current view" and must be refreshed when a later bootstrap corrects an
   // aggregate (for example a newly matched return-logistics row).
   let latestBootstrap = null;
+  const latestWeekly = selectLatestWeeklyReport(reports);
 
   // Reports are processed oldest-first so a later RESTATED snapshot is
   // appended after its original candidate/final snapshot.
@@ -240,7 +246,10 @@ async function run() {
   const dashboardRefresh = latestBootstrap
     ? refreshDashboardFromBootstrap(workbook, latestBootstrap, stores)
     : null;
-  updateLandingNote(workbook, appendedReports);
+  const weeklyDashboardRefresh = latestWeekly
+    ? refreshDashboardFromWeekly(workbook, latestWeekly, stores)
+    : null;
+  updateLandingNote(workbook, [latestWeekly, latestBootstrap].filter(Boolean));
   applyHistoryDateFormats(sheets.weekly, sheets.monthly);
   mark("appendAndRefresh");
 
@@ -249,7 +258,7 @@ async function run() {
   const temp = `${canonical}.tmp-${process.pid}-${stamp}`;
   const exported = await SpreadsheetFile.exportXlsx(workbook);
   await exported.save(temp);
-  await verifyExport(temp, appendedReports, counters, latestBootstrap, stores);
+  await verifyExport(temp, appendedReports, counters, latestBootstrap, latestWeekly, stores);
   mark("xlsxExportAndVerify");
   await replaceWithBackup(temp, canonical);
 
@@ -264,12 +273,13 @@ async function run() {
     reportsAppended: appendedReports.length,
     rowsAdded: counters,
     dashboardRefresh,
+    weeklyDashboardRefresh,
     enabledStores: stores.map((s) => s.alias),
   };
   const timing = timingSummary(startedAtMs, timingsMs);
   result.timing = timing;
   await writeJsonAtomic(sidecarPath, {
-    schemaVersion: 1,
+    schemaVersion: BRIDGE_SCHEMA_VERSION,
     status: "PASS",
     inputFingerprint,
     reportIds: reports.map((report) => String(report.reportId || "")).filter(Boolean),
@@ -689,6 +699,134 @@ function compareGeneratedAt(left, right) {
   return String(left?.reportId || "").localeCompare(String(right?.reportId || ""));
 }
 
+function compareReportPeriodThenGenerated(left, right) {
+  const lp = left?.period || {};
+  const rp = right?.period || {};
+  const period = `${dateText(lp.to)}|${dateText(lp.from)}`.localeCompare(
+    `${dateText(rp.to)}|${dateText(rp.from)}`,
+  );
+  return period || compareGeneratedAt(left, right);
+}
+
+function selectLatestWeeklyReport(reports) {
+  return (reports || [])
+    .filter((report) => String(report?.kind || "") === "weekly" && !report?.period?.cumulative)
+    .reduce(
+      (latest, report) => (!latest || compareReportPeriodThenGenerated(report, latest) > 0 ? report : latest),
+      null,
+    );
+}
+
+function firstSummaryNumber(summary, ...keys) {
+  for (const key of keys) {
+    if (summary?.[key] !== null && summary?.[key] !== undefined && summary?.[key] !== "") {
+      return money(summary[key]);
+    }
+  }
+  return null;
+}
+
+function sumSummaryRows(rows, ...keys) {
+  return money((rows || []).reduce((sum, row) => sum + Number(firstSummaryNumber(row, ...keys) || 0), 0));
+}
+
+function buildWeeklyDashboardSnapshot(report, stores = []) {
+  if (!report || String(report.kind || "") !== "weekly") return null;
+  const period = report.period || {};
+  const from = dateText(period.from);
+  const to = dateText(period.to);
+  const reportStores = new Map(
+    (Array.isArray(report.stores) ? report.stores : [])
+      .filter((item) => item?.storeAlias)
+      .map((item) => [String(item.storeAlias), item]),
+  );
+  const totals = report.totals || {};
+  reportStores.set("ALL", { ...totals, storeAlias: "ALL" });
+  const displayNames = new Map(
+    (stores || []).map((store) => [String(store.alias || ""), String(store.name || store.alias || "")]),
+  );
+  if (!displayNames.get("owner-store") || displayNames.get("owner-store") === "owner-store") displayNames.set("owner-store", "老店");
+  if (!displayNames.get("new-store") || displayNames.get("new-store") === "new-store") displayNames.set("new-store", "新店");
+  const aliases = [
+    ...(stores || []).map((store) => String(store.alias || "")).filter(Boolean),
+    ...(Array.isArray(report.stores) ? report.stores : []).map((store) => String(store?.storeAlias || "")).filter(Boolean),
+    "ALL",
+  ].filter((alias, index, list) => list.indexOf(alias) === index);
+  const storeRows = aliases.map((alias) => {
+    const summary = reportStores.get(alias) || {};
+    return [
+      alias,
+      alias === "ALL" ? "合计" : (displayNames.get(alias) || alias),
+      firstSummaryNumber(summary, "orderCount"),
+      firstSummaryNumber(summary, "confirmedOrderCount", "completedCount"),
+      firstSummaryNumber(summary, "salesAmountGCny"),
+      firstSummaryNumber(summary, "actualCommissionCCny", "wbCommissionCny"),
+      firstSummaryNumber(summary, "forPayCny"),
+      firstSummaryNumber(summary, "combinedPoolCny", "combinedAdvertisingAndReturnPoolCny"),
+      firstSummaryNumber(summary, "returnLogisticsCny"),
+      firstSummaryNumber(summary, "advertisingProvisionCny"),
+      firstSummaryNumber(summary, "ruleWithdrawableCny"),
+    ];
+  });
+  const orders = Array.isArray(report.orders) ? report.orders : [];
+  const recognitionRows = aliases.map((alias) => {
+    const rows = alias === "ALL" ? orders : orders.filter((order) => String(order?.storeAlias || "") === alias);
+    const outcomeCount = (outcome) => rows.filter((order) => String(order?.outcome || "").toLowerCase() === outcome).length;
+    return [
+      alias === "ALL" ? "合计" : (displayNames.get(alias) || alias),
+      rows.length,
+      outcomeCount("completed"),
+      outcomeCount("returned"),
+      outcomeCount("corrected"),
+      rows.filter((order) => String(order?.evidenceStatus || "").toUpperCase() !== "COMPLETE").length,
+    ];
+  });
+  const created = orders.filter((order) => {
+    const day = dateText(order?.orderCreatedAt);
+    return day && day >= from && day <= to;
+  });
+  const createdComplete = created.filter((order) => String(order?.evidenceStatus || "").toUpperCase() === "COMPLETE");
+  const account = sumSummaryRows(createdComplete, "accountIncrementCny", "forPayCny");
+  const pool = sumSummaryRows(createdComplete, "combinedPoolCny", "combinedAdvertisingAndReturnPoolCny");
+  const returns = sumSummaryRows(createdComplete, "returnLogisticsCny");
+  const accountIncrement = firstSummaryNumber(totals, "accountIncrementCny", "forPayCny");
+  const forPay = firstSummaryNumber(totals, "forPayCny");
+  return {
+    reportId: String(report.reportId || ""),
+    status: String(report.status || "PENDING_DATA"),
+    generatedAt: report.generatedAt || null,
+    sourcePath: report.__sourcePath || "",
+    from,
+    to,
+    coreValues: [
+      firstSummaryNumber(totals, "orderCount"),
+      firstSummaryNumber(totals, "confirmedOrderCount", "completedCount"),
+      firstSummaryNumber(totals, "salesAmountGCny"),
+      firstSummaryNumber(totals, "actualCommissionCCny", "wbCommissionCny"),
+      forPay,
+      accountIncrement,
+      firstSummaryNumber(totals, "forwardOperationsCny"),
+      firstSummaryNumber(totals, "managedOperationsCny"),
+      firstSummaryNumber(totals, "combinedPoolCny", "combinedAdvertisingAndReturnPoolCny"),
+      firstSummaryNumber(totals, "returnLogisticsCny"),
+      firstSummaryNumber(totals, "advertisingProvisionCny"),
+      firstSummaryNumber(totals, "ruleWithdrawableCny"),
+      firstSummaryNumber(totals, "strictOwnerProfitCny", "ownerProfitCny"),
+      accountIncrement == null || forPay == null ? null : money(accountIncrement - forPay),
+    ],
+    storeRows,
+    recognitionRows,
+    createdCohortValues: [
+      created.length,
+      createdComplete.length,
+      sumSummaryRows(createdComplete, "salesAmountGCny"),
+      sumSummaryRows(createdComplete, "actualCommissionCCny", "wbCommissionCny"),
+      Math.max(0, money(pool - returns)),
+      money(account - pool),
+    ],
+  };
+}
+
 // The landing sheet contains several independently maintained blocks.  Never
 // calculate an append row by counting non-empty cells in a broad range: later
 // blocks (for example the cumulative snapshot) would be counted as if they
@@ -759,6 +897,72 @@ function writeLandingSectionHeader(sheet, titleRow, width, title, headers, palet
 
 function collectSectionRows(sheet, token, width) {
   return sectionWindows(sheet, token, width).flatMap((window) => window.values || []);
+}
+
+/**
+ * Refresh every mutable weekly landing-sheet value from one immutable report
+ * snapshot. The detail sheets are append-only and can contain several
+ * versions of the same order, so summing them is not a valid latest-week view.
+ */
+function refreshDashboardFromWeekly(workbook, report, stores) {
+  const snapshot = buildWeeklyDashboardSnapshot(report, stores);
+  if (!snapshot?.from || !snapshot?.to) {
+    return { status: "NO_WEEKLY_PERIOD", reportId: String(report?.reportId || "") };
+  }
+  const sheet = workbook.worksheets.getItem("周报汇总");
+  sheet.getRange("B3").values = [[dateOnly(snapshot.from)]];
+  sheet.getRange("D3").values = [[dateOnly(snapshot.to)]];
+  sheet.getRange("B3").format.numberFormat = DATE_FMT;
+  sheet.getRange("D3").format.numberFormat = DATE_FMT;
+
+  try {
+    const policy = workbook.worksheets.getItem("参数与口径");
+    if (String(policy.getRange("A9").values?.[0]?.[0] || "").includes("上周起始")) {
+      policy.getRange("B9").values = [[dateOnly(snapshot.from)]];
+      policy.getRange("B9").format.numberFormat = DATE_FMT;
+    }
+    if (String(policy.getRange("A10").values?.[0]?.[0] || "").includes("上周结束")) {
+      policy.getRange("B10").values = [[dateOnly(snapshot.to)]];
+      policy.getRange("B10").format.numberFormat = DATE_FMT;
+    }
+  } catch { /* parameter mirror is supplementary */ }
+
+  sheet.getRange("B8:B19").values = snapshot.coreValues.slice(0, 12).map((value) => [value]);
+  sheet.getRange("B20:B21").values = [[null], [null]];
+  sheet.getRange("B22:B23").values = snapshot.coreValues.slice(12, 14).map((value) => [value]);
+  if (snapshot.storeRows.length === 3) sheet.getRange("F8:P10").values = snapshot.storeRows;
+
+  try { sheet.getRange("F20:K20").merge(); } catch { /* already merged */ }
+  sheet.getRange("F20").values = [["本期订单认列构成（最新周报快照）"]];
+  sheet.getRange("F21:K21").values = [["店铺", "报告订单", "完成认列", "退货认列", "更正认列", "开放证据"]];
+  if (snapshot.recognitionRows.length === 3) sheet.getRange("F22:K24").values = snapshot.recognitionRows;
+  try { sheet.getRange("F25:K25").merge(); } catch { /* already merged */ }
+  sheet.getRange("F25").values = [["本区直接取最新周报版本；报告可能包含本周认列的历史订单更正，不按 append-only 订单明细重复求和。"]];
+
+  try { sheet.getRange("A27:D27").merge(); } catch { /* already merged */ }
+  sheet.getRange("A27").values = [["本期新建订单队列（按订单创建日）"]];
+  sheet.getRange("B29:B34").values = snapshot.createdCohortValues.map((value) => [value]);
+  sheet.getRange("D29").values = [["最新周报内、订单创建日位于本期的去重订单"]];
+
+  const previous = String(sheet.getRange("A2").values?.[0]?.[0] || "");
+  let subtitle = previous
+    .replace(/\n最近自动增补：[\s\S]*$/, "")
+    .replace(/周报快照为\s*\d{4}-\d{2}-\d{2}[—-]\d{4}-\d{2}-\d{2}/, `周报快照为 ${snapshot.from}—${snapshot.to}`)
+    .replace(/上周\s*\d{4}-\d{2}-\d{2}[—-]\d{4}-\d{2}-\d{2}/, `上周 ${snapshot.from}—${snapshot.to}`);
+  if (!subtitle.includes(`${snapshot.from}—${snapshot.to}`)) {
+    subtitle = `${subtitle}\n当前周报快照：${snapshot.from}—${snapshot.to}`;
+  }
+  sheet.getRange("A2").values = [[subtitle]];
+  sheet.getRange("H3").values = [[
+    `模型状态：最新周报 ${snapshot.status}；reportId=${snapshot.reportId}；开放项与来源状态见“周报历史/来源校验”，不把缺失证据当作 0。`,
+  ]];
+  return {
+    status: "REFRESHED",
+    reportId: snapshot.reportId,
+    sourcePath: snapshot.sourcePath,
+    from: snapshot.from,
+    to: snapshot.to,
+  };
 }
 
 /**
@@ -1214,12 +1418,16 @@ function updateLandingNote(workbook, reports) {
   try {
     const sheet = workbook.worksheets.getItem("周报汇总");
     const previous = String(sheet.getRange("A2").values?.[0]?.[0] || "");
-    const note = `\n最近自动增补：${reports.map((r) => `${r.kind} ${r.from || ""}—${r.to || ""} ${r.status}`).join("；")}`;
-    if (!previous.includes("最近自动增补：")) sheet.getRange("A2").values = [[previous + note]];
+    const note = `\n最近自动增补：${reports.map((r) => {
+      const period = r.period || {};
+      return `${r.kind} ${r.from || period.from || ""}—${r.to || period.to || ""} ${r.status}`;
+    }).join("；")}`;
+    const base = previous.replace(/\n最近自动增补：[\s\S]*$/, "");
+    sheet.getRange("A2").values = [[base + note]];
   } catch { /* landing text must not block append */ }
 }
 
-async function verifyExport(file, reports, counters, latestBootstrap = null, stores = []) {
+async function verifyExport(file, reports, counters, latestBootstrap = null, latestWeekly = null, stores = []) {
   const wb = await SpreadsheetFile.importXlsx(await FileBlob.load(file));
   const errors = await wb.inspect({ kind: "match", searchTerm: "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A|#NUM!|#NULL!|#SPILL!|#CALC!", options: { useRegex: true, maxResults: 300 }, summary: "canonical workbook sync formula scan" });
   if ((errors.ndjson || "").includes('"kind":"match"')) throw new Error(`formula error scan failed: ${errors.ndjson}`);
@@ -1236,6 +1444,34 @@ async function verifyExport(file, reports, counters, latestBootstrap = null, sto
   verifySourceValidationLayout(wb);
   verifyDashboardSnapshotLayout(wb, stores);
   if (latestBootstrap) verifyDashboardBootstrap(wb, latestBootstrap);
+  if (latestWeekly) verifyDashboardWeekly(wb, latestWeekly, stores);
+}
+
+function verifyDashboardWeekly(workbook, report, stores = []) {
+  const snapshot = buildWeeklyDashboardSnapshot(report, stores);
+  const sheet = workbook.worksheets.getItem("周报汇总");
+  if (dateText(sheet.getRange("B3").values?.[0]?.[0]) !== snapshot.from) {
+    throw new Error(`dashboard weekly start mismatch: expected ${snapshot.from}`);
+  }
+  if (dateText(sheet.getRange("D3").values?.[0]?.[0]) !== snapshot.to) {
+    throw new Error(`dashboard weekly end mismatch: expected ${snapshot.to}`);
+  }
+  const actualCore = [
+    ...(sheet.getRange("B8:B19").values || []).flat(),
+    ...(sheet.getRange("B22:B23").values || []).flat(),
+  ];
+  for (let index = 0; index < snapshot.coreValues.length; index += 1) {
+    const expected = snapshot.coreValues[index];
+    const actual = actualCore[index];
+    if (expected === null || expected === undefined || expected === "") continue;
+    if (Math.abs(Number(actual) - Number(expected)) > 0.011) {
+      throw new Error(`dashboard weekly metric mismatch at index ${index}: ${actual} != ${expected}`);
+    }
+  }
+  const reportId = String(report?.reportId || "");
+  if (!String(sheet.getRange("H3").values?.[0]?.[0] || "").includes(reportId)) {
+    throw new Error(`dashboard weekly report ID missing: ${reportId}`);
+  }
 }
 
 function verifySourceValidationLayout(workbook) {
@@ -1494,7 +1730,7 @@ function stableStringify(value) {
 }
 function buildInputFingerprint({ reports, registry, cashEvents, debtSnapshot }) {
   const input = {
-    schemaVersion: 1,
+    schemaVersion: BRIDGE_SCHEMA_VERSION,
     reports: (reports || []).map((report) => ({
       // __sourcePath identifies the related immutable source artifact; the
       // full parsed report catches same-ID corrections even when its mtime is
@@ -1539,3 +1775,5 @@ function timingSummary(startedAtMs, timingsMs) {
   };
 }
 function safeStamp(d) { return d.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14); }
+
+export { buildWeeklyDashboardSnapshot, selectLatestWeeklyReport };

@@ -13,6 +13,11 @@ seller-specific calculation constants or price equations.
 
 ## Operating boundary and flow
 
+For running cumulative balances, cross-period refund reversals, fixed owner
+weekly/monthly templates or arbitrary cutoff reports, also read
+`owner-running-reporting.md`. It defines the signed-event owner-account layer
+and the distinction between confirmed balances and provisional estimates.
+
 Use the read-only `finance` flow for:
 
 `collect -> backfill -> reconcile -> calculate -> verify -> report -> archive`

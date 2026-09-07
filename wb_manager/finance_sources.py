@@ -5,7 +5,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import IntEnum
 from pathlib import Path
@@ -290,7 +290,7 @@ class FinanceSources:
                     False,
                     rows,
                     requests,
-                    f"Finance detail request failed with HTTP {status}",
+                    _finance_detail_failure_message(response, status),
                 )
             page_rows = _list_rows(_data(response))
             if page_rows is None:
@@ -697,7 +697,12 @@ def normalize_advertising_cost_events(
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for row in rows:
-        amount = _decimal_text(row.get("updSum"))
+        amount = (
+            _decimal_text(row.get("updSum"))
+            if row.get("updSum") not in (None, "")
+            else None
+        )
+        funding_class = classify_advertising_payment_type(row.get("paymentType"))
         identity = {
             "storeAlias": store_alias,
             "advertId": row.get("advertId"),
@@ -713,8 +718,10 @@ def normalize_advertising_cost_events(
                 "storeAlias": store_alias,
                 "eventType": "advertising_expense",
                 "source": "adv/v1/upd",
-                "pnl": True,
+                "pnl": funding_class == "seller_cash" and amount is not None,
                 "amount": amount,
+                "costFundingClass": funding_class,
+                "currency": row.get("currency"),
                 "advertId": row.get("advertId"),
                 "occurredAt": row.get("updTime"),
                 "paymentType": row.get("paymentType"),
@@ -722,6 +729,167 @@ def normalize_advertising_cost_events(
             }
         )
     return events
+
+
+def classify_advertising_payment_type(value: Any) -> str:
+    """Classify the evidenced payment source, never treating unknown as cash.
+
+    WB ``upd`` is expense history; ``payments`` is account-funding history.
+    Cashback and bonus consumption is a platform contribution, not a seller
+    cash expense. The caller must keep it visible outside the seller P&L.
+    """
+
+    normalized = str(value or "").strip().casefold().replace("ё", "е")
+    if normalized in {"баланс", "счет", "balance", "account", "cash"}:
+        return "seller_cash"
+    if normalized in {"кэшбэк", "кешбэк", "бонус", "бонусы", "cashback", "bonus", "bonuses"}:
+        return "platform_promo"
+    return "unknown"
+
+
+def _advertising_snapshot_key(event: Mapping[str, Any]) -> tuple[str, ...] | None:
+    raw = event.get("raw") if isinstance(event.get("raw"), Mapping) else event
+    store = str(event.get("storeAlias") or "").strip()
+    advert_id = _identifier(event.get("advertId") or raw.get("advertId"))
+    occurred = event.get("occurredAt") or raw.get("updTime")
+    payment_type = str(event.get("paymentType") or raw.get("paymentType") or "").strip()
+    amount_value = event.get("amount", raw.get("updSum"))
+    if not store or not advert_id or not occurred or not payment_type or amount_value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(occurred).replace("Z", "+00:00"))
+        amount = Decimal(str(amount_value))
+    except (ValueError, InvalidOperation):
+        return None
+    if parsed.tzinfo is None or not amount.is_finite():
+        return None
+    currency = str(event.get("currency") or raw.get("currency") or "").strip()
+    return (
+        store,
+        advert_id,
+        parsed.astimezone(timezone.utc).isoformat(),
+        _decimal_text(amount),
+        payment_type.casefold().replace("ё", "е"),
+        currency,
+    )
+
+
+def reconcile_advertising_cost_events(
+    *groups: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build a classified, deduplicated view without changing raw history.
+
+    A provisional ``updNum=0`` expense may later have a posted document number.
+    Only replace that provisional row when its complete business fingerprint
+    matches exactly one posted row. Different nonzero document numbers remain
+    distinct, even when every other field happens to match. Ambiguous matches
+    stay visible and are withheld from confirmed cash totals.
+    """
+
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for original in (item for group in groups for item in group):
+        event = dict(original)
+        event_id = str(event.get("eventId") or "").strip()
+        if not event_id:
+            event_id = _stable_hash("advertising_evidence_fallback", event)
+            event["eventId"] = event_id
+        unique.setdefault((str(event.get("storeAlias") or ""), event_id), event)
+
+    snapshots: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for event in unique.values():
+        if event.get("eventType") != "advertising_expense":
+            continue
+        key = _advertising_snapshot_key(event)
+        if key is not None:
+            snapshots.setdefault(key, []).append(event)
+
+    removed: set[tuple[str, str]] = set()
+    ambiguous_ids: set[tuple[str, str]] = set()
+    replacements: list[dict[str, Any]] = []
+    ambiguities: list[dict[str, Any]] = []
+    for key, events in snapshots.items():
+        provisional = []
+        posted = []
+        for event in events:
+            raw = event.get("raw") if isinstance(event.get("raw"), Mapping) else event
+            number = _identifier(raw.get("updNum"))
+            if number == "0":
+                provisional.append(event)
+            elif number:
+                posted.append(event)
+        if not provisional or not posted:
+            continue
+        if len(posted) == 1:
+            discarded_ids = [event["eventId"] for event in provisional]
+            removed.update((key[0], event_id) for event_id in discarded_ids)
+            replacements.append(
+                {"storeAlias": key[0], "advertId": key[1], "occurredAt": key[2],
+                 "amount": key[3], "paymentType": key[4], "currency": key[5],
+                 "retainedEventId": posted[0]["eventId"],
+                 "supersededEventIds": discarded_ids,
+                 "reason": "provisional_updNum_0_replaced_by_exact_posted_expense"}
+            )
+        else:
+            event_ids = [event["eventId"] for event in events]
+            ambiguous_ids.update((key[0], event_id) for event_id in event_ids)
+            ambiguities.append(
+                {"storeAlias": key[0], "advertId": key[1], "occurredAt": key[2],
+                 "eventIds": event_ids, "reason": "multiple_posted_matches_for_provisional_expense"}
+            )
+
+    events = []
+    cash_events = []
+    promo_events = []
+    unknown_events = []
+    by_store: dict[str, dict[str, Any]] = {}
+    for scoped_event_id, event in unique.items():
+        if scoped_event_id in removed:
+            continue
+        events.append(event)
+        if event.get("eventType") != "advertising_expense":
+            continue
+        raw = event.get("raw") if isinstance(event.get("raw"), Mapping) else event
+        funding_class = classify_advertising_payment_type(event.get("paymentType") or raw.get("paymentType"))
+        amount_value = event.get("amount", raw.get("updSum"))
+        try:
+            amount = Decimal(str(amount_value))
+        except (InvalidOperation, ValueError):
+            amount = None
+        if amount is not None and not amount.is_finite():
+            amount = None
+        if scoped_event_id in ambiguous_ids or amount is None:
+            funding_class = "unknown"
+        event["costFundingClass"] = funding_class
+        event["pnl"] = funding_class == "seller_cash"
+        event["sellerCashCostCny"] = _decimal_text(amount) if funding_class == "seller_cash" else ("0" if funding_class == "platform_promo" else None)
+        event["platformPromoConsumptionCny"] = _decimal_text(amount) if funding_class == "platform_promo" else ("0" if funding_class == "seller_cash" else None)
+        store = str(event.get("storeAlias") or "")
+        totals = by_store.setdefault(store, {"confirmedSellerCashSpendCny": Decimal("0"), "platformPromoSpendCny": Decimal("0"), "unclassifiedSpendCny": Decimal("0"), "unknownEventCount": 0, "unknownAmountCount": 0})
+        if funding_class == "seller_cash":
+            cash_events.append(event)
+            totals["confirmedSellerCashSpendCny"] += amount
+        elif funding_class == "platform_promo":
+            promo_events.append(event)
+            totals["platformPromoSpendCny"] += amount
+        else:
+            unknown_events.append(event)
+            totals["unknownEventCount"] += 1
+            if amount is None:
+                totals["unknownAmountCount"] += 1
+            else:
+                totals["unclassifiedSpendCny"] += amount
+    for totals in by_store.values():
+        for name in ("confirmedSellerCashSpendCny", "platformPromoSpendCny", "unclassifiedSpendCny"):
+            totals[name] = format(totals[name].quantize(Decimal("0.01")), "f")
+        if totals["unknownAmountCount"]:
+            totals["unclassifiedSpendCny"] = None
+        totals["sellerCashSpendCny"] = totals["confirmedSellerCashSpendCny"] if not totals["unknownEventCount"] else None
+        totals["classificationComplete"] = not totals["unknownEventCount"]
+    return {
+        "events": events, "cashEvents": cash_events, "platformPromoEvents": promo_events,
+        "unknownEvents": unknown_events, "duplicateReplacements": replacements,
+        "ambiguousDuplicates": ambiguities, "byStore": by_store,
+    }
 
 
 def normalize_advertising_payment_events(
@@ -747,17 +915,9 @@ def normalize_advertising_payment_events(
 def advertising_pnl_events(
     *groups: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return unique actual-consumption events; funding is never a P&L cost."""
+    """Return confirmed seller-paid consumption, excluding funding and promo."""
 
-    selected: dict[str, dict[str, Any]] = {}
-    for event in (item for group in groups for item in group):
-        if event.get("pnl") is not True or event.get("eventType") != "advertising_expense":
-            continue
-        event_id = str(event.get("eventId") or "").strip()
-        if not event_id:
-            event_id = _stable_hash("advertising_expense_fallback", event)
-        selected.setdefault(event_id, dict(event))
-    return list(selected.values())
+    return reconcile_advertising_cost_events(*groups)["cashEvents"]
 
 
 def deposit_campaign_budget(
@@ -899,6 +1059,35 @@ def _ok(response: Any | None) -> bool:
 
 def _data(response: Any | None) -> Any:
     return getattr(response, "data", None) if response is not None else None
+
+
+def _finance_detail_failure_message(response: Any | None, status: int | None) -> str:
+    """Keep actionable WB gateway diagnostics without persisting raw payloads."""
+
+    message = f"Finance detail request failed with HTTP {status}"
+    data = _data(response)
+    if not isinstance(data, Mapping):
+        return message
+    title = str(data.get("title") or "").strip()
+    detail = str(data.get("detail") or "").strip()
+    request_id = str(data.get("requestId") or "").strip()
+    origin = str(data.get("origin") or "").strip()
+    if (
+        "PlatformGateway" in detail
+        and "reports.sup-balance" in detail
+        and "connection refused" in detail.casefold()
+    ):
+        message += ": WB upstream finance-report service unavailable (connection refused)"
+    elif title:
+        message += f": {title[:160]}"
+    context = []
+    if origin:
+        context.append(f"origin={origin[:80]}")
+    if request_id:
+        context.append(f"requestId={request_id[:100]}")
+    if context:
+        message += "; " + "; ".join(context)
+    return message
 
 
 def _identifier(value: Any) -> str:

@@ -33,13 +33,14 @@ from .finance_periods import (
     FinancePeriod,
     parse_report_period,
     previous_month,
+    previous_week,
     report_maturity_blocker,
 )
 from .finance_policy import (
     ADVERTISING_DEPOSIT_CAP_RULE,
     load_phone_financial_policy_timeline,
 )
-from .finance_reporting import write_report_artifacts
+from .finance_reporting import ensure_readable_workbook, write_report_artifacts
 from .finance_reporting_standard import load_active_wb_periodic_reporting_standard
 from .finance_sources import (
     ADVERTISING_BASE_URL,
@@ -47,6 +48,7 @@ from .finance_sources import (
     StoreSpec,
     deposit_campaign_budget,
     load_store_specs,
+    reconcile_advertising_cost_events,
     resolve_store_credentials,
 )
 from .finance_sync import (
@@ -554,6 +556,89 @@ class FinanceService:
             period_end=period_end,
         )
 
+    def _complete_financial_cutoff(self, value: str | date, *, now: datetime | None = None) -> date:
+        """Resolve relative dates in the financial timezone, not the trigger's."""
+        moment = now or self._now()
+        financial_today = moment.astimezone(MOSCOW).date()
+        cutoff = (financial_today - timedelta(days=1)
+                  if str(value).strip().lower() == "yesterday"
+                  else resolve_through(value, now=moment))
+        if cutoff >= financial_today:
+            raise FinanceServiceError("Running accounts and reports require a complete-day cutoff")
+        return cutoff
+
+    def account_refresh(
+        self,
+        *,
+        through: str | date = "yesterday",
+        source_statuses: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Materialize local source events once; never sum report snapshots.
+
+        This is an on-disk bookkeeping operation, not a platform fetch or a
+        payment. Partial coverage is passed through to the owner dashboard.
+        """
+        from .finance_running_adapter import refresh_running_accounts
+
+        cutoff = self._complete_financial_cutoff(through)
+        return refresh_running_accounts(
+            self, through=cutoff, source_statuses=source_statuses
+        )
+
+    def account_report(
+        self,
+        *,
+        period: str,
+        through: str | date = "yesterday",
+        period_start: str | date | None = None,
+        _archive: bool = True,
+    ) -> dict[str, Any]:
+        """Publish the fixed owner template from the durable running accounts."""
+        from .finance_running_adapter import build_running_account_report
+
+        if period not in {"weekly", "monthly", "as-of"}:
+            raise FinanceServiceError(f"Unsupported running-account period: {period}")
+        cutoff = self._complete_financial_cutoff(through)
+        start = (
+            resolve_through(period_start, now=self._now())
+            if period_start is not None
+            else None
+        )
+        if period == "weekly":
+            start = start or cutoff - timedelta(days=6)
+            if start.weekday() != 0 or cutoff.weekday() != 6 or (cutoff - start).days != 6:
+                raise FinanceServiceError("Weekly reports must cover Monday through Sunday")
+        elif period == "monthly":
+            start = start or cutoff.replace(day=1)
+            if start.day != 1 or start != cutoff.replace(day=1) or (cutoff + timedelta(days=1)).day != 1:
+                raise FinanceServiceError("Monthly reports must cover a full calendar month")
+        if start is not None and start > cutoff:
+            raise FinanceServiceError("Running report end precedes its start")
+        result = build_running_account_report(
+            self, period=period, period_start=start, through=cutoff
+        )
+        if _archive:
+            try:
+                archived = self._archive_owner_report(result)
+                if archived.get("status") != "NOT_CONFIGURED":
+                    result = {**result, "archive": archived}
+            except Exception as exc:
+                return {**result, "status": "PARTIAL_FAILURE", "archive": {"status": "FAILED", "error": str(exc)}}
+        return result
+
+    def _archive_owner_report(self, report: dict[str, Any]) -> dict[str, Any]:
+        from .finance_running_adapter import archive_running_account_report
+
+        return archive_running_account_report(self, report)
+
+    def _running_report_published(self, period: FinancePeriod) -> bool:
+        """Check one exact report manifest, never enumerate historical closes."""
+        from .finance_running_adapter import running_report_published
+
+        return running_report_published(
+            self, period=period.kind, period_start=period.start, through=period.end
+        )
+
     def bootstrap(self, *, through: str | date = "yesterday") -> dict[str, Any]:
         run_cache = self._new_report_run_cache()
         summaries = sync_enabled_stores(
@@ -566,11 +651,15 @@ class FinanceService:
             source_factory=self.source_factory,
             now=self._now(),
         )
+        running_accounts = self.account_refresh(
+            through=through, source_statuses=[summary.as_dict() for summary in summaries]
+        )
         debt_reconciliation = self._reconcile_synced_advertising_payments()
         report = self.report(kind="bootstrap", period="auto", _run_cache=run_cache)
         return {
             "operation": "bootstrap",
             "stores": [summary.as_dict() for summary in summaries],
+            "runningAccounts": running_accounts,
             "advertisingDebtReconciliation": debt_reconciliation,
             "report": report,
         }
@@ -585,9 +674,12 @@ class FinanceService:
     ) -> dict[str, Any]:
         started_at = perf_counter()
         phase_timings_ms: dict[str, float] = {}
+        phase_failures: list[dict[str, str]] = []
         run_cache = self._new_report_run_cache()
 
-        schedule_day = self._now().astimezone(SHANGHAI).date()
+        run_now = self._now()
+        cutoff = self._complete_financial_cutoff(through, now=run_now)
+        schedule_day = run_now.astimezone(SHANGHAI).date()
         weekly_due = schedule_day.weekday() == 0
         monthly_due = schedule_day.day == 1
         first_monthly_due = (
@@ -626,25 +718,110 @@ class FinanceService:
                     (perf_counter() - phase_started) * 1000, 3
                 )
 
-        summaries = phase(
+        def independent_phase(name: str, callback):
+            # An auxiliary artifact failure must not erase a completed owner
+            # report or prevent another independent period being published.
+            try:
+                return phase(name, callback)
+            except Exception as exc:
+                phase_failures.append(
+                    {"phase": name, "status": "FAILED", "error": str(exc)}
+                )
+                return None
+
+        summaries = independent_phase(
             "sync",
             lambda: sync_enabled_stores(
                 self.ledger,
                 registry_path=self.registry_path,
                 repo_root=self.repo_root,
-                through=through,
+                through=cutoff,
                 bootstrap=False,
                 correction_window_days=correction_window_days,
                 max_store_workers=max_store_workers,
                 source_factory=self.source_factory,
-                now=self._now(),
+                now=run_now,
             ),
         )
+        sync_succeeded = summaries is not None
+        summaries = summaries or []
+        source_statuses = [summary.as_dict() for summary in summaries]
+        # Successful sources are durable even when another source failed. Do
+        # this before legacy settlement/report gates and preserve coverage.
+        running_accounts = independent_phase(
+            "runningAccountRefresh",
+            lambda: self.account_refresh(through=cutoff, source_statuses=source_statuses),
+        ) if sync_succeeded else None
+        owner_reports: list[dict[str, Any]] = []
+        owner_ledger: dict[str, Any] | None = None
+        owner_ledger_covers: list[dict[str, Any]] = []
+        if running_accounts is not None:
+            # This is the primary daily delivery, including all four fixed
+            # windows. The adapter reuses an unchanged verified publication.
+            owner_ledger = independent_phase(
+                "ownerLedgerReport",
+                lambda: self.account_report(period="as-of", through=cutoff, _archive=False),
+            )
+            if owner_ledger is not None:
+                owner_reports.append(owner_ledger)
+            # A historical cutoff must not borrow the current machine date's
+            # week or month. Yesterday's closing date defines the run day.
+            owner_schedule_day = cutoff + timedelta(days=1)
+            for due, owner_period in (
+                (owner_schedule_day.weekday() == 0, previous_week(today=owner_schedule_day)),
+                (owner_schedule_day.day == 1, previous_month(today=owner_schedule_day)),
+            ):
+                if owner_period.end > cutoff:
+                    continue
+                if owner_ledger is not None and owner_period.end == cutoff:
+                    # The closed period already occupies its own column in
+                    # the same-cutoff dashboard; do not export it twice.
+                    owner_ledger_covers.append({
+                        "period": owner_period.kind,
+                        "periodStart": owner_period.start.isoformat(),
+                        "periodEnd": owner_period.end.isoformat(),
+                        "coveredBy": "ownerLedger",
+                        "workbook": owner_ledger.get("workbook"),
+                        "templateVersion": owner_ledger.get("templateVersion"),
+                    })
+                    continue
+                # A disconnected local host can miss Monday/month-start. On
+                # resume inspect only the latest closed week and month; do
+                # not scan or re-export the entire publication history.
+                already_published = False if due else independent_phase(
+                    f"owner{owner_period.kind.title()}PublicationCheck",
+                    lambda selected=owner_period: self._running_report_published(selected),
+                )
+                if already_published is False:
+                    owner_report = independent_phase(
+                        f"owner{owner_period.kind.title()}Report",
+                        lambda selected=owner_period: self.account_report(
+                            period=selected.kind,
+                            period_start=selected.start,
+                            through=selected.end,
+                            _archive=False,
+                        ),
+                    )
+                    if owner_report is not None:
+                        owner_reports.append(owner_report)
+        if owner_ledger is None:
+            from .finance_running_adapter import latest_verified_owner_report
+
+            owner_ledger = independent_phase("ownerLedgerFallback",
+                lambda: latest_verified_owner_report(self, through=cutoff))
+            if owner_ledger is not None:
+                owner_reports.insert(0, owner_ledger)
+        owner_archives: list[dict[str, Any]] = []
+        for owner_report in owner_reports:
+            label = "ownerLedgerArchive" if owner_report is owner_ledger else f"owner{str(owner_report.get('period', 'Closed')).title()}Archive"
+            archived = independent_phase(label, lambda selected=owner_report: self._archive_owner_report(selected))
+            if archived is not None and archived.get("status") != "NOT_CONFIGURED":
+                owner_archives.append(archived)
         # advertising_payments is a read-only WB source.  Import any positive
         # top-up rows before building reports so a later manual recharge can
         # settle the debt shown in the same run.  Malformed rows remain visible
         # as unresolved evidence and never become a guessed zero.
-        debt_reconciliation = phase(
+        debt_reconciliation = independent_phase(
             "advertisingDebtReconciliation",
             self._reconcile_synced_advertising_payments,
         )
@@ -655,44 +832,44 @@ class FinanceService:
                 report_type="bootstrap", report_status="FINAL"
             )
         ):
-            reports.append(
-                phase(
-                    "bootstrapReport",
-                    lambda: self.report(
-                        kind="bootstrap",
-                        period="auto",
-                        _publish_open_items=first_monthly_due,
-                        _run_cache=run_cache,
-                    ),
-                )
-            )
-        reports.append(
-            phase(
-                "weeklyReport",
+            bootstrap_report = independent_phase(
+                "bootstrapReport",
                 lambda: self.report(
-                    kind="weekly",
+                    kind="bootstrap",
                     period="auto",
-                    _publish_open_items=weekly_due,
+                    _publish_open_items=first_monthly_due,
                     _run_cache=run_cache,
                 ),
             )
+            if bootstrap_report is not None:
+                reports.append(bootstrap_report)
+        weekly_report = independent_phase(
+            "weeklyReport",
+            lambda: self.report(
+                kind="weekly",
+                period="auto",
+                _publish_open_items=weekly_due,
+                _run_cache=run_cache,
+            ),
         )
+        if weekly_report is not None:
+            reports.append(weekly_report)
         # The scheduled monthly view is always the prior calendar month. The
         # opening-to-date stock remains a separate bootstrap view.
-        reports.append(
-            phase(
-                "monthlyReport",
-                lambda: self.report(
-                    kind="monthly",
-                    period="auto",
-                    _selected_period=previous_month(
-                        today=self._now().astimezone(MOSCOW).date()
-                    ),
-                    _publish_open_items=monthly_due,
-                    _run_cache=run_cache,
+        monthly_report = independent_phase(
+            "monthlyReport",
+            lambda: self.report(
+                kind="monthly",
+                period="auto",
+                _selected_period=previous_month(
+                    today=self._now().astimezone(MOSCOW).date()
                 ),
-            )
+                _publish_open_items=monthly_due,
+                _run_cache=run_cache,
+            ),
         )
+        if monthly_report is not None:
+            reports.append(monthly_report)
         current_keys = {str(item["reportKey"]) for item in reports}
         historical_reports: list[dict[str, Any]] = []
         historical_checked = 0
@@ -716,7 +893,7 @@ class FinanceService:
             )
         )
         if summaries:
-            historical_reports, historical_checked = phase(
+            historical_result = independent_phase(
                 "historicalRefresh",
                 lambda: self._refresh_finalized_reports(
                     exclude_report_keys=current_keys,
@@ -726,11 +903,19 @@ class FinanceService:
                     _run_cache=run_cache,
                 ),
             )
+            if historical_result is not None:
+                historical_reports, historical_checked = historical_result
         reports.extend(historical_reports)
         result = {
             "operation": "daily",
-            "through": resolve_through(through, now=self._now()).isoformat(),
-            "stores": [summary.as_dict() for summary in summaries],
+            "through": cutoff.isoformat(),
+            "stores": source_statuses,
+            "runningAccounts": running_accounts,
+            "ownerLedger": owner_ledger,
+            "ownerLedgerCovers": owner_ledger_covers,
+            "ownerArchives": owner_archives,
+            "ownerReports": owner_reports,
+            "phaseFailures": phase_failures,
             "advertisingDebtReconciliation": debt_reconciliation,
             "reports": reports,
             "historicalReportsChecked": historical_checked,
@@ -757,7 +942,7 @@ class FinanceService:
                 if isinstance(item.get("artifacts"), Mapping)
                 and item.get("artifacts", {}).get("json")
             ]
-            result["workbookSync"] = phase(
+            result["workbookSync"] = independent_phase(
                 "workbookSync",
                 lambda: sync_canonical_workbook(
                     report_paths=report_paths,
@@ -774,6 +959,15 @@ class FinanceService:
                 (perf_counter() - started_at) * 1000, 3
             )
             result["performance"]["phaseTimingsMs"] = dict(phase_timings_ms)
+        result["status"] = (
+            "PARTIAL_FAILURE"
+            if phase_failures
+            else "PENDING_DATA"
+            if any(not bool(row.get("complete")) for item in source_statuses for row in item.get("sources", []))
+            or (running_accounts or {}).get("status") == "PENDING_DATA"
+            or any(item.get("reportStatus") == "PENDING_DATA" for item in owner_reports)
+            else "SUCCESS"
+        )
         return result
 
     def _reconcile_synced_advertising_payments(self) -> list[dict[str, Any]]:
@@ -949,6 +1143,10 @@ class FinanceService:
             selected = _selected_period
         selected = self._adjust_cumulative_start(selected, _run_cache=_run_cache)
         evidence = self._load_period_evidence(selected, _run_cache=_run_cache)
+        advertising_reconciliation = reconcile_advertising_cost_events(
+            evidence["advertising"]
+        )
+        evidence["advertising"] = advertising_reconciliation["events"]
         period_cache_key = self._period_cache_key(selected)
         if (
             _run_cache is not None
@@ -976,6 +1174,13 @@ class FinanceService:
             evidence, selected, _run_cache=_run_cache
         )
         blockers = list(full_calculation.get("blockers") or [])
+        for event in advertising_reconciliation["unknownEvents"]:
+            blockers.append({
+                "code": "ADVERTISING_FUNDING_SOURCE_UNRESOLVED",
+                "storeAlias": str(event.get("storeAlias") or ""),
+                "message": "Advertising consumption cannot be classified as seller cash or platform promotional funds.",
+                "evidenceId": str(event.get("eventId") or ""),
+            })
         if prior_calculation is not None:
             blockers.extend(prior_calculation.get("blockers") or [])
         if (
@@ -1013,6 +1218,12 @@ class FinanceService:
                 _run_cache.setdefault("periodDeltas", {})[
                     period_cache_key
                 ] = deepcopy(calculation)
+        calculation = _with_advertising_reconciliation(
+            calculation, advertising_reconciliation
+        )
+        calculation["statisticsEvents"] = _statistics_period_events(
+            evidence["order"], selected
+        )
         snapshot_hash = hashlib.sha256(
             canonical_json(
                 {
@@ -2147,7 +2358,12 @@ class FinanceService:
                 current["periodRecognition"] = "INITIAL"
                 orders.append(current)
                 continue
-            orders.append(_order_period_delta(current, prior))
+            delta = _order_period_delta(current, prior)
+            # An unchanged historical order is audit evidence, not a new
+            # confirmed order in this period.  Keep real monetary/quantity
+            # corrections and incomplete evidence visible.
+            if not _is_unchanged_period_correction(delta):
+                orders.append(delta)
 
         issues = [dict(value) for value in result.get("issues") or []]
         aliases = sorted(
@@ -2323,6 +2539,8 @@ class FinanceService:
             "orders": orders,
             "stores": stores,
             "totals": totals,
+            "advertisingReconciliation": calculation.get("advertisingReconciliation") or {},
+            "statisticsEvents": calculation.get("statisticsEvents") or [],
             "costVersions": self._used_cost_versions(orders),
             "historicalCashEvents": historical_events,
             "funding": self._report_funding_rows(stores),
@@ -3531,6 +3749,19 @@ class FinanceService:
         # yet.  Likewise, a partial or failed publication is not a usable
         # artifact set even if its JSON file exists.  Only a complete set whose
         # verification is an exact PASS for this report ID may be exposed.
+        if artifacts is not None:
+            delivery_period = selected or {
+                "from": str(report.get("period_start") or "")[:10],
+                "to": str(report.get("period_end") or "")[:10],
+            }
+            artifacts["deliveryWorkbook"] = str(ensure_readable_workbook(
+                {
+                    "reportId": report["report_id"],
+                    "kind": report["report_type"],
+                    "period": delivery_period,
+                },
+                Path(artifacts["workbook"]),
+            ))
         return {
             "reportId": report["report_id"],
             "reportKey": report["report_key"],
@@ -3546,12 +3777,20 @@ class FinanceService:
     def _write_report(self, payload: dict[str, Any], period: FinancePeriod) -> dict[str, str]:
         output = self._report_output_dir(period.kind, str(period.start.year))
         prefix = str(payload["reportId"])
+        delivery_payload = {
+            **payload,
+            "period": payload.get("period") or period.as_dict(),
+            "kind": payload.get("kind") or period.kind,
+        }
         artifact_state, existing = self._report_artifact_state(
             period.kind,
             str(period.start.year),
             prefix,
         )
         if artifact_state == "COMPLETE" and existing is not None:
+            existing["deliveryWorkbook"] = str(
+                ensure_readable_workbook(delivery_payload, Path(existing["workbook"]))
+            )
             return existing
         write_report_artifacts(
             payload,
@@ -3567,6 +3806,9 @@ class FinanceService:
             raise FinanceServiceError(
                 f"Report artifacts failed completeness verification: {prefix}"
             )
+        rebuilt["deliveryWorkbook"] = str(
+            ensure_readable_workbook(delivery_payload, Path(rebuilt["workbook"]))
+        )
         return rebuilt
 
     def _previous_published_report_payload(
@@ -3730,8 +3972,11 @@ def _record_in_period(row: Mapping[str, Any], period: FinancePeriod) -> bool:
         fields = ("rrDate", "saleDt", "createDate")
     for field in fields:
         parsed = _parse_datetime(row.get(field))
-        if parsed and period.start <= parsed.astimezone(MOSCOW).date() <= period.end:
-            return True
+        if parsed:
+            # The first usable business timestamp is authoritative.  A report
+            # published on Monday (createDate) must not move Sunday's rrDate
+            # into the following week; lastChangeDate likewise is not a sale.
+            return period.start <= parsed.astimezone(MOSCOW).date() <= period.end
     return False
 
 
@@ -3817,6 +4062,97 @@ def _order_period_delta(
     delta["currentOutcome"] = current.get("outcome")
     delta["outcome"] = "corrected"
     return delta
+
+
+def _statistics_period_events(
+    rows: Sequence[Mapping[str, Any]], period: FinancePeriod,
+) -> list[dict[str, Any]]:
+    """Preserve official RUB sales/refunds separately from CNY settlement."""
+
+    events: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        sale_id = str(row.get("saleID") or row.get("saleId") or "").strip()
+        if not (
+            len(sale_id) > 1 and sale_id[0].upper() in {"S", "R"}
+            and sale_id[1:].isdigit()
+        ) or not _record_in_period(dict(row, _source="order"), period):
+            continue
+        alias = str(row.get("storeAlias") or "")
+        occurred = _parse_datetime(row.get("saleDt") or row.get("date"))
+        events[(alias, sale_id)] = {
+            "storeAlias": alias,
+            "saleId": sale_id,
+            "eventType": "return" if sale_id[0].upper() == "R" else "sale",
+            "occurredAt": occurred.isoformat() if occurred is not None else None,
+            "srid": row.get("srid"),
+            "sku": row.get("supplierArticle") or row.get("vendorCode"),
+            "nmId": row.get("nmId") or row.get("nmID"),
+            "currency": "RUB",
+            "sellerPriceWithDiscountRub": row.get("priceWithDisc"),
+            "buyerPaidRub": row.get("finishedPrice"),
+            "sellerProceedsRub": row.get("forPay"),
+            "source": "statistics-api /api/v1/supplier/sales",
+            "settlementUse": "operational evidence only; not converted to CNY",
+        }
+    return sorted(events.values(), key=lambda row: (
+        str(row.get("occurredAt") or ""), row["storeAlias"], row["saleId"]
+    ))
+
+
+def _with_advertising_reconciliation(
+    calculation: Mapping[str, Any], reconciliation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Report store expenses even when no settled order can absorb them."""
+
+    result = deepcopy(dict(calculation))
+    stores = {str(row["storeAlias"]): dict(row) for row in result.get("stores") or []}
+    by_store = reconciliation.get("byStore") or {}
+    fields = {
+        "actualAdvertisingSpendCny": "sellerCashSpendCny",
+        "confirmedActualAdvertisingSpendCny": "confirmedSellerCashSpendCny",
+        "platformPromoAdvertisingSpendCny": "platformPromoSpendCny",
+        "unclassifiedAdvertisingSpendCny": "unclassifiedSpendCny",
+    }
+    for alias in set(stores) | set(by_store):
+        row = stores.setdefault(alias, _empty_store_summary(alias))
+        evidence = by_store.get(alias) or {}
+        for target, source in fields.items():
+            value = evidence.get(source, "0.00")
+            row[target] = None if value is None else _money(value)
+    result["stores"] = [stores[alias] for alias in sorted(stores)]
+    totals = dict(result.get("totals") or {})
+    for field in fields:
+        values = [row[field] for row in stores.values()]
+        totals[field] = (
+            None if any(value is None for value in values)
+            else _money(sum((_decimal(value) for value in values), _ZERO))
+        )
+    result["totals"] = totals
+    result["advertisingReconciliation"] = {
+        "byStore": deepcopy(by_store),
+        "duplicateReplacements": deepcopy(reconciliation.get("duplicateReplacements") or []),
+        "ambiguousDuplicates": deepcopy(reconciliation.get("ambiguousDuplicates") or []),
+        "cashEventIds": [row.get("eventId") for row in reconciliation.get("cashEvents") or []],
+        "platformPromoEventIds": [row.get("eventId") for row in reconciliation.get("platformPromoEvents") or []],
+        "unknownEventIds": [row.get("eventId") for row in reconciliation.get("unknownEvents") or []],
+    }
+    return result
+
+
+def _is_unchanged_period_correction(order: Mapping[str, Any]) -> bool:
+    """Ignore fully reconciled zero deltas without concealing open evidence."""
+
+    return (
+        order.get("periodRecognition") == "PRIOR_PERIOD_CORRECTION"
+        and order.get("evidenceStatus") == "COMPLETE"
+        and order.get("cashReconciliationStatus") == "PASS"
+        and order.get("strictOwnerProfitCny") is not None
+        and _decimal(order.get("netQuantity")) == _ZERO
+        and all(
+            value is None or _decimal(value) == _ZERO
+            for value in (order.get(field) for field in _DELTA_MONEY_FIELDS)
+        )
+    )
 
 
 def _summarize_order_rows(

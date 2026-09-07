@@ -608,10 +608,11 @@ def _persist_source_rows(
                 sale_id=_first(payload, "saleID", "saleId", "odid"),
                 order_id=_first(payload, "orderId", "odid"),
                 srid=_first(payload, "srid"),
-                buyer_paid_cny=_first(
-                    payload, "finishedPrice", "priceWithDisc", "retailPriceWithDisc"
-                ),
-                for_pay_cny=_first(payload, "forPay", "totalPrice"),
+                # Official statistics amounts are RUB and remain in the raw
+                # payload.  They cannot populate CNY settlement columns, and
+                # an order's totalPrice is not a seller settlement (forPay).
+                buyer_paid_cny=None,
+                for_pay_cny=None,
                 fetched_at=fetched_at,
             )
         elif source == "goods_returns":

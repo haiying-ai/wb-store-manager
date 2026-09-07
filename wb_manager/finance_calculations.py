@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable, Iterable, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from .finance_sources import classify_logistics_row, order_identity
 
@@ -889,6 +890,12 @@ def _calculate_group(
 
     if correction_present:
         outcome = "corrected"
+    elif any(_statistics_sale_kind(record.row) == "return" for record in group.records):
+        # The platform's R sale event establishes the lifecycle even while
+        # finance has not posted the CNY refund.  Finance quantities remain
+        # evidence-based; the missing refund/logistics issues above exclude
+        # the unsettled order from confirmed profit and cash allocation.
+        outcome = "returned"
     elif explicit_return and net_quantity <= 0:
         outcome = "returned"
     elif net_quantity > 0:
@@ -2035,12 +2042,32 @@ def _earliest_timestamp(
 ) -> str | None:
     values: list[datetime] = []
     for record in records:
-        for field_name in fields:
+        record_fields = fields
+        if fields == _COMPLETED_AT_FIELDS and _statistics_sale_kind(record.row) == "sale":
+            # Statistics /sales uses date for the sale event, while /orders
+            # uses date for order creation.  Only a verified S-prefixed sale
+            # event may supply this completion fallback.
+            record_fields = (*fields, "date")
+        for field_name in record_fields:
             raw = record.row.get(field_name)
             if raw in (None, ""):
                 continue
             try:
-                values.append(_datetime(raw))
+                is_statistics = (
+                    _statistics_sale_kind(record.row) is not None
+                    or "isCancel" in record.row
+                )
+                values.append(
+                    _datetime(
+                        raw,
+                        default_timezone=(
+                            ZoneInfo("Europe/Moscow") if is_statistics else timezone.utc
+                        ),
+                    )
+                )
+                # Fields are ordered by authority.  A generic date must not
+                # override an explicit orderCreatedAt/completedAt on one row.
+                break
             except FinanceCalculationError as exc:
                 issues.append(
                     _group_issue(
@@ -2170,6 +2197,9 @@ def _retail_return_quantity(row: Mapping[str, Any]) -> tuple[Decimal, Decimal] |
 
 
 def _is_return_marker(row: Mapping[str, Any]) -> bool:
+    sale_kind = _statistics_sale_kind(row)
+    if sale_kind is not None:
+        return sale_kind == "return"
     marker = _marker_text(row)
     return any(value in marker for value in _RETURN_MARKERS)
 
@@ -2180,8 +2210,21 @@ def _is_correction(row: Mapping[str, Any]) -> bool:
 
 
 def _is_completed_marker(row: Mapping[str, Any]) -> bool:
+    sale_kind = _statistics_sale_kind(row)
+    if sale_kind is not None:
+        return sale_kind == "sale"
     marker = _marker_text(row)
     return any(value in marker for value in _COMPLETED_MARKERS)
+
+
+def _statistics_sale_kind(row: Mapping[str, Any]) -> str | None:
+    value = str(row.get("saleID") or row.get("saleId") or "").strip().upper()
+    if len(value) > 1 and value[1:].isdigit():
+        if value[0] == "S":
+            return "sale"
+        if value[0] == "R":
+            return "return"
+    return None
 
 
 def _has_logistics_marker(row: Mapping[str, Any]) -> bool:
@@ -2334,7 +2377,7 @@ def _decimal(value: Any, label: str) -> Decimal:
     return result
 
 
-def _datetime(value: Any) -> datetime:
+def _datetime(value: Any, *, default_timezone=timezone.utc) -> datetime:
     if isinstance(value, datetime):
         result = value
     else:
@@ -2346,7 +2389,7 @@ def _datetime(value: Any) -> datetime:
         except ValueError as exc:
             raise FinanceCalculationError(f"invalid ISO timestamp {text!r}") from exc
     if result.tzinfo is None:
-        result = result.replace(tzinfo=timezone.utc)
+        result = result.replace(tzinfo=default_timezone)
     return result
 
 

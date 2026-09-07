@@ -164,6 +164,37 @@ def test_finance_detail_keeps_partial_rows_and_http_429():
     assert "429" in result.blocker
 
 
+def test_finance_detail_classifies_wb_upstream_connection_refusal_safely():
+    client = QueueClient(
+        [
+            Response(
+                400,
+                False,
+                {
+                    "status": 400,
+                    "title": "GetNNBReportDetailsByPeriod error",
+                    "detail": (
+                        "PlatformGateway: proxy request: reports.sup-balance: "
+                        "dial tcp 172.31.23.52:80: connect: connection refused, "
+                        "sellerID = 123456"
+                    ),
+                    "requestId": "request-123",
+                    "origin": "open-api-finreports",
+                },
+            )
+        ]
+    )
+
+    result = sources(client).finance_detailed("2026-08-01", "2026-08-07")
+
+    assert result.complete is False
+    assert "WB upstream finance-report service unavailable" in result.blocker
+    assert "origin=open-api-finreports" in result.blocker
+    assert "requestId=request-123" in result.blocker
+    assert "172.31.23.52" not in result.blocker
+    assert "sellerID" not in result.blocker
+
+
 @pytest.mark.parametrize("kind", ["sales", "orders"])
 def test_statistics_incremental_uses_last_change_cursor_until_empty(kind):
     client = QueueClient(

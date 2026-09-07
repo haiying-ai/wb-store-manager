@@ -36,6 +36,33 @@ class ReportArtifacts:
     preview_dir: Path
 
 
+def ensure_readable_workbook(payload: Mapping[str, Any], workbook_path: Path) -> Path:
+    """Expose a human-readable delivery name without changing immutable IDs."""
+    workbook_path = Path(workbook_path).resolve()
+    period = payload.get("period") or {}
+    start = str(period.get("from") or "")[:10]
+    end = str(period.get("to") or period.get("through") or "")[:10]
+    from datetime import date
+
+    date.fromisoformat(start)
+    date.fromisoformat(end)
+    report_id = _safe_report_id(str(payload.get("reportId") or ""))
+    if not report_id:
+        raise ValueError("Readable finance workbook requires reportId")
+    kind_label = {"weekly": "周报", "monthly": "月报", "bootstrap": "累计报表"}.get(
+        str(payload.get("kind") or ""), "报表"
+    )
+    delivery_dir = workbook_path.parent / "交付" / report_id
+    delivery_dir.mkdir(parents=True, exist_ok=True)
+    destination = delivery_dir / f"WB双店财务{kind_label}_{start}至{end}.xlsx"
+    if destination.exists():
+        if destination.read_bytes() != workbook_path.read_bytes():
+            raise FileExistsError(f"Immutable delivery workbook differs: {destination}")
+    else:
+        _publish_file_no_clobber(workbook_path, destination)
+    return destination
+
+
 def write_report_artifacts(
     payload: dict[str, Any],
     output_dir: Path,

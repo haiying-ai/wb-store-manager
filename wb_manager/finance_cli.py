@@ -62,6 +62,25 @@ def add_finance_parser(subparsers: Any) -> None:
         ),
     )
 
+    account_refresh = commands.add_parser(
+        "account-refresh",
+        help="Refresh persistent running accounts from local evidence, without platform writes",
+    )
+    _add_runtime_paths(account_refresh)
+    account_refresh.add_argument("--through", default="yesterday", help="Inclusive complete-day cutoff")
+
+    account_report = commands.add_parser(
+        "account-report",
+        help="Create the fixed per-store and consolidated running-account report",
+    )
+    _add_runtime_paths(account_report)
+    account_report.add_argument("--period", choices=("weekly", "monthly", "as-of"), required=True)
+    account_report.add_argument("--from", dest="period_start", default=None, help="Optional inclusive start date")
+    account_report.add_argument(
+        "--through", default="yesterday",
+        help="Inclusive cutoff; weekly must end Sunday, monthly must end on the final calendar day",
+    )
+
     workbook_sync = commands.add_parser(
         "workbook-sync",
         help="Append immutable finance report artifacts to the configured canonical workbook",
@@ -280,6 +299,12 @@ def dispatch_finance(args: argparse.Namespace) -> int:
                 correction_window_days=getattr(args, "correction_window_days", None),
                 max_store_workers=getattr(args, "max_store_workers", None),
             )
+        elif command == "account-refresh":
+            result = service.account_refresh(through=args.through)
+        elif command == "account-report":
+            result = service.account_report(
+                period=args.period, period_start=args.period_start, through=args.through
+            )
         elif command == "workbook-sync":
             from .finance_workbook import sync_canonical_workbook
 
@@ -358,7 +383,7 @@ def dispatch_finance(args: argparse.Namespace) -> int:
         else:  # argparse already prevents this, but keep the dispatch fail-closed.
             raise ValueError(f"Unsupported finance command: {command}")
         print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
-        return 0
+        return 1 if result.get("status") in {"FAILED", "PARTIAL_FAILURE"} else 0
     finally:
         service.close()
 

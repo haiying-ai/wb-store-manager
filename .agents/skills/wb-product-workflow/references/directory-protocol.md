@@ -10,6 +10,7 @@ Use `E:\电商运营\03运营数据\WB财务` for store-wide financial evidence 
 - `ledger\<store_id>\normalized`: the idempotent completed-order ledger, return links, settlement rows, cost-version references, and durable collection watermark.
 - `runs\<task_id>`: workflow state, reconciliation diagnostics, funding plans, approvals, execution evidence, and readbacks.
 - `reports\weekly\<period>` and `reports\monthly\<period>`: per-store detail plus consolidated owner reports.
+- `reports\as-of\<cutoff>\<business-fingerprint>`: the fixed daily/cutoff owner dashboard with report data and verification. Use immutable fingerprint subdirectories for weekly/monthly versions too; verify artifact hashes before reuse or archive acceptance.
 
 Never mix stores in raw evidence, overwrite an earlier response, or store tokens. Consolidate only normalized records that retain their `store_id`, source identity, status, and evidence path.
 

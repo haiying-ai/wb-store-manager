@@ -148,6 +148,7 @@ For every change to this Skill package, also mirror the complete project package
    - For Analytics Sales Funnel v3, use its current official request contract: `nmIds`, `subjectIds`, `tagIds`, required `orderBy`, `limit`, and `offset`; do not send legacy capitalized filter names or unrelated cursor fields. For per-product history, send `nmIds` in batches of at most 20. Honor the 20-second Analytics interval and do not accept a report as complete unless the core funnel read is HTTP 200.
 
 13. Reconcile completed-order finances.
+   - For daily running accounts, cross-period refunds, agency receipts/payables, advertising available budgets, and stable weekly/monthly/as-of owner reports, also read `references/owner-running-reporting.md`. Use signed event revisions and one fixed template; never sum cumulative snapshot versions.
    - Read `references/financial-reporting.md` and use the `finance` flow for platform-first ingestion, bootstrap, reconciliation, weekly reports, and monthly reports. Load all seller-specific prices, costs, rates, thresholds, and formulas from the authorized private policy at runtime; do not embed them in this Skill.
    - Select historical cost and transaction-price evidence by the order-time effective version. Never value an old order with a current policy merely because it completed or settled later.
    - Read actual return-logistics deductions from all confidently linked WB financial rows. If evidence is missing, duplicated, unsettled, or ambiguous, keep the row open rather than inventing a fixed charge.

@@ -508,6 +508,60 @@ def test_workbook_excludes_blocked_order_amounts_from_confirmed_summary(tmp_path
     assert verification["consistencyFailures"] == []
 
 
+def test_workbook_zero_fills_store_without_complete_orders(tmp_path: Path):
+    payload = sample_payload()
+    empty_store = deepcopy(payload["stores"][0])
+    empty_store.update(
+        storeAlias="empty-store",
+        orderCount=0,
+        confirmedOrderCount=0,
+        openItemOrderCount=0,
+        salesAmountGCny="0",
+        netTurnoverCny="0",
+        actualCommissionCCny="0",
+        acquiringFeeCny="0",
+        forPayCny="0",
+        accountIncrementCny="0",
+        purchaseCostCny="0",
+        forwardOperationsCny="0",
+        otherPlatformCostCny="0",
+        managedOperationsCny="0",
+        combinedAdvertisingAndReturnPoolCny="0",
+        returnRiskReserveCny="0",
+        promotionReserveCny="0",
+        totalPolicyReserveCny="0",
+        returnLogisticsCny="0",
+        advertisingProvisionCny="0",
+        excessReturnLossCny="0",
+        ruleWithdrawableCny="0",
+        actualAdvertisingSpendCny="0",
+        strictOwnerProfitCny="0",
+        ownerProfitCny="0",
+    )
+    payload["stores"].append(empty_store)
+
+    artifacts = write_report_artifacts(payload, tmp_path)
+
+    with ZipFile(artifacts.workbook_path) as workbook:
+        stores_xml = workbook.read("xl/worksheets/sheet2.xml").decode("utf-8")
+    for column in "CDEFGHIJ":
+        assert re.search(
+            fr'<x:c r="{column}6"[^>]*>.*?<x:v>0(?:\.0+)?</x:v>',
+            stores_xml,
+            re.S,
+        )
+    assert re.search(
+        r'<x:c r="C6"[^>]*>\s*<x:f>IF\(COUNTIFS\(.*?=0,0,SUMIFS\(',
+        stores_xml,
+        re.S,
+    )
+    verification = json.loads(
+        artifacts.verification_path.read_text(encoding="utf-8")
+    )
+    assert verification["status"] == "PASS"
+    assert verification["consistencyFailures"] == []
+
+
 def test_workbook_renders_detailed_previous_report_variance_bridge(tmp_path: Path):
     payload = sample_payload()
     payload["previousReport"] = {

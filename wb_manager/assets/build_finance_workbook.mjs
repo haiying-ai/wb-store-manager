@@ -16,7 +16,7 @@ const funding = wb.worksheets.add("广告与提现");
 const policy = wb.worksheets.add("成本版本与口径");
 const checks = wb.worksheets.add("数据校验");
 const openItems = wb.worksheets.add("待确认项");
-wb.comments.setSelf({ displayName: "孙兵" });
+wb.comments.setSelf({ displayName: String(payload.commentAuthor || "User") });
 
 const navy = "#17365D";
 const blue = "#D9EAF7";
@@ -254,7 +254,7 @@ function buildStores() {
     for (let row = 4; row <= end; row++) {
       const alias = `$A${row}`;
       const completeCount = `COUNTIFS('订单利润'!$A$4:$A$${orderEnd},${alias},'订单利润'!$Y$4:$Y$${orderEnd},"COMPLETE")`;
-      const sum = (column) => `=IF(${completeCount}=0,"",SUMIFS('订单利润'!$${column}$4:$${column}$${orderEnd},'订单利润'!$A$4:$A$${orderEnd},${alias},'订单利润'!$Y$4:$Y$${orderEnd},"COMPLETE"))`;
+      const sum = (column) => `=IF(${completeCount}=0,0,SUMIFS('订单利润'!$${column}$4:$${column}$${orderEnd},'订单利润'!$A$4:$A$${orderEnd},${alias},'订单利润'!$Y$4:$Y$${orderEnd},"COMPLETE"))`;
       stores.getRange(`C${row}`).formulas = [[sum("H")]];
       stores.getRange(`D${row}`).formulas = [[sum("I")]];
       stores.getRange(`E${row}`).formulas = [[sum("J")]];
