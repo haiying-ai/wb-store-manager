@@ -77,10 +77,10 @@ Use one of eight resumable flows. Keep the state file with the task artifacts an
 
 ## Warehouse fulfillment (`fulfillment`)
 
-`collect -> cancel_cleanup -> table_sync -> approve -> prepare -> wait_imei -> sync_imei -> labels -> archive`
+`collect -> cancel_cleanup -> sequence_sync -> table_sync -> approve -> prepare -> wait_imei -> sync_imei -> labels -> archive`
 
 - Read `references/fulfillment-workflow.md`. Track each store/order independently; one missing IMEI must not block other orders.
-- `cancel_cleanup` may delete a target-sheet row only when exact-order official history proves cancellation before any handover and the row has no IMEI, label or handover evidence. Bind the full A:L state, verify the whole workbook independently, preserve the local archive, and record a retirement tombstone. Keep uncertain, post-shipment and refusal cases in the table for review.
+- `cancel_cleanup` may delete a target-sheet row only when exact-order official history proves cancellation before any handover and the row has no IMEI, label or handover evidence. Bind the full A:L state, verify the whole workbook independently, preserve the local archive, and record a retirement tombstone. After that deletion readback succeeds, restore continuous A-column sequence numbers on the fixed target sheet from physical row 3 (`sequence = row_number - 2`) through the separate `renumber_shipping_sequences` action. Bind the pre-write full A:L token and every exact store/order/row plus old/new sequence, preflight the complete batch, write only A, and independently read back the whole workbook. Ordinary runs inspect sequence values but perform no write when they are already correct. Keep uncertain, post-shipment and refusal cases in the table for review.
 - `table_sync` passes only after independent local archival, a complete online snapshot and verified row readback. Preserve human fields and restore missing unshipped orders with a factual note.
 - `approve` records existing exact-scope authorization when available; do not ask again for actions already authorized. Table writes, adding orders to supplies, IMEI writes and closing supplies are distinct action scopes.
 - `prepare` confirms an authorized new order by adding it to a compatible active supply and reading back `confirm`. Already-confirmed orders need no repeat mutation. Never use `deliver` as an acknowledgement or regress a later state.

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 
-STAGES = ["collect", "cancel_cleanup", "table_sync", "approve", "prepare", "wait_imei", "sync_imei", "labels", "archive"]
+STAGES = ["collect", "cancel_cleanup", "sequence_sync", "table_sync", "approve", "prepare", "wait_imei", "sync_imei", "labels", "archive"]
 
 
 def module():
@@ -29,6 +29,8 @@ def state_before(stage):
 
 
 @pytest.mark.parametrize("barrier,later", [
+    ("cancel_cleanup", "sequence_sync"),
+    ("sequence_sync", "table_sync"),
     ("cancel_cleanup", "table_sync"),
     ("table_sync", "prepare"),
     ("approve", "prepare"),
@@ -96,5 +98,23 @@ def test_pre_shipment_cancellation_cleanup_keeps_strict_evidence_and_archive_rul
         "verified tombstone",
         "post-shipment cancellation or refusal must not delete a row",
         "normally pending order deleted online still follows the restoration rule",
+    ):
+        assert phrase in text
+
+
+def test_sequence_sync_keeps_bounded_a_column_contract():
+    text = (Path(__file__).resolve().parents[1]
+            / ".agents/skills/wb-product-workflow/references/fulfillment-workflow.md").read_text(
+                encoding="utf-8")
+    for phrase in (
+        "renumber_shipping_sequences",
+        "physical row 3",
+        "sequence = row_number - 2",
+        "only column A",
+        "complete A:L state token",
+        "exact store, order, physical row, old sequence and new sequence",
+        "preflight the whole batch",
+        "independently read back the full workbook",
+        "issue no write when every sequence is already correct",
     ):
         assert phrase in text

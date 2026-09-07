@@ -4,7 +4,7 @@ Use for FBS warehouse processing, WPS shipping tables, IMEI replies, official la
 
 ## Order of work
 
-`collect -> table_sync -> approve -> prepare -> wait_imei -> sync_imei -> labels -> archive`
+`collect -> cancel_cleanup -> sequence_sync -> table_sync -> approve -> prepare -> wait_imei -> sync_imei -> labels -> archive`
 
 Maintain progress per `(store_id, order_id)`, with a separate run record for complete source coverage. One order waiting for a reply must not hold up other stores or orders.
 
@@ -72,6 +72,8 @@ Use these strict categories from current official fields and exact-order evidenc
 Write only an empty L cell or a cell still containing the worker's exact `【自动状态】` value. Preserve and report any other human text. The WPS adapter must hard-code column L, bind the complete A:L state token plus the current row, store and order identities and old/new values, journal before submission, and perform a separate full readback. Mark success only when the expected L cells changed and every other sheet value remained unchanged. A deleted row remains archived locally, but the status feature does not revive it; the existing restoration rule still restores only an order that fresh evidence says requires warehouse action.
 
 The user has authorized removal of a row from the current target WPS shipping sheet only when official same-order history proves cancellation before shipment and proves there was never handover, scan, sorting, carrier or transport progress, completed supply, IMEI or label evidence. Bind the deletion to the full A:L snapshot, exact store, order and current row, and a hash of the archived evidence; journal it before writing and independently read back the full workbook after the operation. Preserve the complete local archive and a verified tombstone, and prevent the pending-work planner from restoring the order while that cancellation remains terminal. Insufficient evidence, a post-shipment cancellation or refusal must not delete a row. A normally pending order deleted online still follows the restoration rule above.
+
+In a run that deletes a row, wait until the independent full-workbook deletion readback succeeds before correcting column A. On the fixed target sheet, every order from physical row 3 through the last order row must have `sequence = row_number - 2`. Use the separate `renumber_shipping_sequences` action, which can write only column A. Bind the pre-write complete A:L state token and, for every changed row, the exact store, order, physical row, old sequence and new sequence; preflight the whole batch before mutation and independently read back the full workbook afterward. Mark success only when the planned A cells changed and all other values stayed intact. Inspect this invariant on ordinary runs, but issue no write when every sequence is already correct.
 
 ## Local availability and recovery
 
