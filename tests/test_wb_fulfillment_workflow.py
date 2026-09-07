@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 
-STAGES = ["collect", "table_sync", "approve", "prepare", "wait_imei", "sync_imei", "labels", "archive"]
+STAGES = ["collect", "cancel_cleanup", "table_sync", "approve", "prepare", "wait_imei", "sync_imei", "labels", "archive"]
 
 
 def module():
@@ -29,6 +29,7 @@ def state_before(stage):
 
 
 @pytest.mark.parametrize("barrier,later", [
+    ("cancel_cleanup", "table_sync"),
     ("table_sync", "prepare"),
     ("approve", "prepare"),
     ("wait_imei", "sync_imei"),
@@ -83,3 +84,17 @@ def test_full_fulfillment_state_is_valid():
     state["stages"]["archive"]["status"] = "passed"
     state["stages"]["archive"]["evidence"] = ["warehouse-archive.json"]
     assert loaded.validate_state(state) == []
+
+
+def test_pre_shipment_cancellation_cleanup_keeps_strict_evidence_and_archive_rules():
+    text = (Path(__file__).resolve().parents[1]
+            / ".agents/skills/wb-product-workflow/references/fulfillment-workflow.md").read_text(
+                encoding="utf-8")
+    for phrase in (
+        "official same-order history proves cancellation before shipment",
+        "full A:L snapshot",
+        "verified tombstone",
+        "post-shipment cancellation or refusal must not delete a row",
+        "normally pending order deleted online still follows the restoration rule",
+    ):
+        assert phrase in text
