@@ -1,10 +1,10 @@
 # WB warehouse fulfillment
 
-Use for FBS warehouse processing, WPS shipping tables, IMEI replies, official labels and recurring synchronization. This reference defines the reusable contract. Confirm which stages the installed worker actually implements before enabling it; updating a skill does not deploy a service or authorize a new marketplace action.
+Use for FBS warehouse processing, seller-return pickup, WPS shipping/return tables, IMEI replies, official labels and recurring synchronization. This reference defines the reusable contract. Confirm which stages the installed worker actually implements before enabling it; updating a skill does not deploy a service or authorize a new marketplace action.
 
 ## Order of work
 
-`collect -> cancel_cleanup -> sequence_sync -> table_sync -> approve -> prepare -> wait_imei -> sync_imei -> labels -> archive`
+`collect -> cancel_cleanup -> sequence_sync -> table_sync -> return_sync -> approve -> prepare -> wait_imei -> sync_imei -> labels -> archive`
 
 Maintain progress per `(store_id, order_id)`, with a separate run record for complete source coverage. One order waiting for a reply must not hold up other stores or orders.
 
@@ -13,6 +13,8 @@ Maintain progress per `(store_id, order_id)`, with a separate run record for com
 3. **Wait for IMEI.** Leave the order pending until the warehouse supplies a valid reply. Preserve the human field and its history. No guessed IMEI and no new label download while the reply is absent.
 4. **Synchronize IMEI.** Verify store identity, current order status and current WB metadata, then submit the authorized reply only when allowed. Independent same-order readback must match before continuing.
 5. **Return shipment codes.** Download official label images, archive their source and hash, insert into the appropriate empty image columns and independently read back the resulting image references. Track order-label readiness separately from supply-QR readiness and physical handover.
+
+Seller-return pickup is a parallel warehouse branch. Collect it from the official seller returns/product-movement report, synchronize exact actionable returns to the configured return table, and keep its identity, journal and recovery state separate from the outbound order operation. A return source failure must not become zero returns or authorize changes to the outbound branch.
 
 The generic workflow state helper records these gates; it does not execute WB requests. A deployment must separately expose and validate each enabled mutation. Never describe an unimplemented `prepare` step, an unverified IMEI submission or an unstarted cloud worker as active.
 
@@ -75,6 +77,18 @@ The user has authorized removal of a row from the current target WPS shipping sh
 
 In a run that deletes a row, wait until the independent full-workbook deletion readback succeeds before correcting column A. On the fixed target sheet, every order from physical row 3 through the last order row must have `sequence = row_number - 2`. Use the separate `renumber_shipping_sequences` action, which can write only column A. Bind the pre-write complete A:L state token and, for every changed row, the exact store, order, physical row, old sequence and new sequence; preflight the whole batch before mutation and independently read back the full workbook afterward. Mark success only when the planned A cells changed and all other values stayed intact. Inspect this invariant on ordinary runs, but issue no write when every sequence is already correct.
 
+## Seller-return pickup synchronization
+
+Use the current official Seller Analytics goods-return/product-movement report for items travelling back to the seller. Do not treat the outbound FBS `wbStatus=ready_for_pickup` as seller-return evidence; in the outbound lifecycle it means the buyer can collect the purchase. A seller pickup task requires one exact return row with a complete store-scoped identity, active status, a valid ready timestamp, no completed or expired timestamp, and a source status explicitly meaning ready to issue to the seller. A cancellation, refusal, SKU match or active flag alone is insufficient.
+
+Keep the durable return identity as `(store_id, shkId)` and cross-check `srid` and original `orderId` on every observation. Identity disagreement, duplicate rows or missing keys blocks that return. Product model, capacity, color and IMEI may be enriched only through exact same-store, same-order or same-item evidence. Similar `nmId`, barcode or article text is not enough. Never expose a guessed IMEI.
+
+The source accepts date windows of at most 31 days and is rate limited per seller. On first enablement, collect the supported store history in complete windows. On later inspections, refresh the recent window and every locally persisted active return's `orderDt` anchor until a terminal record is observed. Preserve an active anchor when a response fails or omits it; HTTP errors, rate limits, partial windows and schema failures are unknown, not zero returns.
+
+Load the fixed return sheet and its exact column contract from private configuration. For the current implementation the columns are sequence, platform, store display name, original order ID, model, capacity, color, IMEI, quantity, note and status. Bind the complete workbook token and exact A:K row before every mutation. Append or restore only into the first available order row, keep the sequence equal to the physical row minus two, and update only the unique store/order row. Preserve the human IMEI field. In the note field, retain every non-managed line byte-for-byte and replace or append only lines bearing the adapter's return marker.
+
+Archive source payloads, normalized records, sheet snapshots, plans and write receipts locally before mutation. After the write response, independently read the complete workbook and prove that only the planned return cells changed. Reconcile an unknown result from current state before any retry. If an actionable return row is deleted while fresh official evidence still requires seller pickup, restore it with the latest archived manual values and a managed note describing the restoration. Do not restore a deleted row after the official record becomes picked up, expired or otherwise terminal.
+
 ## Local availability and recovery
 
 The local Codex heartbeat depends on the host, app, project files and network being available. When the user accepts interruptions, keep this local arrangement; do not require or deploy an independent cloud service. While offline or closed it cannot inspect WB/WPS. After the network recovers and Codex is running again, the next triggered run can resume. Do not promise an immediate wake-up or claim that missed runs executed. [Official scheduling documentation](https://learn.chatgpt.com/docs/automations?surface=app).
@@ -91,7 +105,7 @@ Notify on meaningful changes, completed actions, failures needing intervention o
 
 ## Whole-inspection performance
 
-Optimize the recurring inspection as a whole; do not add a separate single-order entrypoint unless requested. Independent read-only store collection may run concurrently, with separate credentials, archives, source status and rate limits. Keep the single-writer lock and ordered mutation/readback stages.
+Optimize the recurring inspection as a whole; do not add a separate single-order entrypoint unless requested. Independent read-only store collection may run concurrently, with separate credentials, archives, source status and rate limits. The seller-return report's per-seller interval still applies between two date windows for the same store; do not hide this required wait or shorten coverage to claim a faster run. Keep the single-writer lock and ordered mutation/readback stages.
 
 Reuse current collection evidence only to skip preparation work that would make no change. Require the same run ID, complete successful coverage of all configured stores, the expected seller identity, matching collection/status timestamps and fresh table/source evidence. A non-new order may then skip duplicate preparation queries. For `confirm`, also require the same supply ID and fresh, explicit evidence that it is neither closed nor scanned. A saved preparation journal must already be `prepared` and match the store/order/supply; an absent journal may support a no-op but must not be turned into a claim that this worker performed preparation. Do not rewrite an existing completed journal just to record another unchanged inspection.
 
