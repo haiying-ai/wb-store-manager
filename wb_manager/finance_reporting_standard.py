@@ -149,8 +149,24 @@ def load_active_wb_periodic_reporting_standard(
         )
 
     funding = _mapping(raw.get("fundingGovernance"), "fundingGovernance")
-    if funding.get("promotionalCreditsIgnored") is not True:
-        raise PeriodicReportingStandardError("Promotional credits must be ignored")
+    # Accounting exclusion is separate from permission to use an eligible
+    # promotional bucket in an explicitly approved funding plan. Retain the
+    # old spelling as a compatibility alias, not as a promotional-funding ban.
+    accounting_keys = (
+        "promotionalCreditsExcludedFromCashAccounting", "promotionalCreditsIgnored",
+    )
+    supplied_accounting_keys = [key for key in accounting_keys if key in funding]
+    if not supplied_accounting_keys or any(
+        funding[key] is not True for key in supplied_accounting_keys
+    ):
+        raise PeriodicReportingStandardError(
+            "Promotional credits must be excluded from seller-funded cash advertising "
+            "costs and confirmed cash reserves: set "
+            "fundingGovernance.promotionalCreditsExcludedFromCashAccounting=true "
+            "(promotionalCreditsIgnored is a legacy accounting alias; if both are "
+            "present both must be true). This does not disable promotional funding, "
+            "which is controlled separately by runningAccounts.funding.cashbackMode."
+        )
     if funding.get("noMoneyMovementWithoutExplicitAuthorization") is not True:
         raise PeriodicReportingStandardError(
             "Money movement must require explicit authorization"

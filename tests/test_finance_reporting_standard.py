@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -150,3 +151,135 @@ def test_periodic_standard_uses_tracked_cash_example_when_local_override_is_miss
         tmp_path / raw["canonicalWorkbook"]
     ).resolve()
     assert standard.historical_cash_events_registry == example.resolve()
+
+
+PROMO_CANONICAL_KEY = "promotionalCreditsExcludedFromCashAccounting"
+PROMO_LEGACY_KEY = "promotionalCreditsIgnored"
+
+
+def _standard_with_promo_contract(standard_fixture, flags, mode="prefer_eligible"):
+    changed = deepcopy(standard_fixture[0])
+    governance = changed["fundingGovernance"]
+    governance.pop(PROMO_CANONICAL_KEY, None)
+    governance.pop(PROMO_LEGACY_KEY, None)
+    governance.update(flags)
+    if mode is not None:
+        changed["runningAccounts"]["funding"] = {"cashbackMode": mode}
+    return _write_standard(standard_fixture, changed)
+
+
+def _runtime_plan_from_standard(standard):
+    """Exercise the loaded rule, selector and immutable builder, without APIs."""
+    from wb_manager.finance_funding_bridge import _promo_policy
+    from wb_manager.finance_funds import build_advertising_deposit_plan, select_cashback_split
+
+    enabled = _promo_policy(SimpleNamespace(periodic_standard=standard))
+    buckets = [{"sum": 37, "percent": 100, "expiration_date": "2026-10-01T00:00:00Z"}]
+    split = select_cashback_split(
+        100, buckets if enabled else [], now="2026-09-08T01:00:00Z",
+    )
+    basis = {
+        "schemaVersion": 1,
+        "basisType": "daily_confirmed_advertising",
+        "basisId": "daily-confirmed:synthetic-store:2026-09-07:" + "a" * 64,
+        "fingerprint": "a" * 64,
+        "store": "synthetic-store",
+        "currency": "CNY",
+        "dataThrough": "2026-09-07",
+        "stateThrough": "2026-09-07",
+        "cutoffView": "latest_complete_day",
+        "availableCashCny": "100.00",
+        "grossConfirmedAccrualCny": "150.00",
+        "sharedReturnChargeCny": "10.00",
+        "confirmedCashAllocatedCny": "40.00",
+        "lockedCashCny": "0.00",
+        "confirmedCashbackAllocatedCny": "0.00",
+        "lockedCashbackCny": "0.00",
+        "cashSpendCny": "30.00",
+        "unspentBookBudgetCny": "110.00",
+        "fundingAllowed": True,
+        "blockers": [],
+        "warnings": [],
+        "completeness": {"sourceCoverageComplete": True},
+        "evidence": {
+            "events": [{"eventId": "synthetic-sale", "cashCny": "150.00"}],
+            "fundingActions": [], "sourceCoverage": [], "excludedEvents": [],
+            "policy": {"policyVersion": "synthetic-policy"},
+            "activationSource": "synthetic-approved-opening",
+        },
+        "limitations": [],
+    }
+    plan = build_advertising_deposit_plan(
+        report_id=None, store="synthetic-store", campaign=42, amount_cny=100,
+        source="balance", currency="CNY", source_balance_cny="100.00",
+        source_balance_evidence_at="2026-09-08T01:00:00Z",
+        policy_cap_cny="100.00", available_advertising_reserve_cny="100.00",
+        approved_by="synthetic-owner", approved_at="2026-09-08T01:00:00Z",
+        expires_at="2026-09-08T01:30:00Z", funding_basis=basis,
+        cashback_amount_cny=split["cashbackAmountCny"],
+        cashback_percent=split["cashbackPercent"],
+        cashback_available_cny=split["cashbackAvailableCny"],
+        cashback_expires_at=split["cashbackExpiresAt"],
+    )
+    return enabled, plan.as_dict()
+
+
+@pytest.mark.parametrize("flags", [
+    {PROMO_CANONICAL_KEY: True},
+    {PROMO_LEGACY_KEY: True},
+    {PROMO_CANONICAL_KEY: True, PROMO_LEGACY_KEY: True},
+], ids=["canonical", "legacy", "both"])
+def test_cash_accounting_exclusion_allows_explicit_runtime_promo_funding(
+    tmp_path: Path, standard_fixture, flags,
+):
+    standard = load_active_wb_periodic_reporting_standard(
+        _standard_with_promo_contract(standard_fixture, flags), repo_root=tmp_path,
+    )
+    enabled, payload = _runtime_plan_from_standard(standard)
+    assert enabled is True
+    assert payload["schemaVersion"] == 3
+    assert payload["amountCny"] == "100.00"
+    assert payload["cashAmountCny"] == "63.00"
+    assert payload["cashbackAmountCny"] == "37.00"
+    assert payload["fundingBasis"]["availableCashCny"] == "100.00"
+    assert payload["cashbackPercent"] == 100
+    assert payload["withdrawalExecutionSupported"] is False
+
+
+@pytest.mark.parametrize("key", [PROMO_CANONICAL_KEY, PROMO_LEGACY_KEY])
+@pytest.mark.parametrize("invalid", [False, "true", 1, None], ids=["false", "string", "int", "null"])
+@pytest.mark.parametrize("both", [False, True], ids=["single", "dual-conflict"])
+def test_cash_accounting_exclusion_rejects_invalid_or_conflicting_flags(
+    tmp_path: Path, standard_fixture, key, invalid, both,
+):
+    flags = {PROMO_CANONICAL_KEY: True, PROMO_LEGACY_KEY: True} if both else {}
+    flags[key] = invalid
+    path = _standard_with_promo_contract(standard_fixture, flags)
+    with pytest.raises(PeriodicReportingStandardError):
+        load_active_wb_periodic_reporting_standard(path, repo_root=tmp_path)
+
+
+def test_cash_accounting_exclusion_requires_canonical_or_legacy_flag(tmp_path: Path, standard_fixture):
+    path = _standard_with_promo_contract(standard_fixture, {})
+    with pytest.raises(PeriodicReportingStandardError):
+        load_active_wb_periodic_reporting_standard(path, repo_root=tmp_path)
+
+
+@pytest.mark.parametrize("mode", [None, "disabled", "cash_only"])
+@pytest.mark.parametrize("flags", [
+    {PROMO_CANONICAL_KEY: True},
+    {PROMO_LEGACY_KEY: True},
+    {PROMO_CANONICAL_KEY: True, PROMO_LEGACY_KEY: True},
+], ids=["canonical", "legacy", "both"])
+def test_cash_accounting_flag_does_not_enable_runtime_promotion(
+    tmp_path: Path, standard_fixture, flags, mode,
+):
+    standard = load_active_wb_periodic_reporting_standard(
+        _standard_with_promo_contract(standard_fixture, flags, mode), repo_root=tmp_path,
+    )
+    enabled, payload = _runtime_plan_from_standard(standard)
+    assert enabled is False
+    assert payload["schemaVersion"] == 3
+    assert payload["amountCny"] == payload["cashAmountCny"] == "100.00"
+    assert payload["cashbackAmountCny"] == "0.00"
+    assert payload["cashbackPercent"] is None

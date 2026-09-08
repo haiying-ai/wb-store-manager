@@ -184,6 +184,19 @@ Follow the daily funding contract below.
 
 ### Daily confirmed funding contract
 
+Keep cash accounting separate from promotional-funding eligibility.
+`fundingGovernance.promotionalCreditsExcludedFromCashAccounting=true` excludes
+promotional credits from seller cash advertising expense and confirmed cash
+reserves; `promotionalCreditsIgnored` is its deprecated compatibility alias,
+not a ban on using promotional funds. New active configurations use the explicit
+name. Old-only configurations remain valid; if both names are supplied, both
+must be boolean true. `runningAccounts.funding.cashbackMode=prefer_eligible`
+independently permits eligible promotional buckets in an exact approved v3
+plan. These rules are compatible: do not report their coexistence as a conflict
+or disable cash-accounting exclusion to enable promotional funding. A campaign
+allocation consumes the cash allowance, but cash advertising expense is based
+on actual later seller-funded consumption, not the deposit itself.
+
 Use `finance funds-plan --through yesterday` for the durable daily confirmed
 basis, without a weekly report ID. If source ingestion is behind, run
 `finance funds-refresh --through yesterday --correction-window-days 30`:
