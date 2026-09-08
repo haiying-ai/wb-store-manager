@@ -17,6 +17,8 @@ For WB advertising selection, creation, resumption, search-term exclusions, or m
 
 For completed-order profit, weekly or monthly finance reports, return-charge reconciliation, managed-operations fees, withdrawals, or advertising funding, first read `references/financial-reporting.md`. Keep the read-only `finance` flow separate from the side-effecting `funding` flow. A finance report may propose a withdrawal or a balance-funded campaign-budget allocation, but it must never execute either action implicitly.
 
+Daily advertising funding uses the confirmed running-account basis independently of weekly report publication. `finance funds-refresh` fetches source evidence and refreshes daily funding without rebuilding reports. Only an enabled private rule permits a new exact plan to include eligible promotional credits; keep cash and promotion allocations separate, never charge promotional spending as seller cash cost, and preserve exact approval plus independent source/campaign readback. See the daily funding contract in `references/financial-reporting.md`.
+
 For every request to test, create, replace, resume, or inspect a **new smartphone image master**, first read `references/phone-new-master-production-standard.md`, then run `python .agents/skills/wb-product-workflow/scripts/phone_new_master_workflow.py status` and `validate`. The active pointer is authoritative across conversations. Resume it before selecting an SKU or creating any workflow. Never silently replace its pilot, source set, production mode, or task ID. When the user asks to design a new master first, use the tracked `DESIGN_SYNTHESIS` brief/approval stage; only a separately approved complete design set may be promoted into `EXACT_MASTER_TEST`.
 
 For every flow:

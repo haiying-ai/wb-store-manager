@@ -25,6 +25,7 @@ from .finance_running_account import (FinanceEvent, RunningAccount, METRICS,
 from .finance_running_sources import extract_running_account_sources
 from .finance_costs import normalize_product_key
 from .finance_owner_views import build_owner_view, period_windows
+from .finance_running_lock import serialized_running_account
 
 TEMPLATE_VERSION = "wb-owner-dashboard-v2"
 MOSCOW = ZoneInfo("Europe/Moscow")
@@ -278,6 +279,7 @@ def _supplement_marketplace_orders(service, sources):
     sources["rawOrders"] = rows
 
 
+@serialized_running_account(writer=True)
 def refresh_running_accounts(service, *, through: date, source_statuses=None) -> dict[str, Any]:
     started = time.perf_counter()
     settings = _settings(service)

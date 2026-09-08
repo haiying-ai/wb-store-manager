@@ -89,6 +89,7 @@ _LOCKING_ADVERTISING_ACTION_STATUSES = {
     "executed",
     "succeeded",
     "unknown",
+    "readback_pending",
 }
 _DELTA_MONEY_FIELDS = (
     "salesAmountGCny",
@@ -584,6 +585,24 @@ class FinanceService:
         return refresh_running_accounts(
             self, through=cutoff, source_statuses=source_statuses
         )
+
+    def funds_refresh(
+        self, *, through: str | date = "yesterday", correction_window_days: int = 30,
+    ) -> dict[str, Any]:
+        """Refresh official sources and daily funding without building reports."""
+        cutoff = self._complete_financial_cutoff(through)
+        if not 1 <= int(correction_window_days) <= 120:
+            raise FinanceServiceError("Funding correction window must be between 1 and 120 days")
+        summaries = sync_enabled_stores(
+            self.ledger, registry_path=self.registry_path, repo_root=self.repo_root,
+            through=cutoff, bootstrap=False, correction_window_days=int(correction_window_days),
+            max_store_workers=self.max_store_workers, source_factory=self.source_factory,
+            now=self._now(),
+        )
+        statuses = [summary.as_dict() for summary in summaries]
+        accounts = self.account_refresh(through=cutoff, source_statuses=statuses)
+        return {"operation": "funds_refresh", "stores": statuses, "runningAccounts": accounts,
+                "fundingPlan": self.funds_plan(through=cutoff), "fundingWriteAttempted": False}
 
     def account_report(
         self,
@@ -1443,7 +1462,10 @@ class FinanceService:
             "artifacts": artifact_paths,
         }
 
-    def funds_plan(self, *, report_id: str) -> dict[str, Any]:
+    def funds_plan(self, *, report_id: str | None = None, through: str | date = "yesterday") -> dict[str, Any]:
+        if report_id is None:
+            from .finance_funding_bridge import daily_funds_plan
+            return daily_funds_plan(self, through=through)
         report = self.ledger.get_report(report_id)
         if report is None:
             raise FinanceServiceError(f"Unknown report: {report_id}")
@@ -1491,7 +1513,7 @@ class FinanceService:
             commitments = [
                 DepositCommitment(
                     action_id=str(item["action_id"]),
-                    amount_cny=Decimal(str(item["requested_amount_cny"])),
+                    amount_cny=self._funding_action_cash_amount(item),
                     status=str(item["lifecycle_status"]),
                     readback_at=(
                         datetime.fromisoformat(str(item["executed_at"]))
@@ -1644,7 +1666,7 @@ class FinanceService:
 
         existing = self.ledger.query_funding_actions(
             store_alias=payload["store"],
-            report_id=payload["reportId"],
+            report_id=payload.get("reportId"),
             action_type="advertising_top_up",
         )
         matching = [
@@ -1653,7 +1675,7 @@ class FinanceService:
             if str(item["idempotency_key"]) == f"ads-deposit:{payload['fingerprint']}"
         ]
         if not confirm_live:
-            self._require_current_deposit_report(payload["reportId"])
+            self._require_deposit_basis(payload, exclude_action_id=(str(matching[0]["action_id"]) if matching else None))
             self._require_governed_deposit_cap(
                 payload,
                 exclude_action_id=(str(matching[0]["action_id"]) if matching else None),
@@ -1679,7 +1701,7 @@ class FinanceService:
                     payload["store"],
                     action_type="advertising_top_up",
                     requested_amount_cny=payload["amountCny"],
-                    report_id=payload["reportId"],
+                    report_id=payload.get("reportId"),
                     status="proposed",
                     requested_at=payload["approvedAt"],
                     evidence=payload,
@@ -1704,7 +1726,7 @@ class FinanceService:
             )
         action = matching[0]
         if str(action["lifecycle_status"]) in {"proposed", "approved"}:
-            self._require_current_deposit_report(payload["reportId"])
+            self._require_deposit_basis(payload, exclude_action_id=str(action["action_id"]))
         owner = f"finance-{uuid.uuid4()}"
         lock_name = f"wb-advertising-funds:{payload['store']}"
         # The strict preflight performs four read calls, followed by one write
@@ -1740,7 +1762,7 @@ class FinanceService:
                 if lifecycle_status in {"proposed", "approved"}:
                     self._cancel_pre_post_action(action, payload, str(exc))
                 raise
-            if lifecycle_status in {"unknown", "executing", "executed", "succeeded"}:
+            if lifecycle_status in {"unknown", "executing", "executed", "succeeded", "readback_pending"}:
                 return self._resolve_deposit_readback_only(client, payload, action)
             check_status = "approved" if lifecycle_status == "proposed" else lifecycle_status
             preflight = preflight_deposit_execution(
@@ -1792,6 +1814,10 @@ class FinanceService:
                     "livePreflight": live_preflight,
                 },
             )
+            promo_request = {}
+            if payload.get("schemaVersion") == 3 and Decimal(payload["cashbackAmountCny"]) > _ZERO:
+                promo_request = {"cashback_sum": int(Decimal(payload["cashbackAmountCny"])),
+                    "cashback_percent": payload["cashbackPercent"]}
             result = deposit_campaign_budget(
                 client,
                 campaign_id=int(payload["campaign"]),
@@ -1799,6 +1825,7 @@ class FinanceService:
                 source=payload["source"],
                 approved_by=approved_by,
                 confirm_live=True,
+                **promo_request,
             )
             final_status = result.state
             readback: dict[str, Any] | None = None
@@ -1847,6 +1874,7 @@ class FinanceService:
         campaign: int,
         amount_cny: Any,
         approved_by: str,
+        use_cashback: bool = True,
     ) -> dict[str, Any]:
         """Create one immutable balance-funded campaign plan after GET-only preflight."""
 
@@ -1857,6 +1885,11 @@ class FinanceService:
             raise FinanceServiceError(f"Funding plan is unreadable: {source_path}") from exc
         if not isinstance(funding_payload, Mapping):
             raise FinanceServiceError("Funding plan must contain an object")
+        if funding_payload.get("planType") == "daily_funding":
+            from .finance_funding_bridge import daily_ads_deposit_plan
+            return daily_ads_deposit_plan(self, funding_payload, source_path=source_path,
+                store_alias=store_alias, campaign=campaign, amount_cny=amount_cny,
+                approved_by=approved_by, use_cashback=use_cashback)
         if (
             funding_payload.get("schemaVersion") != 1
             or funding_payload.get("planType") != "weekly_funding"
@@ -2676,11 +2709,11 @@ class FinanceService:
             pending_campaign_allocation = _money(
                 sum(
                     (
-                        Decimal(row["requested_amount_cny"])
+                        self._funding_action_cash_amount(row)
                         for row in self.ledger.query_funding_actions(
                             store_alias=alias,
                             action_type="advertising_top_up",
-                            lifecycle_status=("approved", "executing", "unknown"),
+                            lifecycle_status=("approved", "executing", "executed", "unknown", "readback_pending"),
                         )
                     ),
                     _ZERO,
@@ -2793,6 +2826,12 @@ class FinanceService:
             )
         return observed_at
 
+    def _require_deposit_basis(self, payload, *, exclude_action_id=None):
+        if payload.get("schemaVersion") == 3:
+            from .finance_funding_bridge import require_daily_basis
+            return require_daily_basis(self, payload, exclude_action_id=exclude_action_id)
+        return self._require_current_deposit_report(payload["reportId"])
+
     def _require_current_deposit_report(self, report_id: str) -> dict[str, Any]:
         report = self.ledger.get_report(report_id)
         if report is None:
@@ -2820,6 +2859,9 @@ class FinanceService:
     ) -> Decimal:
         if self.policy.advertising_deposit_cap_rule != ADVERTISING_DEPOSIT_CAP_RULE:
             raise FinanceServiceError("Active advertising-deposit cap rule is unsupported")
+        if payload.get("schemaVersion") == 3:
+            from .finance_funding_bridge import require_daily_basis
+            return require_daily_basis(self, payload, exclude_action_id=exclude_action_id)
         governed = self._available_advertising_reserve_cny(
             str(payload["store"]),
             exclude_action_id=exclude_action_id,
@@ -2882,10 +2924,15 @@ class FinanceService:
                 continue
             if self._funding_action_locks_reserve(action):
                 reserve -= _strict_non_negative_money(
-                    action["requested_amount_cny"],
+                    self._funding_action_cash_amount(action),
                     "locked advertising deposit",
                 )
         return max(_ZERO, reserve).quantize(_CENT)
+
+    @staticmethod
+    def _funding_action_cash_amount(action: Mapping[str, Any]) -> Decimal:
+        from .finance_funding_bridge import action_cash_amount
+        return action_cash_amount(action)
 
     def _funding_action_locks_reserve(self, action: Mapping[str, Any]) -> bool:
         status = str(action.get("lifecycle_status") or "").lower()
@@ -2909,6 +2956,9 @@ class FinanceService:
         *,
         exclude_action_id: str,
     ) -> dict[str, Any]:
+        if payload.get("schemaVersion") == 3:
+            from .finance_funding_bridge import daily_live_preflight
+            return daily_live_preflight(self, client, payload, exclude_action_id=exclude_action_id)
         live = self._live_advertising_funding_snapshot(
             client,
             store_alias=str(payload["store"]),
@@ -3061,6 +3111,7 @@ class FinanceService:
             "sourceBalanceEvidenceAt": evidence_at.isoformat(),
             "campaignStatus": status,
             "campaignBudgetBeforeCny": _money(budget_before),
+            "cashbacks": balance_data.get("cashbacks"),
             "permissionsConfirmed": True,
         }
 
@@ -3123,6 +3174,11 @@ class FinanceService:
                 else None
             )
             matched = observed_total == expected_total
+            funding_readback = None
+            if payload.get("schemaVersion") == 3:
+                from .finance_funding_bridge import funding_source_readback
+                funding_readback = funding_source_readback(client, payload)
+                matched = matched and bool(funding_readback.get("matched"))
             return {
                 "status": response.status,
                 "data": response.data,
@@ -3131,6 +3187,7 @@ class FinanceService:
                     _money(observed_total) if observed_total is not None else None
                 ),
                 "matched": matched,
+                **({"fundingSourceReadback": funding_readback} if funding_readback is not None else {}),
             }
         except Exception as exc:
             return {
@@ -3316,7 +3373,7 @@ class FinanceService:
         ):
             effective_at = self._confirmed_deposit_effective_at(row)
             if effective_at is not None and effective_at >= activation:
-                consumed += Decimal(row["requested_amount_cny"])
+                consumed += self._funding_action_cash_amount(row)
         consumed = max(_ZERO, consumed)
         adjusted = []
         for accrual in sorted(accruals, key=lambda item: (item.accrued_at, item.accrual_id)):

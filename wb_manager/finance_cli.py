@@ -139,15 +139,23 @@ def add_finance_parser(subparsers: Any) -> None:
         "--reason", help="Required explanation when the same period is restated"
     )
 
+    funds_refresh = commands.add_parser(
+        "funds-refresh", help="Fetch financial sources and refresh daily funding without generating reports"
+    )
+    _add_runtime_paths(funds_refresh)
+    funds_refresh.add_argument("--through", default="yesterday")
+    funds_refresh.add_argument("--correction-window-days", type=int, default=30)
+
     funds = commands.add_parser(
         "funds-plan", help="Create a plan-only withdrawal and advertising-reserve calculation"
     )
     _add_runtime_paths(funds)
     funds.add_argument(
         "--report-id",
-        required=True,
-        help="Latest allocation-ready weekly report ID; open items are excluded",
+        default=None,
+        help="Optional legacy weekly report ID; omit to use the confirmed daily account",
     )
+    funds.add_argument("--through", default="yesterday", help="Complete financial day for the daily funding basis")
 
     deposit_plan = commands.add_parser(
         "ads-deposit-plan",
@@ -157,7 +165,7 @@ def add_finance_parser(subparsers: Any) -> None:
     deposit_plan.add_argument(
         "--funds-plan",
         required=True,
-        help="Exact weekly funding-plan JSON produced by finance funds-plan",
+        help="Exact daily or legacy weekly funding-plan JSON produced by finance funds-plan",
     )
     deposit_plan.add_argument(
         "--store",
@@ -181,6 +189,7 @@ def add_finance_parser(subparsers: Any) -> None:
         required=True,
         help="Approver for this exact store, campaign and amount",
     )
+    deposit_plan.add_argument("--cash-only", action="store_true", help="Explicitly disable promotional participation in a new daily plan")
 
     deposit = commands.add_parser(
         "ads-deposit", help="Execute one explicitly approved balance-funded campaign-budget allocation plan"
@@ -332,8 +341,10 @@ def dispatch_finance(args: argparse.Namespace) -> int:
             )
         elif command == "report":
             result = service.report(kind=args.kind, period=args.period, reason=args.reason)
+        elif command == "funds-refresh":
+            result = service.funds_refresh(through=args.through, correction_window_days=args.correction_window_days)
         elif command == "funds-plan":
-            result = service.funds_plan(report_id=args.report_id)
+            result = service.funds_plan(report_id=args.report_id, through=args.through)
         elif command == "ads-deposit-plan":
             result = service.ads_deposit_plan(
                 funds_plan_path=Path(args.funds_plan),
@@ -341,6 +352,7 @@ def dispatch_finance(args: argparse.Namespace) -> int:
                 campaign=args.campaign,
                 amount_cny=args.amount_cny,
                 approved_by=args.approved_by,
+                use_cashback=not args.cash_only,
             )
         elif command == "ads-deposit":
             result = service.ads_deposit(

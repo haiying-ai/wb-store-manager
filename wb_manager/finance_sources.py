@@ -929,13 +929,17 @@ def deposit_campaign_budget(
     approved_by: str,
     confirm_live: bool,
     requester: RequestCallable | None = None,
+    cashback_sum: int | None = None,
+    cashback_percent: int | None = None,
 ) -> CampaignDepositResult:
     """Perform exactly one approved campaign-budget deposit with no retry.
 
     A transport error is deliberately reported as ``unknown`` because the API
     may have committed the transfer before the connection failed. The caller
     must read the campaign budget before deciding whether another request is
-    safe.
+    safe. ``amount`` is total campaign credit, including ``cashback_sum`` when
+    present; ``cashback_percent`` must match one current, unexpired balance
+    bucket verified by the caller. No failure is retried as a cash-only deposit.
     """
 
     if confirm_live is not True:
@@ -948,9 +952,26 @@ def deposit_campaign_budget(
     if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
         raise FinanceSourceError("amount must be a positive integer")
     funding_source = _funding_source(source)
+    if cashback_sum is not None or cashback_percent is not None:
+        if (
+            isinstance(cashback_sum, bool) or not isinstance(cashback_sum, int)
+            or cashback_sum < 0 or cashback_sum > amount
+        ):
+            raise FinanceSourceError("cashback_sum must be a non-negative integer no greater than amount")
+        if (
+            isinstance(cashback_percent, bool) or not isinstance(cashback_percent, int)
+            or not 0 < cashback_percent <= 100
+        ):
+            raise FinanceSourceError("cashback_percent must be an integer from 1 to 100")
+        if int(funding_source) not in (0, 1):
+            raise FinanceSourceError("Promo cashback can use only account or balance funding")
+        if cashback_sum * 100 > amount * cashback_percent:
+            raise FinanceSourceError("cashback_sum exceeds the selected bucket percentage")
     request = requester or client.request
     source_name = funding_source.name.lower()
     body = {"sum": amount, "type": int(funding_source), "return": True}
+    if cashback_sum is not None:
+        body.update(cashback_sum=cashback_sum, cashback_percent=cashback_percent)
     url = f"{ADVERTISING_BASE_URL}/adv/v1/budget/deposit?id={int(campaign_id)}"
     try:
         response = request("POST", url, body=body, retries=0)

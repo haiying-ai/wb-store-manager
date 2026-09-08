@@ -177,8 +177,54 @@ write route is independently verified. Under the active policy from
 not require a prior withdrawal or an external cash recharge. The allocation
 still requires an exact store/campaign/currency/amount dry run, a fresh balance
 and reserve preflight, explicit approval of that same fingerprint, one
-execution attempt, and campaign-budget readback. Do not select promotional
-credits or silently fall back to another source.
+execution attempt, and independent campaign-budget and source-debit readback.
+An explicitly enabled private funding rule may prefer an eligible promotional
+bucket in a new mixed plan; this never authorizes a payment or a cash fallback.
+Follow the daily funding contract below.
+
+### Daily confirmed funding contract
+
+Use `finance funds-plan --through yesterday` for the durable daily confirmed
+basis, without a weekly report ID. If source ingestion is behind, run
+`finance funds-refresh --through yesterday --correction-window-days 30`:
+bounded official source ingestion, account materialization, then funds-plan.
+This path does not generate a workbook or execute a deposit. `account-refresh`
+alone only materializes existing local evidence; it is not a source fetch.
+Do not advance a date to disguise missing source coverage. Keep the existing
+scheduled owner report/template unchanged; a funding refresh is not a report.
+
+Compute each store's cash ceiling from confirmed CNY original-policy accruals,
+linked refund reversals, applicable legacy shared-pool logistics, and all
+current confirmed or locked cash allocations, even if those allocations are
+later than the business-event cutoff. Subtract cash allocations, not both
+allocations and consumption. Separately show the book budget after actual
+cash consumption and its unspent campaign allocations. Unsettled positive
+sales and reference exchange-rate estimates are excluded, not zeroed into
+confirmed cash; unresolved negative adjustments or stale coverage block new
+money. Historical report approvals never migrate to a daily basis.
+
+`finance ads-deposit-plan --funds-plan <daily.json> ...` creates a GET-only
+preflight and immutable v3 exact proposal, not approval. Freeze daily basis,
+store, campaign, currency, total, cash amount, promotional amount, one eligible
+bucket's available balance, percentage and expiry, live settlement balance,
+approval actor and expiry in its fingerprint. With the approved private rule,
+select one unambiguous eligible bucket; never combine buckets. The cash part
+alone must fit confirmed cash and live `balance.net`. A valid 100% promotional
+bucket may cover the total with zero cash; promotional spending is neither
+seller cash expense nor cash reserve usage. Official deposit `sum` is the
+total and `cashback_sum`/`cashback_percent` specify the promotional part.
+`--cash-only` creates a distinct proposal; failed promo must never silently
+be replaced with cash. Legacy v2 exact plans retain their original contract.
+
+Before any approved write, serialize by store and revalidate current daily
+evidence, currency, source balances, identity and both cash/promotional locks.
+Persist execution before the single no-retry POST. Executing, unknown or
+readback-pending actions retain their locks and only permit GET reconciliation.
+Confirm only when campaign increment and separate cash/promo source debits
+match; HTTP success is insufficient. Do not reuse a stale promotional snapshot
+to resurrect confirmed spent funds. New grants reusing a bucket identity need
+independent reconciliation. Insufficient cash produces a precise shortfall;
+do not invent a reserve increase or assume that an account balance is budget.
 
 Reconcile actual campaign consumption from official promotion evidence and
 the later settlement-cycle charge from official finance/balance evidence.

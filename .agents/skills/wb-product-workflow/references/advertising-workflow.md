@@ -117,6 +117,12 @@ platform limitation has been recorded. If automatic recharge is not exposed
 by available read APIs, say verification is unavailable; do not claim it is
 confirmed off. Do not enable it implicitly.
 
+Use the daily confirmed funding contract in `financial-reporting.md`; weekly
+publication is not a prerequisite. The funding-only source refresh must not
+rebuild the owner workbook. Freeze and approve each cash/promotion split, and
+keep both amounts locked until independently reconciled; a provisional book
+budget or a promotional grant is not a larger confirmed cash ceiling.
+
 ## 4. Observation and completion
 
 Monitoring is not supplied by this Skill alone. For a requested recurring

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -21,6 +22,7 @@ _LOCKING_DEPOSIT_STATUSES = {
     "executed",
     "succeeded",
     "unknown",
+    "readback_pending",
 }
 _KNOWN_DEPOSIT_STATUSES = _LOCKING_DEPOSIT_STATUSES | {
     "proposed",
@@ -94,7 +96,7 @@ class StoreFundingPlan:
 
 @dataclass(frozen=True)
 class AdvertisingDepositPlan:
-    report_id: str
+    report_id: str | None
     store: str
     campaign: int
     amount_cny: Decimal
@@ -108,6 +110,12 @@ class AdvertisingDepositPlan:
     approved_at: datetime
     expires_at: datetime
     fingerprint: str
+    funding_basis: Mapping[str, Any] | None = None
+    cash_amount_cny: Decimal | None = None
+    cashback_amount_cny: Decimal = Decimal("0")
+    cashback_percent: int | None = None
+    cashback_available_cny: Decimal | None = None
+    cashback_expires_at: datetime | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload = _deposit_payload(
@@ -124,6 +132,12 @@ class AdvertisingDepositPlan:
             approved_by=self.approved_by,
             approved_at=self.approved_at,
             expires_at=self.expires_at,
+            funding_basis=self.funding_basis,
+            cash_amount_cny=self.cash_amount_cny,
+            cashback_amount_cny=self.cashback_amount_cny,
+            cashback_percent=self.cashback_percent,
+            cashback_available_cny=self.cashback_available_cny,
+            cashback_expires_at=self.cashback_expires_at,
         )
         payload["fingerprint"] = self.fingerprint
         return payload
@@ -336,7 +350,7 @@ def validate_funding_plan(plan: StoreFundingPlan | Mapping[str, Any]) -> dict[st
 
 def build_advertising_deposit_plan(
     *,
-    report_id: str,
+    report_id: str | None = None,
     store: str,
     campaign: int,
     amount_cny: Any,
@@ -349,8 +363,24 @@ def build_advertising_deposit_plan(
     approved_by: str,
     approved_at: datetime | str,
     expires_at: datetime | str,
+    funding_basis: Mapping[str, Any] | None = None,
+    cashback_amount_cny: Any = 0,
+    cashback_percent: int | None = None,
+    cashback_available_cny: Any | None = None,
+    cashback_expires_at: datetime | str | None = None,
 ) -> AdvertisingDepositPlan:
-    report = _required_text(report_id, "report_id")
+    """Freeze a v2 weekly cash plan or a v3 daily cash/promo funding plan.
+
+    ``amount_cny`` is the total campaign credit. Only its seller-cash portion
+    consumes the daily confirmed reserve or live source balance. The service
+    must verify the complete daily-basis fingerprint and recheck the selected
+    live cashback bucket before execution; this pure builder grants no money
+    movement authorization.
+    """
+    daily = funding_basis is not None
+    if daily and report_id not in (None, ""):
+        raise FundingPlanError("Daily funding plans require report_id=None")
+    report = None if daily else _required_text(report_id, "report_id")
     store_name = _required_text(store, "store")
     if isinstance(campaign, bool):
         raise FundingPlanError("campaign must be a positive integer")
@@ -360,29 +390,59 @@ def build_advertising_deposit_plan(
         raise FundingPlanError("campaign must be a positive integer") from exc
     if campaign_id <= 0 or str(campaign_id) != str(campaign).strip():
         raise FundingPlanError("campaign must be a positive integer")
-    amount = _positive_money(amount_cny, "amount_cny")
-    if amount != amount.to_integral_value():
-        raise FundingPlanError("WB advertising deposit amount must be whole CNY")
+    amount = _whole_money(amount_cny, "amount_cny", positive=True)
     source_name = _required_text(source, "source").lower()
     if source_name not in _DEPOSIT_SOURCES:
         raise FundingPlanError(f"Unsupported advertising deposit source: {source!r}")
+    if daily and source_name != "balance":
+        raise FundingPlanError("Daily funding must use WB balance (net/type=1)")
     currency_name = _required_text(currency, "currency").upper()
     if currency_name != _DEPOSIT_CURRENCY:
         raise FundingPlanError(
             f"Advertising deposit currency must be {_DEPOSIT_CURRENCY}"
         )
-    source_balance = _non_negative_money(source_balance_cny, "source_balance_cny")
+    source_balance = (_exact_non_negative_money if daily else _non_negative_money)(
+        source_balance_cny, "source_balance_cny"
+    )
     source_evidence_at = _aware_datetime(
         source_balance_evidence_at, "source_balance_evidence_at"
     )
-    policy_cap = _positive_money(policy_cap_cny, "policy_cap_cny")
-    advertising_reserve = _non_negative_money(
+    policy_cap = (_exact_non_negative_money if daily else _positive_money)(
+        policy_cap_cny, "policy_cap_cny"
+    )
+    advertising_reserve = (_exact_non_negative_money if daily else _non_negative_money)(
         available_advertising_reserve_cny,
         "available_advertising_reserve_cny",
     )
     approver = _required_text(approved_by, "approved_by")
     approval_time = _aware_datetime(approved_at, "approved_at")
     expiry = _aware_datetime(expires_at, "expires_at")
+    basis = _validated_funding_basis(funding_basis, store_name, currency_name) if daily else None
+    cashback = _whole_money(cashback_amount_cny, "cashback_amount_cny")
+    cashback_available = None
+    cashback_expiry = None
+    percent = None
+    if not daily and (
+        cashback or any(value is not None for value in (
+            cashback_percent, cashback_available_cny, cashback_expires_at
+        ))
+    ):
+        raise FundingPlanError("Cashback funding requires a daily funding basis (schema v3)")
+    if cashback:
+        percent = _cashback_percentage(cashback_percent)
+        cashback_available = _exact_non_negative_money(cashback_available_cny, "cashback_available_cny")
+        cashback_expiry = _aware_datetime(cashback_expires_at, "cashback_expires_at")
+        if cashback > amount or cashback * 100 > amount * percent:
+            raise FundingPlanError("cashback amount exceeds the bucket percentage of total deposit")
+        if cashback > cashback_available:
+            raise FundingPlanError("cashback amount exceeds the selected bucket balance")
+        if cashback_expiry <= approval_time or expiry > cashback_expiry:
+            raise FundingPlanError("cashback bucket expires before the approved plan expires")
+    elif daily and any(value is not None for value in (
+        cashback_percent, cashback_available_cny, cashback_expires_at
+    )):
+        raise FundingPlanError("Cash-only plans must not retain unused cashback bucket fields")
+    cash = amount - cashback
     if source_evidence_at > approval_time:
         raise FundingPlanError("source balance evidence cannot postdate approval")
     if approval_time - source_evidence_at > _MAX_DEPOSIT_BALANCE_EVIDENCE_AGE:
@@ -391,15 +451,19 @@ def build_advertising_deposit_plan(
         raise FundingPlanError("expires_at must be after approved_at")
     if expiry - approval_time > _MAX_DEPOSIT_PLAN_LIFETIME:
         raise FundingPlanError("advertising deposit approval cannot remain valid over one hour")
-    if amount > source_balance:
+    if cash > source_balance:
         raise FundingPlanError("advertising deposit exceeds the frozen source balance")
     if policy_cap != advertising_reserve:
         raise FundingPlanError(
             "policy_cap_cny must equal the governed available advertising reserve"
         )
-    if amount > policy_cap:
+    if basis is not None and _non_negative_money(
+        basis["availableCashCny"], "fundingBasis.availableCashCny"
+    ) != advertising_reserve:
+        raise FundingPlanError("Daily funding basis differs from the frozen cash reserve")
+    if cash > policy_cap:
         raise FundingPlanError("advertising deposit exceeds the governed policy cap")
-    if amount > advertising_reserve:
+    if cash > advertising_reserve:
         raise FundingPlanError("advertising deposit exceeds the frozen advertising reserve")
     payload = _deposit_payload(
         report_id=report,
@@ -415,6 +479,12 @@ def build_advertising_deposit_plan(
         approved_by=approver,
         approved_at=approval_time,
         expires_at=expiry,
+        funding_basis=basis,
+        cash_amount_cny=cash if daily else None,
+        cashback_amount_cny=cashback,
+        cashback_percent=percent,
+        cashback_available_cny=cashback_available,
+        cashback_expires_at=cashback_expiry,
     )
     return AdvertisingDepositPlan(
         report_id=report,
@@ -431,6 +501,12 @@ def build_advertising_deposit_plan(
         approved_at=approval_time,
         expires_at=expiry,
         fingerprint=_fingerprint(payload),
+        funding_basis=basis,
+        cash_amount_cny=cash if daily else None,
+        cashback_amount_cny=cashback,
+        cashback_percent=percent,
+        cashback_available_cny=cashback_available,
+        cashback_expires_at=cashback_expiry,
     )
 
 
@@ -458,12 +534,18 @@ def validate_advertising_deposit_plan(
         "withdrawalExecutionSupported",
         "fingerprint",
     }
+    version = payload.get("schemaVersion")
+    if version == 3:
+        required.update({
+            "fundingBasis", "cashAmountCny", "cashbackAmountCny",
+            "cashbackPercent", "cashbackAvailableCny", "cashbackExpiresAt",
+        })
     if set(payload) != required:
         raise FundingPlanError(
             f"Deposit plan fields differ from the contract: {sorted(set(payload) ^ required)}"
         )
     if (
-        payload.get("schemaVersion") != 2
+        version not in (2, 3)
         or payload.get("planType") != "advertising_deposit"
         or payload.get("actionType") != "advertising_top_up"
     ):
@@ -486,6 +568,11 @@ def validate_advertising_deposit_plan(
         approved_by=payload.get("approvedBy"),
         approved_at=payload.get("approvedAt"),
         expires_at=payload.get("expiresAt"),
+        funding_basis=payload.get("fundingBasis") if version == 3 else None,
+        cashback_amount_cny=payload.get("cashbackAmountCny", 0),
+        cashback_percent=payload.get("cashbackPercent"),
+        cashback_available_cny=payload.get("cashbackAvailableCny"),
+        cashback_expires_at=payload.get("cashbackExpiresAt"),
     ).as_dict()
     if payload != rebuilt:
         if payload.get("fingerprint") != rebuilt.get("fingerprint"):
@@ -515,7 +602,7 @@ def preflight_deposit_execution(
             False,
             fingerprint,
         )
-    if status in {"unknown", "executing", "executed", "succeeded"}:
+    if status in {"unknown", "executing", "executed", "succeeded", "readback_pending"}:
         return DepositExecutionPreflight(
             False,
             "deposit outcome requires balance readback before any new attempt",
@@ -641,7 +728,7 @@ def _funding_payload(
 
 def _deposit_payload(
     *,
-    report_id: str,
+    report_id: str | None,
     store: str,
     campaign: int,
     amount_cny: Decimal,
@@ -654,9 +741,15 @@ def _deposit_payload(
     approved_by: str,
     approved_at: datetime,
     expires_at: datetime,
+    funding_basis: Mapping[str, Any] | None = None,
+    cash_amount_cny: Decimal | None = None,
+    cashback_amount_cny: Decimal = Decimal("0"),
+    cashback_percent: int | None = None,
+    cashback_available_cny: Decimal | None = None,
+    cashback_expires_at: datetime | None = None,
 ) -> dict[str, Any]:
-    return {
-        "schemaVersion": 2,
+    payload = {
+        "schemaVersion": 3 if funding_basis is not None else 2,
         "planType": "advertising_deposit",
         "actionType": "advertising_top_up",
         "reportId": report_id,
@@ -677,6 +770,122 @@ def _deposit_payload(
         "approvedAt": approved_at.isoformat(timespec="seconds"),
         "expiresAt": expires_at.isoformat(timespec="seconds"),
         "withdrawalExecutionSupported": False,
+    }
+    if funding_basis is not None:
+        payload.update({
+            "fundingBasis": json.loads(json.dumps(funding_basis, allow_nan=False)),
+            "cashAmountCny": _money_text(cash_amount_cny if cash_amount_cny is not None else amount_cny),
+            "cashbackAmountCny": _money_text(cashback_amount_cny),
+            "cashbackPercent": cashback_percent,
+            "cashbackAvailableCny": (
+                _money_text(cashback_available_cny) if cashback_available_cny is not None else None
+            ),
+            "cashbackExpiresAt": cashback_expires_at.isoformat() if cashback_expires_at else None,
+        })
+    return payload
+
+
+def _whole_money(value: Any, label: str, *, positive: bool = False) -> Decimal:
+    amount = _decimal(value, label)
+    if amount < 0 or (positive and amount == 0):
+        raise FundingPlanError(f"{label} must be {'positive' if positive else 'non-negative'}")
+    if amount != amount.to_integral_value():
+        raise FundingPlanError(f"{label} must be whole CNY")
+    return amount.quantize(_CENT)
+
+
+def _exact_non_negative_money(value: Any, label: str) -> Decimal:
+    amount = _non_negative_money(value, label)
+    if amount != _decimal(value, label):
+        raise FundingPlanError(f"{label} must not contain fractional cents")
+    return amount
+
+
+def _cashback_percentage(value: Any) -> int:
+    percent = _decimal(value, "cashback_percent")
+    if percent != percent.to_integral_value() or not 0 < percent <= 100:
+        raise FundingPlanError("cashback_percent must be an integer from 1 to 100")
+    return int(percent)
+
+
+def _validated_funding_basis(value: Any, store: str, currency: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or not value:
+        raise FundingPlanError("funding_basis must contain the complete daily basis object")
+    try:
+        basis = json.loads(json.dumps(dict(value), allow_nan=False))
+    except (TypeError, ValueError) as exc:
+        raise FundingPlanError("funding_basis must contain finite JSON evidence") from exc
+    if (
+        type(basis.get("schemaVersion")) is not int
+        or basis.get("schemaVersion") != 1
+        or basis.get("basisType") != "daily_confirmed_advertising"
+    ):
+        raise FundingPlanError("funding_basis schema or type is invalid")
+    if basis.get("store") != store:
+        raise FundingPlanError("funding_basis store differs from the deposit store")
+    if basis.get("currency", currency) != currency:
+        raise FundingPlanError("funding_basis currency differs from the deposit currency")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(basis.get("fingerprint") or "")):
+        raise FundingPlanError("funding_basis fingerprint must be a SHA-256 digest")
+    through = basis.get("dataThrough")
+    try:
+        if not isinstance(through, str) or date.fromisoformat(through).isoformat() != through:
+            raise ValueError("non-canonical date")
+    except ValueError as exc:
+        raise FundingPlanError("funding_basis dataThrough must be YYYY-MM-DD") from exc
+    _exact_non_negative_money(basis.get("availableCashCny"), "funding_basis availableCashCny")
+    return basis
+
+
+def select_cashback_split(
+    total_amount_cny: Any,
+    cashbacks: Iterable[Mapping[str, Any]],
+    *,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Recommend a bounded split from one valid, earliest-expiring WB bucket.
+
+    WB accepts total ``sum`` plus integer ``cashback_sum`` and the selected
+    bucket's ``percent``. No bucket balances are combined. The result is only
+    a recommendation: it grants no approval and never retries a failed promo
+    request as cash. A caller requiring promo must reject NO_USABLE_CASHBACK.
+    """
+    total = _whole_money(total_amount_cny, "total_amount_cny", positive=True)
+    current = _aware_datetime(now or datetime.now(timezone.utc), "now")
+    if isinstance(cashbacks, (str, bytes, Mapping)) or cashbacks is None:
+        raise FundingPlanError("cashbacks must be an array of current balance buckets")
+    try:
+        buckets = iter(cashbacks)
+    except TypeError as exc:
+        raise FundingPlanError("cashbacks must be an array of current balance buckets") from exc
+    candidates = []
+    for bucket in buckets:
+        if not isinstance(bucket, Mapping):
+            continue
+        try:
+            available = _non_negative_money(bucket.get("sum"), "cashback bucket sum")
+            if available != _decimal(bucket.get("sum"), "cashback bucket sum"):
+                continue
+            percent = _cashback_percentage(bucket.get("percent"))
+            expires = _aware_datetime(bucket.get("expiration_date"), "cashback bucket expiration_date")
+        except FundingPlanError:
+            continue
+        if expires <= current:
+            continue
+        promo = min(available, total * percent / 100).to_integral_value(rounding=ROUND_FLOOR)
+        if promo <= 0:
+            continue
+        candidates.append((expires, percent, available, promo))
+    selected = min(candidates, key=lambda item: (item[0], -item[3], item[1], item[2])) if candidates else None
+    promo = selected[3] if selected else Decimal("0")
+    return {
+        "amountCny": _money_text(total),
+        "cashAmountCny": _money_text(total - promo),
+        "cashbackAmountCny": _money_text(promo),
+        "cashbackPercent": selected[1] if selected else None,
+        "cashbackAvailableCny": _money_text(selected[2]) if selected else None,
+        "cashbackExpiresAt": selected[0].isoformat() if selected else None,
+        "selectionStatus": "SELECTED" if selected else "NO_USABLE_CASHBACK",
     }
 
 
@@ -848,6 +1057,7 @@ __all__ = [
     "build_funding_plan",
     "deposit_execution_preflight",
     "preflight_deposit_execution",
+    "select_cashback_split",
     "validate_advertising_deposit_plan",
     "validate_deposit_plan",
     "validate_funding_plan",

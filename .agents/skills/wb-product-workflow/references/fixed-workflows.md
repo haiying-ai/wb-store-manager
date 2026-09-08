@@ -71,6 +71,7 @@ Use one of eight resumable flows. Keep the state file with the task artifacts an
 
 - Treat withdrawals and balance-funded campaign-budget allocations as money-moving mutations, never as an automatic continuation of a report. Under the active policy, allocation uses WB mutual-settlement `balance` (`net`, request `type=1`) and does not require a separate withdrawal or external cash recharge.
 - Freeze the exact store/account, currency, amount, source balance, destination campaign, policy caps, and preflight evidence before approval.
+- For daily funding, use the current confirmed running-account basis, not a weekly report publication gate. If an approved private rule permits promotional credits, also freeze total/cash/promotion split and one bucket's percentage, balance and expiry; cash alone consumes the confirmed cash ceiling. Rule approval is not payment approval.
 - Record the approving actor before passing `approve`; reject stale balances, changed scope, or an amount outside the approved plan.
 - Execute only a currently supported route. WB withdrawal has no supported public API and must remain a manual seller-portal step.
 - Read back the source and campaign balances and archive request, response, settlement evidence, and any discrepancy before completion. Keep allocation, actual campaign consumption, and later WB settlement-cycle deductions as separate evidence layers; do not charge the same advertising cost again outside the policy pool.
