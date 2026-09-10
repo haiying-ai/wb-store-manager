@@ -18,13 +18,30 @@ def _bare_service(now: str = "2026-09-07T14:00:00+08:00") -> FinanceService:
     return service
 
 
-def _adapter(monkeypatch, *, refresh=None, report=None, published=None, archive=None, fallback=None):
+def _adapter(
+    monkeypatch,
+    *,
+    refresh=None,
+    report=None,
+    published=None,
+    archive=None,
+    fallback=None,
+    validate=None,
+):
     module = ModuleType("wb_manager.finance_running_adapter")
     module.refresh_running_accounts = refresh or (lambda *args, **kwargs: {"status": "READY"})
     module.build_running_account_report = report or (lambda *args, **kwargs: {"status": "READY"})
     module.running_report_published = published or (lambda *args, **kwargs: True)
     module.archive_running_account_report = archive or (lambda *args, **kwargs: {"status": "NOT_CONFIGURED"})
     module.latest_verified_owner_report = fallback or (lambda *args, **kwargs: None)
+    module.validate_running_report_template = validate or (
+        lambda *args, **kwargs: {
+            "status": "LOCKED",
+            "templateVersion": "test-template",
+            "builderSha256": "a" * 64,
+            "approvedBuilderSha256": "a" * 64,
+        }
+    )
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
 
@@ -340,6 +357,46 @@ def test_fatal_sync_returns_labelled_verified_prior_report_without_new_cutoff_cl
     assert result["runningAccounts"] is None
     assert result["ownerLedgerCovers"] == []
     assert result["phaseFailures"] == [{"phase": "sync", "status": "FAILED", "error": "all-source coordinator failed"}]
+    assert result["status"] == "PARTIAL_FAILURE"
+
+
+def test_template_preflight_failure_returns_verified_fallback_without_wb_or_report_work(monkeypatch):
+    service, _ = _daily_service(monkeypatch, now="2026-09-09T09:30:00+08:00")
+    prior = {
+        "status": "STALE_VERIFIED_FALLBACK",
+        "isCurrent": False,
+        "periodEnd": "2026-09-06",
+        "dataThrough": "2026-09-06",
+        "requestedThrough": "2026-09-08",
+        "workbook": "previous-verified.xlsx",
+    }
+    monkeypatch.setattr(
+        "wb_manager.finance_service.sync_enabled_stores",
+        lambda *a, **kw: pytest.fail("template mismatch must stop before WB sync"),
+    )
+    service.report = lambda **kw: pytest.fail("template mismatch must stop before legacy report work")
+    _adapter(
+        monkeypatch,
+        validate=lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("owner template builder SHA256 mismatch")
+        ),
+        fallback=lambda *a, **kw: prior,
+    )
+
+    result = service.daily(through="yesterday")
+
+    assert result["through"] == "2026-09-08"
+    assert result["stores"] == []
+    assert result["runningAccounts"] is None
+    assert result["templatePreflight"] is None
+    assert result["ownerLedger"] == prior
+    assert result["ownerReports"] == [prior]
+    assert result["reports"] == []
+    assert result["phaseFailures"] == [{
+        "phase": "templatePreflight",
+        "status": "FAILED",
+        "error": "owner template builder SHA256 mismatch",
+    }]
     assert result["status"] == "PARTIAL_FAILURE"
 
 

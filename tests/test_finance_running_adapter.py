@@ -247,9 +247,22 @@ def _published_fixture(service, *, legacy=False):
     folder.mkdir(parents=True, exist_ok=True)
     workbook, verification, source = folder / "fixture.xlsx", folder / "verification.json", folder / "report.json"
     workbook.write_bytes(b"unit-test-fixture-not-a-deliverable")
-    adapter._write(verification, {"formulaErrorCount": 0, "totalsVerified": True})
+    adapter._write(verification, {
+        "templateVersion": adapter.TEMPLATE_VERSION,
+        "formulaErrorCount": 0,
+        "totalsVerified": True,
+        "layoutContract": {
+            "version": adapter.LAYOUT_CONTRACT_VERSION,
+            "passed": True,
+        },
+    })
     adapter._write(source, model)
-    record = {"workbook": str(workbook), "verification": str(verification), "reportJson": str(source)}
+    record = {
+        "workbook": str(workbook),
+        "verification": str(verification),
+        "reportJson": str(source),
+        "templateVersion": adapter.TEMPLATE_VERSION,
+    }
     record["artifactHashes"] = adapter._artifact_hashes(record)
     if not legacy:
         record["businessFingerprint"] = adapter._business_fingerprint(model)
@@ -268,7 +281,15 @@ def _fake_owner_export(service, monkeypatch, *, through=date(2026, 9, 6)):
 
     def fake_builder(args, **kwargs):
         adapter.Path(args[args.index("--output") + 1]).write_bytes(b"unit-test-placeholder-not-a-workbook")
-        adapter._write(adapter.Path(args[args.index("--verification") + 1]), {"formulaErrorCount": 0, "totalsVerified": True})
+        adapter._write(adapter.Path(args[args.index("--verification") + 1]), {
+            "templateVersion": adapter.TEMPLATE_VERSION,
+            "formulaErrorCount": 0,
+            "totalsVerified": True,
+            "layoutContract": {
+                "version": adapter.LAYOUT_CONTRACT_VERSION,
+                "passed": True,
+            },
+        })
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(adapter.subprocess, "run", fake_builder)
@@ -330,6 +351,122 @@ def test_template_mismatch_blocks_only_publication_not_daily_account_refresh(tmp
     assert refreshed["through"] == "2026-09-06"
     with pytest.raises(RuntimeError, match="does not match available stable template"):
         adapter._running_account_payload(service, period="as-of", period_start=None, through=date(2026, 9, 6))
+
+
+def test_template_hash_lock_accepts_approved_builder_and_keeps_legacy_fixtures_compatible(tmp_path, monkeypatch):
+    service, _ = _setup(tmp_path, monkeypatch)
+    legacy = adapter.validate_running_report_template(service)
+    assert legacy["status"] == "LEGACY_UNLOCKED"
+    assert legacy["builderSha256"] is None
+
+    builder = tmp_path / "approved-builder.mjs"
+    builder.write_text("// approved unit-test builder\n", encoding="utf-8")
+    approved = adapter.hashlib.sha256(builder.read_bytes()).hexdigest()
+    service.periodic_standard.raw["runningAccounts"].update({
+        "builder": str(builder),
+        "approvedBuilderSha256": approved.upper(),
+    })
+    locked = adapter.validate_running_report_template(service)
+    assert locked == {
+        "status": "LOCKED",
+        "templateVersion": adapter.TEMPLATE_VERSION,
+        "builder": str(builder),
+        "builderSha256": approved,
+        "approvedBuilderSha256": approved,
+    }
+
+
+def test_versioned_release_manifest_locks_the_default_builder(tmp_path, monkeypatch):
+    service, _ = _setup(tmp_path, monkeypatch)
+    builder = tmp_path / "wb_manager" / "assets" / "build_running_finance_report.mjs"
+    builder.parent.mkdir(parents=True)
+    builder.write_text("// released unit-test builder\n", encoding="utf-8")
+    approved = adapter.hashlib.sha256(builder.read_bytes()).hexdigest()
+    release_path = tmp_path / adapter.TEMPLATE_RELEASE_MANIFEST
+    adapter._write(release_path, {
+        "schemaVersion": 1,
+        "templateVersion": adapter.TEMPLATE_VERSION,
+        "builder": "wb_manager/assets/build_running_finance_report.mjs",
+        "approvedBuilderSha256": approved,
+        "layoutContractVersion": adapter.LAYOUT_CONTRACT_VERSION,
+    })
+
+    locked = adapter.validate_running_report_template(service)
+    assert locked["status"] == "LOCKED"
+    assert locked["builderSha256"] == locked["approvedBuilderSha256"] == approved
+
+    builder.write_text("// changed after release\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="does not match the approved lock"):
+        adapter.validate_running_report_template(service)
+
+
+def test_template_hash_mismatch_fails_before_report_build_and_does_not_publish(tmp_path, monkeypatch):
+    service, _ = _setup(tmp_path, monkeypatch)
+    builder = tmp_path / "unapproved-builder.mjs"
+    builder.write_text("// unapproved unit-test builder\n", encoding="utf-8")
+    service.periodic_standard.raw["runningAccounts"].update({
+        "builder": str(builder),
+        "approvedBuilderSha256": "0" * 64,
+    })
+    monkeypatch.setattr(adapter.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("builder process must not run after a failed hash preflight")
+    ))
+
+    with pytest.raises(RuntimeError, match="does not match the approved lock"):
+        adapter.build_running_account_report(
+            service, period="as-of", period_start=None, through=date(2026, 9, 6)
+        )
+    assert not adapter._settings(service)["db"].with_suffix(".publications.json").exists()
+
+
+def test_template_hash_is_rechecked_after_build_before_publication(tmp_path, monkeypatch):
+    service, _ = _setup(tmp_path, monkeypatch)
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    builder = tmp_path / "approved-builder.mjs"
+    builder.write_text("// approved unit-test builder\n", encoding="utf-8")
+    approved = adapter.hashlib.sha256(builder.read_bytes()).hexdigest()
+    service.periodic_standard.raw["runningAccounts"].update({
+        "builder": str(builder),
+        "approvedBuilderSha256": approved,
+    })
+    fake_runtime = tmp_path / "fake-runtime.txt"
+    fake_runtime.write_text("Never executed; fixture only", encoding="utf-8")
+    monkeypatch.setenv("WB_FINANCE_NODE", str(fake_runtime))
+
+    def mutating_builder(args, **kwargs):
+        adapter.Path(args[args.index("--output") + 1]).write_bytes(b"unit-test-placeholder")
+        adapter._write(adapter.Path(args[args.index("--verification") + 1]), {
+            "formulaErrorCount": 0,
+            "totalsVerified": True,
+        })
+        builder.write_text("// changed during report build\n", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(adapter.subprocess, "run", mutating_builder)
+    with pytest.raises(RuntimeError, match="does not match the approved lock"):
+        adapter.build_running_account_report(
+            service, period="as-of", period_start=None, through=date(2026, 9, 6)
+        )
+    assert not adapter._settings(service)["db"].with_suffix(".publications.json").exists()
+
+
+def test_current_publication_requires_the_versioned_layout_contract(tmp_path, monkeypatch):
+    service, _ = _setup(tmp_path, monkeypatch)
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    report = _fake_owner_export(service, monkeypatch)
+    verification_path = adapter.Path(report["verification"])
+    verification = adapter._read(verification_path)
+    verification["layoutContract"].pop("version")
+    adapter._write(verification_path, verification)
+    report["artifactHashes"] = adapter._artifact_hashes(report)
+
+    manifest_path = adapter._settings(service)["db"].with_suffix(".publications.json")
+    manifest = adapter._read(manifest_path)
+    manifest["as-of:2026-08-01:2026-09-06"] = report
+    adapter._write(manifest_path, manifest)
+
+    assert not adapter._publication_files_valid(report)
+    assert adapter.latest_verified_owner_report(service, through=date(2026, 9, 8)) is None
 
 
 def test_fallback_keeps_real_cutoff_and_rejects_corrupt_saved_workbook(tmp_path, monkeypatch):
@@ -426,7 +563,7 @@ def test_four_period_accounts_keep_each_columns_cumulative_closing_balance(tmp_p
     adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
     model, _ = adapter._running_account_payload(service, period="as-of", period_start=None,
         through=date(2026, 9, 6), persist_snapshot=False)
-    assert model["templateVersion"] == "wb-owner-dashboard-v2"
+    assert model["templateVersion"] == "wb-owner-dashboard-v2.1"
     windows = {row["key"]: row for row in model["ownerView"]["periods"]}
     accounts = model["ownerPeriodAccounts"]
     assert list(accounts) == ["cumulative", "last_month", "last_week", "yesterday"]
@@ -483,7 +620,7 @@ def test_dashboard_reference_amounts_do_not_sum_scenario_and_actual(tmp_path, mo
     assert _known(model["ownerPeriodAccounts"]["last_month"]["provisional"], "gross_sales") == "2000.00"
 
 
-def test_old_template_publication_cannot_be_delivered_as_dashboard_v2(tmp_path, monkeypatch):
+def test_old_template_publication_cannot_be_delivered_as_dashboard_v21(tmp_path, monkeypatch):
     service, data = _setup(tmp_path, monkeypatch)
     adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
     model = _published_fixture(service)
@@ -544,6 +681,14 @@ def test_marketplace_archive_future_created_order_does_not_rewrite_past_mapping(
 def test_daily_dashboard_uses_short_chinese_filename_and_verified_noop(tmp_path, monkeypatch):
     service, data = _setup(tmp_path, monkeypatch)
     adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    payload_calls = []
+    original_payload = adapter._running_account_payload
+
+    def counted_payload(*args, **kwargs):
+        payload_calls.append((args, kwargs))
+        return original_payload(*args, **kwargs)
+
+    monkeypatch.setattr(adapter, "_running_account_payload", counted_payload)
     fake_runtime = tmp_path / "test-runtime-not-executable.txt"
     fake_runtime.write_text("Unit test only; never executed", encoding="utf-8")
     monkeypatch.setenv("WB_FINANCE_NODE", str(fake_runtime))
@@ -555,7 +700,15 @@ def test_daily_dashboard_uses_short_chinese_filename_and_verified_noop(tmp_path,
         workbook = adapter.Path(args[args.index("--output") + 1])
         workbook.write_bytes(b"unit-test-fixture-not-a-deliverable")
         verification = adapter.Path(args[args.index("--verification") + 1])
-        adapter._write(verification, {"formulaErrorCount": 0, "totalsVerified": True})
+        adapter._write(verification, {
+            "templateVersion": adapter.TEMPLATE_VERSION,
+            "formulaErrorCount": 0,
+            "totalsVerified": True,
+            "layoutContract": {
+                "version": adapter.LAYOUT_CONTRACT_VERSION,
+                "passed": True,
+            },
+        })
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(adapter.subprocess, "run", fake_builder)
@@ -564,8 +717,9 @@ def test_daily_dashboard_uses_short_chinese_filename_and_verified_noop(tmp_path,
     assert adapter.Path(first["workbook"]).name == "WB双店财务汇总_截至2026-09-06.xlsx"
     assert repeated["status"] == "NOOP"
     assert repeated["workbook"] == first["workbook"]
-    assert repeated["templateVersion"] == "wb-owner-dashboard-v2"
+    assert repeated["templateVersion"] == "wb-owner-dashboard-v2.1"
     assert len(calls) == 1
+    assert len(payload_calls) == 2
 
 
 def test_atomic_replace_retries_short_windows_lock_and_does_not_swallow_permanent_error(tmp_path, monkeypatch):

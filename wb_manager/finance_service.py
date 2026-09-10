@@ -748,6 +748,50 @@ class FinanceService:
                 )
                 return None
 
+        # A scheduled finance run must never turn into an in-place template
+        # repair session. Qualify the exact approved builder before the first
+        # WB source call; on failure expose only the latest locally verified
+        # delivery and stop the run immediately.
+        from .finance_running_adapter import (
+            latest_verified_owner_report,
+            validate_running_report_template,
+        )
+
+        template_preflight = independent_phase(
+            "templatePreflight",
+            lambda: validate_running_report_template(self),
+        )
+        if template_preflight is None:
+            owner_ledger = independent_phase(
+                "ownerLedgerFallback",
+                lambda: latest_verified_owner_report(self, through=cutoff),
+            )
+            return {
+                "operation": "daily",
+                "through": cutoff.isoformat(),
+                "stores": [],
+                "runningAccounts": None,
+                "templatePreflight": None,
+                "ownerLedger": owner_ledger,
+                "ownerLedgerCovers": [],
+                "ownerArchives": [],
+                "ownerReports": [owner_ledger] if owner_ledger is not None else [],
+                "phaseFailures": phase_failures,
+                "advertisingDebtReconciliation": None,
+                "reports": [],
+                "historicalReportsChecked": 0,
+                "historicalReportsRecalculated": 0,
+                "performance": {
+                    "totalMs": round((perf_counter() - started_at) * 1000, 3),
+                    "correctionWindowDays": correction_window_days,
+                    "maxStoreWorkers": max_store_workers,
+                    "phaseTimingsMs": dict(phase_timings_ms),
+                    "cacheHits": dict(run_cache.get("hits") or {}),
+                    "cacheEntries": self._cache_entry_counts(run_cache),
+                },
+                "status": "PARTIAL_FAILURE",
+            }
+
         summaries = independent_phase(
             "sync",
             lambda: sync_enabled_stores(
@@ -930,6 +974,7 @@ class FinanceService:
             "through": cutoff.isoformat(),
             "stores": source_statuses,
             "runningAccounts": running_accounts,
+            "templatePreflight": template_preflight,
             "ownerLedger": owner_ledger,
             "ownerLedgerCovers": owner_ledger_covers,
             "ownerArchives": owner_archives,

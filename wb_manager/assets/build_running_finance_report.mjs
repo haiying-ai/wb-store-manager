@@ -6,7 +6,7 @@ const args=process.argv.slice(2), opt=k=>args[args.indexOf(k)+1];
 const input=opt('--input'), output=opt('--output'), verification=opt('--verification');
 if(!input||!output||!verification)throw new Error('input/output/verification required');
 const m=JSON.parse(await fs.readFile(input,'utf8'));
-if(m.templateVersion!=='wb-owner-dashboard-v2'||!m.ownerView||!m.ownerPeriodAccounts)throw new Error('Four-period owner payload required');
+if(m.templateVersion!=='wb-owner-dashboard-v2.1'||!m.ownerView||!m.ownerPeriodAccounts)throw new Error('Four-period owner payload required');
 const wb=Workbook.create(), v=m.ownerView, periods=v.periods, aliases=Object.keys(v.stores);
 const labels=Object.fromEntries(aliases.map((a,i)=>[a,({'owner-store':'老店','new-store':'新店'}[a])||v.stores[a].displayName||('店铺'+(i+1))]));
 const names=['汇总报告',...aliases.map(a=>labels[a]+'汇总'),...aliases.flatMap(a=>[labels[a]+'订单',labels[a]+'流水']),'周期对账'];
@@ -19,6 +19,17 @@ const dt=s=>new Date(s.slice(0,10)+'T00:00:00Z');
 const prev=s=>new Date(dt(s).getTime()-86400000).toISOString().slice(0,10);
 const num=x=>x==null?null:Number(x);
 const n=x=>Number(x||0);
+const MAX_COMPACT_EVIDENCE_CHARS=40;
+const compactEvidence=x=>{
+ const all=Array.isArray(x)?x.map(String).map(s=>s.replace(/\s+/g,' ').trim()).filter(Boolean):[];
+ if(!all.length)return '—';
+ const prefix=all.length>1?all.length+'项｜':'';
+ const budget=Math.max(1,MAX_COMPACT_EVIDENCE_CHARS-prefix.length),first=all[0];
+ if(first.length<=budget)return prefix+first;
+ if(budget<=3)return prefix+first.slice(0,budget);
+ const head=Math.ceil((budget-1)*0.6),tail=budget-1-head;
+ return prefix+first.slice(0,head)+'…'+first.slice(-tail);
+};
 const ref=(name,cell)=>q(name)+'!'+cell;
 function value(s,cell,x){s.getRange(cell).values=[[x]];}
 function formula(s,cell,x){s.getRange(cell).formulas=[['='+x]];}
@@ -36,19 +47,20 @@ for(const alias of aliases){
  const rows=[...store.flowRows].sort((a,b)=>b.eventDate.localeCompare(a.eventDate)||a.eventId.localeCompare(b.eventId));
  const orders=[...store.orderRows].sort((a,b)=>b.eventDate.localeCompare(a.eventDate)||a.eventId.localeCompare(b.eventId));
  sourceRows[alias]=rows;bounds[alias]={flow:Math.max(7,6+rows.length),order:Math.max(7,6+orders.length)};
- const f=sheets[flowName];base(f,'AM',bounds[alias].flow+2);widths(f,{A:12,B:17,C:18,D:31,E:15,X:13,Y:32,Z:31,AA:32,AB:48,AG:22,AH:20});
- for(let i=6;i<=23;i++)widths(f,{[col(i)]:16});for(let i=29;i<=32;i++)widths(f,{[col(i)]:18});widths(f,{AI:18,AL:18,AM:13});
+ const f=sheets[flowName];base(f,'AJ',bounds[alias].flow+2);widths(f,{A:12,B:17,C:18,D:31,E:15,X:13,Y:32,Z:31,AA:32,AB:48,AG:44,AH:38});
+ for(let i=6;i<=23;i++)widths(f,{[col(i)]:16});for(let i=29;i<=32;i++)widths(f,{[col(i)]:18});widths(f,{AI:18});
  note(f,'A1:K1',labels[alias]+'账务流水｜截至 '+m.periodEnd+'｜人民币元',28);
  note(f,'A2:K2','每笔事件只记一次。订单项列真实订单号；广告、提现等显示“店铺级”，不强行分摊到订单。',36);
  note(f,'A3:K3','“含暂估”仅供经营参考；右侧保留原始标识、正式金额与暂估差额。空金额=来源未齐，不代表0。',36);
  header(f,6,['发生日期','财务事项','WB订单号','SKU','本笔金额\n（含暂估）',...metricLabels,'归属类别','平台订单标识srid','关联说明','唯一流水ID','来源与关联证据','正式销售额','正式结算应收','暂估销售差额','暂估应收差额','成本版本','政策版本','正式广告计提','金额口径']);
- if(rows.length)f.getRange('A7:AJ'+bounds[alias].flow).values=rows.map(e=>[dt(e.eventDate),e.kindLabel+(e.amountBasis==='含暂估'?'（暂估）':''),e.orderId||(e.isOrderEvent?'待匹配':'店铺级'),e.sku||'—',null,...metrics.map(k=>num(e.amounts[k])),e.isOrderEvent?'订单项':'店铺级',e.srid||'—',e.mappingReason,e.eventId,e.linkEvidence.join(' | '),num(e.actualAmounts.gross_sales),num(e.actualAmounts.seller_proceeds),num(e.estimateAmounts.gross_sales),num(e.estimateAmounts.seller_proceeds),e.costVersionId||'—',e.policyId||'—',num(e.actualAmounts.promotion_accrued),e.amountBasis]);
+ if(rows.length)f.getRange('A7:AJ'+bounds[alias].flow).values=rows.map(e=>[dt(e.eventDate),e.kindLabel+(e.amountBasis==='含暂估'?'（暂估）':''),e.orderId||(e.isOrderEvent?'待匹配':'店铺级'),e.sku||'—',null,...metrics.map(k=>num(e.amounts[k])),e.isOrderEvent?'订单项':'店铺级',e.srid||'—',e.mappingReason,e.eventId,compactEvidence(e.linkEvidence),num(e.actualAmounts.gross_sales),num(e.actualAmounts.seller_proceeds),num(e.estimateAmounts.gross_sales),num(e.estimateAmounts.seller_proceeds),e.costVersionId||'—',e.policyId||'—',num(e.actualAmounts.promotion_accrued),e.amountBasis]);
  rows.forEach((e,i)=>{const r=7+i;if(['sale','refund'].includes(e.kind)){if(e.amounts.gross_sales!=null)formula(f,'E'+r,'F'+r);}else{const keys=['cash_ad_spend','promo_credit_spend','agency_paid','receipts_received','withdrawal_requested','withdrawal_completed','withdrawal_cancelled','logistics_cost','shared_pool_return_cost','separate_return_cost','other_cost'];if(keys.every(k=>e.amounts[k]!=null))formula(f,'E'+r,'SUM('+keys.map(k=>flowCols[k]+r).join(',')+')');}});
  f.getRange('E7:E'+bounds[alias].flow).setNumberFormat(money);widths(f,{AJ:18});
  f.getRange('A7:A'+bounds[alias].flow).setNumberFormat('yyyy-mm-dd');f.getRange('F7:W'+bounds[alias].flow).setNumberFormat(money);f.getRange('AC7:AF'+bounds[alias].flow).setNumberFormat(money);f.getRange('AI7:AI'+bounds[alias].flow).setNumberFormat(money);
  f.getRange('A7:AI'+bounds[alias].flow).format.rowHeight=38;f.getRange('B7:E'+bounds[alias].flow).format.wrapText=true;
- f.getRange('Y7:AB'+bounds[alias].flow).format.wrapText=true;f.freezePanes.freezeRows(6);
+ f.getRange('Z7:Z'+bounds[alias].flow).format.wrapText=true;f.getRange('Y7:Y'+bounds[alias].flow).format.wrapText=false;f.getRange('AA7:AB'+bounds[alias].flow).format.wrapText=false;f.freezePanes.freezeRows(6);
  f.tables.add('A6:AJ'+bounds[alias].flow,true,'Flow_'+alias.replaceAll('-','_'));
+ const versions=f.getRange('AG7:AH'+bounds[alias].flow);versions.format.font={name:'Arial',size:9,color:C.ink};versions.format.horizontalAlignment='left';versions.format.wrapText=false;
  f.getRange('E6:W'+bounds[alias].flow).format.horizontalAlignment='right';f.getRange('AC6:AF'+bounds[alias].flow).format.horizontalAlignment='right';f.getRange('AI6:AI'+bounds[alias].flow).format.horizontalAlignment='right';
  const o=sheets[orderName];base(o,'AC',bounds[alias].order+2);widths(o,{A:12,B:18,C:31,D:16,P:16,Q:14,R:34,S:34,T:48});
  for(let i=5;i<=15;i++)widths(o,{[col(i)]:16});for(let i=21;i<=29;i++)widths(o,{[col(i)]:17});
@@ -60,20 +72,17 @@ for(const alias of aliases){
   const a=e.amounts, g=num(a.gross_sales);
   const native=(m.nativeStatistics||[]).filter(x=>['sale','refund'].includes(e.kind)&&(x.store||x.storeAlias||x.store_id)===alias&&(e.saleIds||[]).includes(String(x.saleId||x.sale_id||x.saleID)));
   const nativeOne=native.length===1?native[0]:null;
-  return [dt(e.eventDate),e.orderId||'待匹配',e.sku||'—',e.kindLabel,g==null?null:Math.max(0,g),g==null?null:Math.max(0,-g),g,num(a.seller_proceeds),num(a.product_cost),num(a.agency_accrued),num(a.promotion_accrued),null,num(a.other_cost),nativeOne?num(nativeOne.grossRub):null,nativeOne?num(nativeOne.proceedsRub):null,e.amountBasis,e.mappingStatus,e.srid||'—',e.eventId,e.linkEvidence.join(' | '),num(e.actualAmounts.gross_sales),num(e.actualAmounts.seller_proceeds),num(e.estimateAmounts.gross_sales),num(e.estimateAmounts.seller_proceeds),num(a.logistics_cost),num(a.shared_pool_return_cost),num(a.return_reserve_accrued),num(a.separate_return_cost),num(a.shared_pool_accrued)];
+  return [dt(e.eventDate),e.orderId||'待匹配',e.sku||'—',e.kindLabel,g==null?null:Math.max(0,g),g==null?null:Math.max(0,-g),g,num(a.seller_proceeds),num(a.product_cost),num(a.agency_accrued),num(a.promotion_accrued),null,num(a.other_cost),nativeOne?num(nativeOne.grossRub):null,nativeOne?num(nativeOne.proceedsRub):null,e.amountBasis,e.mappingStatus,e.srid||'—',e.eventId,compactEvidence(e.linkEvidence),num(e.actualAmounts.gross_sales),num(e.actualAmounts.seller_proceeds),num(e.estimateAmounts.gross_sales),num(e.estimateAmounts.seller_proceeds),num(a.logistics_cost),num(a.shared_pool_return_cost),num(a.return_reserve_accrued),num(a.separate_return_cost),num(a.shared_pool_accrued)];
  });
  orders.forEach((e,i)=>{const r=7+i;if(e.amounts.gross_sales!=null)formula(o,'G'+r,'E'+r+'-F'+r);formula(o,'L'+r,'SUM(Y'+r+':Z'+r+',AB'+r+')');});
  o.getRange('A7:A'+bounds[alias].order).setNumberFormat('yyyy-mm-dd');o.getRange('E7:O'+bounds[alias].order).setNumberFormat(money);o.getRange('U7:AC'+bounds[alias].order).setNumberFormat(money);
- o.getRange('A7:AC'+bounds[alias].order).format.rowHeight=38;o.getRange('C7:D'+bounds[alias].order).format.wrapText=true;o.getRange('P7:T'+bounds[alias].order).format.wrapText=true;o.freezePanes.freezeRows(6);
+ o.getRange('A7:AC'+bounds[alias].order).format.rowHeight=38;o.getRange('C7:D'+bounds[alias].order).format.wrapText=true;o.getRange('P7:Q'+bounds[alias].order).format.wrapText=true;o.getRange('R7:T'+bounds[alias].order).format.wrapText=false;o.freezePanes.freezeRows(6);
  o.tables.add('A6:AC'+bounds[alias].order,true,'Orders_'+alias.replaceAll('-','_'));
  o.getRange('E6:O'+bounds[alias].order).format.horizontalAlignment='right';o.getRange('U6:AC'+bounds[alias].order).format.horizontalAlignment='right';
 }
-// Typed date cells keep SUMIFS criteria numeric without date-format propagation.
-const dateSheet=sheets[labels[aliases[0]]+'流水'],dateName=dateSheet.name,dateRows=new Map();
-for(const d of new Set([...periods.flatMap(p=>[p.start,p.end,prev(p.start)]),...aliases.map(a=>v.stores[a].openedAt)])){
- const r=5+dateRows.size;dateRows.set(d,r);value(dateSheet,'AL'+r,d);value(dateSheet,'AM'+r,dt(d));dateSheet.getRange('AM'+r).setNumberFormat('yyyy-mm-dd');
-}
-const dateRef=d=>ref(dateName,'$AM$'+dateRows.get(d));
+// Use plain Excel date serials so helper dates never leak into reader-facing columns
+// and the calculation engine does not propagate date formatting into SUMIFS results.
+const dateRef=d=>String(Math.floor(Date.parse(d+'T00:00:00Z')/86400000)+25569);
 function sum(alias,metric,start,end,{order=false,storeOnly=false,actual=false,sign=null}={}){
  const c=actual&&metric==='promotion_accrued'?'AI':(order?orderCols:flowCols)[metric];if(!c)return '0';
  const sn=labels[alias]+(order?'订单':'流水'),last=bounds[alias][order?'order':'flow'];
@@ -221,6 +230,7 @@ for(const a of aliases)for(const p of periods)for(const k of reconMetrics){
 }
 recon.getRange('D7:G'+(rr-1)).setNumberFormat(money);recon.getRange('B7:C'+(rr-1)).format.wrapText=true;recon.getRange('A7:I'+(rr-1)).format.rowHeight=36;recon.freezePanes.freezeRows(6);recon.tables.add('A6:I'+(rr-1),true,'Period_Reconciliation');
 recon.getRange('D6:H'+(rr-1)).format.horizontalAlignment='right';
+const previewRanges=Object.fromEntries(names.map(name=>[name,name.endsWith('汇总')||name==='汇总报告'?'A1:G32':name==='周期对账'?'A1:I22':name.endsWith('订单')?'A1:AC15':'A1:AJ15']));
 const formulaError=/^#(?:REF!|DIV\/0!|VALUE!|NAME\?|N\/A|NUM!|NULL!|SPILL!|CALC!)$/;
 function validate(book){
  const failures=[];for(const x of checks){const actual=book.worksheets.getItem(x.sheet).getRange(x.cell).values[0][0];if(typeof actual!=='number'||Math.abs(actual-x.expected)>0.011)failures.push({...x,actual});}
@@ -228,7 +238,44 @@ function validate(book){
  for(const name of names)for(const row of book.worksheets.getItem(name).getUsedRange(true).values)for(const x of row)if(typeof x==='string'&&formulaError.test(x))failures.push({sheet:name,formulaError:x});
  if(failures.length)throw new Error('Owner dashboard validation failed: '+JSON.stringify(failures.slice(0,18)));
 }
-wb.recalculate();validate(wb);
+function evidenceStats(book,name,column,rowCount){
+ const stats={column,rowsChecked:rowCount,lastDataRow:rowCount?6+rowCount:null,longestEvidenceRow:null,longestCharacters:0,singleLine:true,withinCharacterLimit:true};
+ if(!rowCount)return stats;
+ const values=book.worksheets.getItem(name).getRange(column+'7:'+column+(6+rowCount)).values;
+ values.forEach((row,index)=>{
+  const text=String(row[0]??'');
+  if(/[\r\n]/.test(text))stats.singleLine=false;
+  if(text.length>MAX_COMPACT_EVIDENCE_CHARS)stats.withinCharacterLimit=false;
+  if(text.length>=stats.longestCharacters){stats.longestCharacters=text.length;stats.longestEvidenceRow=7+index;}
+ });
+ return stats;
+}
+function validateLayout(book){
+ const violations=[],sheetColumns={},evidence={};
+ const checkSheet=(name,expectedMaxColumn,evidenceColumn,rowCount)=>{
+  const used=book.worksheets.getItem(name).getUsedRange(),actualMaxColumn=col(used.columnIndex+used.columnCount);
+  sheetColumns[name]={kind:name.endsWith('订单')?'order':name.endsWith('流水')?'flow':name==='周期对账'?'reconciliation':'summary',expectedMaxColumn,actualMaxColumn};
+  if(actualMaxColumn!==expectedMaxColumn)violations.push({sheet:name,expectedMaxColumn,actualMaxColumn,reason:'column_boundary'});
+  if(evidenceColumn){
+   const stats=evidenceStats(book,name,evidenceColumn,rowCount);evidence[name]=stats;
+   if(!stats.singleLine||!stats.withinCharacterLimit)violations.push({sheet:name,...stats,reason:'compact_evidence'});
+  }
+ };
+ checkSheet('汇总报告','G');
+ for(const alias of aliases){
+  checkSheet(labels[alias]+'汇总','G');
+  checkSheet(labels[alias]+'订单','AC','T',v.stores[alias].orderRows.length);
+  checkSheet(labels[alias]+'流水','AJ','AB',sourceRows[alias].length);
+ }
+ checkSheet('周期对账','I');
+ for(const [name,range]of Object.entries(previewRanges)){
+  const match=/^A1:([A-Z]+)\d+$/.exec(range),expected=sheetColumns[name].expectedMaxColumn;
+  if(!match||match[1]!==expected)violations.push({sheet:name,range,expectedMaxColumn:expected,reason:'preview_not_full_width'});
+ }
+ if(violations.length)throw new Error('Owner dashboard layout validation failed: '+JSON.stringify(violations.slice(0,18)));
+ return {version:'owner-dashboard-layout-v1',passed:true,flowMaxColumn:'AJ',orderMaxColumn:'AC',noHelperColumnsBeyond:true,readableCompactEvidence:true,compactEvidenceMaxCharacters:MAX_COMPACT_EVIDENCE_CHARS,previewRangesFullWidth:true,sheets:sheetColumns,evidence,previewRanges};
+}
+wb.recalculate();validate(wb);validateLayout(wb);
 // Test a source edit affects consolidated expense AND budget, then restore.
 let recalcVerified=false;
 for(const a of aliases){const i=sourceRows[a].findIndex(e=>n(e.amounts.cash_ad_spend)>0);if(i<0)continue;
@@ -240,8 +287,8 @@ for(const a of aliases){const i=sourceRows[a].findIndex(e=>n(e.amounts.cash_ad_s
 }
 await fs.mkdir(path.dirname(output),{recursive:true});const previewDir=path.join(path.dirname(output),'previews');await fs.mkdir(previewDir,{recursive:true});
 const rendered=[];
-for(const name of names){const range=name.endsWith('汇总')||name==='汇总报告'?'A1:G32':name==='周期对账'?'A1:I22':name.endsWith('订单')?'A1:M15':'A1:K15';const preview=await wb.render({sheetName:name,range,scale:1.25,format:'png'});const target=path.join(previewDir,name+'.png');await fs.writeFile(target,new Uint8Array(await preview.arrayBuffer()));rendered.push(target);}
+for(const name of names){const preview=await wb.render({sheetName:name,range:previewRanges[name],scale:1.25,format:'png'});const target=path.join(previewDir,name+'.png');await fs.writeFile(target,new Uint8Array(await preview.arrayBuffer()));rendered.push(target);}
 const file=await SpreadsheetFile.exportXlsx(wb);await file.save(output);
-const saved=await SpreadsheetFile.importXlsx(await FileBlob.load(output));saved.recalculate();validate(saved);
-await fs.writeFile(verification,JSON.stringify({templateVersion:m.templateVersion,formulaErrorCount:0,totalsVerified:true,verifiedMetricCount:checks.length,reconciliationRows:reconChecks.length,reconciliationDifference:0,recalcVerified,mapping:Object.fromEntries(aliases.map(a=>[a,v.stores[a].mappingSummary])),renderedSheets:rendered,output,sourceCutoff:m.sourceCutoff},null,2));
-console.log(JSON.stringify({output,sheets:names.length,formulaErrorCount:0,verifiedMetricCount:checks.length,reconciliationRows:reconChecks.length,recalcVerified}));
+const saved=await SpreadsheetFile.importXlsx(await FileBlob.load(output));saved.recalculate();validate(saved);const layoutContract=validateLayout(saved);
+await fs.writeFile(verification,JSON.stringify({templateVersion:m.templateVersion,formulaErrorCount:0,totalsVerified:true,verifiedMetricCount:checks.length,reconciliationRows:reconChecks.length,reconciliationDifference:0,recalcVerified,layoutContract,mapping:Object.fromEntries(aliases.map(a=>[a,v.stores[a].mappingSummary])),renderedSheets:rendered,output,sourceCutoff:m.sourceCutoff},null,2));
+console.log(JSON.stringify({output,sheets:names.length,formulaErrorCount:0,verifiedMetricCount:checks.length,reconciliationRows:reconChecks.length,recalcVerified,layoutContractPassed:layoutContract.passed}));

@@ -27,7 +27,9 @@ from .finance_costs import normalize_product_key
 from .finance_owner_views import build_owner_view, period_windows
 from .finance_running_lock import serialized_running_account
 
-TEMPLATE_VERSION = "wb-owner-dashboard-v2"
+TEMPLATE_VERSION = "wb-owner-dashboard-v2.1"
+LAYOUT_CONTRACT_VERSION = "owner-dashboard-layout-v1"
+TEMPLATE_RELEASE_MANIFEST = Path("config/finance/owner_report_template_release.json")
 MOSCOW = ZoneInfo("Europe/Moscow")
 FIELD_MAP = {
     "salesAmountGCny": "gross_sales", "forPayCny": "seller_proceeds",
@@ -118,6 +120,95 @@ def _settings(service):
         if paths["archive"] is not None:
             paths["archive"] = ledger.parent / (ledger.stem + ".running_archive")
     return paths
+
+
+def validate_running_report_template(service) -> dict[str, Any]:
+    """Verify that the configured owner-report builder is the approved file.
+
+    Older isolated fixtures/configurations that predate the hash lock remain
+    usable in ``LEGACY_UNLOCKED`` mode. The versioned production release
+    manifest and active configuration supply ``approvedBuilderSha256`` and
+    therefore fail closed when either lock is malformed, the locks disagree,
+    the builder is missing, or the bytes do not match.
+    """
+    cfg = service.periodic_standard.raw.get("runningAccounts", {})
+    configured_template = cfg.get("templateVersion")
+    if configured_template and configured_template != TEMPLATE_VERSION:
+        raise RuntimeError(
+            f"Configured owner template {configured_template} does not match "
+            f"available stable template {TEMPLATE_VERSION}"
+        )
+
+    builder = _settings(service)["builder"]
+    actual = hashlib.sha256(builder.read_bytes()).hexdigest() if builder.is_file() else None
+
+    def approved_sha(value, label):
+        normalized = value.strip().lower() if isinstance(value, str) else None
+        if not normalized or len(normalized) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized
+        ):
+            raise RuntimeError(f"{label} must be a 64-character SHA256 hex digest")
+        return normalized
+
+    active_lock_configured = "approvedBuilderSha256" in cfg
+    active_expected = (
+        approved_sha(cfg.get("approvedBuilderSha256"), "Configured approvedBuilderSha256")
+        if active_lock_configured
+        else None
+    )
+    release_expected = None
+    release_path = service.repo_root / TEMPLATE_RELEASE_MANIFEST
+    release = _read(release_path)
+    if release:
+        if release.get("templateVersion") != TEMPLATE_VERSION:
+            raise RuntimeError(
+                "Owner report template release manifest version does not match "
+                f"{TEMPLATE_VERSION}"
+            )
+        if release.get("layoutContractVersion") != LAYOUT_CONTRACT_VERSION:
+            raise RuntimeError(
+                "Owner report template release manifest layout contract does not match "
+                f"{LAYOUT_CONTRACT_VERSION}"
+            )
+        release_builder_value = release.get("builder")
+        if not isinstance(release_builder_value, str) or not release_builder_value.strip():
+            raise RuntimeError("Owner report template release manifest must name its builder")
+        release_builder = Path(release_builder_value)
+        if not release_builder.is_absolute():
+            release_builder = service.repo_root / release_builder
+        if release_builder.resolve() != builder.resolve():
+            raise RuntimeError(
+                "Configured owner report builder differs from the versioned release manifest"
+            )
+        release_expected = approved_sha(
+            release.get("approvedBuilderSha256"),
+            "Release manifest approvedBuilderSha256",
+        )
+    if active_expected and release_expected and active_expected != release_expected:
+        raise RuntimeError(
+            "Active owner report builder approval differs from the versioned release manifest"
+        )
+    expected = active_expected or release_expected
+    lock_configured = expected is not None
+    if not lock_configured and actual is not None:
+        raise RuntimeError(
+            "Existing owner report builder has no approved SHA256 lock"
+        )
+    if lock_configured:
+        if actual is None:
+            raise RuntimeError(f"Approved owner report builder is missing: {builder}")
+        if actual != expected:
+            raise RuntimeError(
+                "Owner report builder SHA256 does not match the approved lock "
+                f"(expected {expected}, actual {actual})"
+            )
+    return {
+        "status": "LOCKED" if lock_configured else "LEGACY_UNLOCKED",
+        "templateVersion": TEMPLATE_VERSION,
+        "builder": str(builder),
+        "builderSha256": actual,
+        "approvedBuilderSha256": expected,
+    }
 
 def _state_path(service):
     return _settings(service)["db"].with_suffix(".state.json")
@@ -629,6 +720,8 @@ def _artifact_hashes(record):
 
 
 def _publication_files_valid(record):
+    if record.get("templateVersion") != TEMPLATE_VERSION:
+        return False
     expected = record.get("artifactHashes")
     if not expected or any(key not in expected for key in ("workbook", "reportJson", "verification")):
         return False
@@ -636,15 +729,29 @@ def _publication_files_valid(record):
         if _artifact_hashes(record) != expected:
             return False
         verification = _read(Path(record["verification"]))
-        return verification.get("formulaErrorCount") == 0 and bool(verification.get("totalsVerified"))
+        layout = verification.get("layoutContract")
+        return (
+            verification.get("templateVersion") == TEMPLATE_VERSION
+            and verification.get("formulaErrorCount") == 0
+            and bool(verification.get("totalsVerified"))
+            and isinstance(layout, dict)
+            and layout.get("version") == LAYOUT_CONTRACT_VERSION
+            and bool(layout.get("passed"))
+        )
     except (OSError, KeyError, ValueError):
         return False
 
 
-def _publication_is_current(service, row, *, period, period_start, through):
+def _publication_is_current(
+    service,
+    row,
+    *,
+    period,
+    period_start,
+    through,
+    current_fingerprint=None,
+):
     if not row or not _publication_files_valid(row):
-        return False
-    if row.get("templateVersion") not in (None, TEMPLATE_VERSION):
         return False
     verification = _read(Path(row["verification"]))
     if verification.get("formulaErrorCount") != 0 or not verification.get("totalsVerified"):
@@ -657,9 +764,16 @@ def _publication_is_current(service, row, *, period, period_start, through):
         if not saved or saved.get("templateVersion") != TEMPLATE_VERSION:
             return False
         previous_fingerprint = _business_fingerprint(saved)
-    payload, _ = _running_account_payload(service, period=period, period_start=period_start,
-        through=through, persist_snapshot=False)
-    return previous_fingerprint == _business_fingerprint(payload)
+    if current_fingerprint is None:
+        payload, _ = _running_account_payload(
+            service,
+            period=period,
+            period_start=period_start,
+            through=through,
+            persist_snapshot=False,
+        )
+        current_fingerprint = _business_fingerprint(payload)
+    return previous_fingerprint == current_fingerprint
 
 def running_report_published(service, *, period: str, period_start: date, through: date) -> bool:
     manifest = _read(_settings(service)["db"].with_suffix(".publications.json"))
@@ -829,6 +943,7 @@ def _running_account_payload(service, *, period: str, period_start: date | None,
 def build_running_account_report(service, *, period: str, period_start: date | None, through: date) -> dict[str, Any]:
     started = time.perf_counter()
     settings = _settings(service)
+    template_preflight = validate_running_report_template(service)
     payload, snapshot = _running_account_payload(service, period=period, period_start=period_start, through=through, persist_snapshot=False)
     start = date.fromisoformat(payload["periodStart"])
     fingerprint = _business_fingerprint(payload)
@@ -836,7 +951,14 @@ def build_running_account_report(service, *, period: str, period_start: date | N
     manifest = _read(manifest_path)
     publication_key = f"{period}:{start.isoformat()}:{through.isoformat()}"
     prior = manifest.get(publication_key)
-    if prior and _publication_is_current(service, prior, period=period, period_start=start, through=through):
+    if prior and _publication_is_current(
+        service,
+        prior,
+        period=period,
+        period_start=start,
+        through=through,
+        current_fingerprint=fingerprint,
+    ):
         return {**prior, "status": "NOOP", "businessFingerprint": fingerprint,
                 "elapsedMs": round((time.perf_counter()-started)*1000, 2)}
     with RunningAccount(settings["db"]) as account:
@@ -866,13 +988,26 @@ def build_running_account_report(service, *, period: str, period_start: date | N
             capture_output=True, text=True, encoding="utf-8", timeout=240)
         if result.returncode:
             raise RuntimeError("Fixed owner workbook build failed: "+(result.stderr or result.stdout)[-1800:])
+    template_postflight = validate_running_report_template(service)
+    if template_postflight["builderSha256"] != template_preflight["builderSha256"]:
+        raise RuntimeError("Owner report builder changed while the workbook was being built; publication blocked")
+    if payload.get("templateBuilderHash") != template_postflight["builderSha256"]:
+        raise RuntimeError("Owner report payload builder SHA256 differs from the verified builder; publication blocked")
     verified = _read(verification)
-    if verified.get("formulaErrorCount") != 0 or not verified.get("totalsVerified"):
+    layout_contract = verified.get("layoutContract")
+    if (
+        verified.get("templateVersion") != TEMPLATE_VERSION
+        or verified.get("formulaErrorCount") != 0
+        or not verified.get("totalsVerified")
+        or not isinstance(layout_contract, dict)
+        or layout_contract.get("version") != LAYOUT_CONTRACT_VERSION
+        or not layout_contract.get("passed")
+    ):
         raise RuntimeError("Fixed workbook verification did not pass")
     record = {"workbook": str(workbook), "verification": str(verification), "reportJson": str(model_path),
         "period": period, "periodStart": start.isoformat(), "periodEnd": through.isoformat(),
         "templateVersion": TEMPLATE_VERSION, "reportStatus": payload["actual"]["status"],
-        "businessFingerprint": fingerprint,
+        "templateBuilderHash": template_postflight["builderSha256"], "businessFingerprint": fingerprint,
         "elapsedMs": round((time.perf_counter()-started)*1000, 2), "snapshot": snapshot}
     record["artifactHashes"] = _artifact_hashes(record)
     _merge_publication(settings["db"], publication_key, record)
@@ -888,6 +1023,9 @@ def archive_running_account_report(service, report):
     root = _settings(service)["archive"]
     if root is None:
         return {"status": "NOT_CONFIGURED"}
+    template_lock = validate_running_report_template(service)
+    if report.get("templateBuilderHash") != template_lock["builderSha256"]:
+        raise RuntimeError("Owner report archive requires the currently approved builder fingerprint")
     if report.get("templateVersion") != TEMPLATE_VERSION or not _publication_files_valid(report):
         raise RuntimeError("Owner report archive requires the current template and verified artifact hashes")
     period = report["period"]

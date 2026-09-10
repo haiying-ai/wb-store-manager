@@ -11,3 +11,11 @@
 - Before actions that may trigger approval review, consolidate the planned commands and avoid repeated approval cycles. Never place full secret tokens directly in shell commands or user-visible logs.
 - When a command returns unexpectedly large output, summarize the relevant findings and avoid re-reading the same large output in later turns.
 - If the task can be answered with a local artifact summary, prefer that over reopening raw source material.
+
+## WB Finance Scheduled Runtime Immutability
+
+- A scheduled WB finance run is production execution, not a template-development session. During that run, do not edit report builders, Python services, configuration, tests, prompts, or layout rules.
+- Before any WB source call, validate the configured finance template version and the approved SHA-256 of its builder. If validation fails, stop the live run, return the latest locally verified owner report when available, and report the preflight failure.
+- Revalidate the same builder fingerprint after workbook generation and before updating any publication manifest or archive. Never publish a workbook built while its template changed.
+- Template, layout, formula, or preview changes must happen in a separate user-authorized development run. Run the complete automated and visual qualification there, then update the approved fingerprint as one reviewed release.
+- Do not repair and repeatedly rebuild a template inside the scheduled daily run. A failed template gate is an actionable failure, not permission to mutate production code.
