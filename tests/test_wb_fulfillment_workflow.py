@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 
-STAGES = ["collect", "cancel_cleanup", "sequence_sync", "table_sync", "approve", "prepare", "wait_imei", "sync_imei", "labels", "archive"]
+STAGES = ["collect", "cancel_cleanup", "sequence_sync", "table_sync", "return_sync", "approve", "prepare", "wait_imei", "sync_imei", "labels", "archive"]
 
 
 def module():
@@ -116,5 +116,18 @@ def test_sequence_sync_keeps_bounded_a_column_contract():
         "preflight the whole batch",
         "independently read back the full workbook",
         "issue no write when every sequence is already correct",
+    ):
+        assert phrase in text
+
+
+def test_return_lifecycle_is_separate_from_seller_pickup_eligibility():
+    text = (Path(__file__).resolve().parents[1]
+            / ".agents/skills/wb-product-workflow/references/fulfillment-workflow.md").read_text(
+                encoding="utf-8")
+    for phrase in (
+        "one unique definitive record with complete same-store and same-order identity",
+        "set column L to 退货 even while the parcel is still travelling back",
+        "Do not add that record to the return worksheet until every seller-pickup gate",
+        "must not be treated as proof that no return exists",
     ):
         assert phrase in text
