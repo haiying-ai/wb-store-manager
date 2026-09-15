@@ -1,4 +1,4 @@
-"""Warehouse sequencing and retained approval records; no marketplace calls."""
+"""Passive warehouse tracking state and documentation contracts."""
 import argparse
 import importlib.util
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 
-STAGES = ["collect", "cancel_cleanup", "sequence_sync", "table_sync", "return_sync", "approve", "prepare", "wait_imei", "sync_imei", "labels", "archive"]
+STAGES = ["collect", "cancel_cleanup", "sequence_sync", "table_sync", "return_sync", "status_sync", "archive"]
 
 
 def module():
@@ -23,8 +23,6 @@ def state_before(stage):
     for name in STAGES[:STAGES.index(stage)]:
         stages[name]["status"] = "passed"
         stages[name]["evidence"] = [f"{name}-readback.json"]
-    if stages["approve"]["status"] == "passed":
-        stages["approve"]["approved_by"] = "user: existing exact order-scope authorization"
     return {"flow": "fulfillment", "stages": stages}
 
 
@@ -32,11 +30,9 @@ def state_before(stage):
     ("cancel_cleanup", "sequence_sync"),
     ("sequence_sync", "table_sync"),
     ("cancel_cleanup", "table_sync"),
-    ("table_sync", "prepare"),
-    ("approve", "prepare"),
-    ("wait_imei", "sync_imei"),
-    ("wait_imei", "labels"),
-    ("sync_imei", "labels"),
+    ("table_sync", "return_sync"),
+    ("return_sync", "status_sync"),
+    ("status_sync", "archive"),
 ])
 @pytest.mark.parametrize("barrier_status", ["pending", "blocked"])
 @pytest.mark.parametrize("later_status", ["in_progress", "passed"])
@@ -48,44 +44,56 @@ def test_unfinished_warehouse_gate_prevents_start_or_completion(barrier, later, 
     assert any(error.startswith(f"{later}:") for error in loaded.validate_state(state))
 
 
-def test_approval_actor_is_required_before_preparation():
-    loaded = module()
-    state = state_before("prepare")
-    del state["stages"]["approve"]["approved_by"]
-    state["stages"]["prepare"]["status"] = "in_progress"
-    assert "approve: approved_by is required" in loaded.validate_state(state)
-
-
 def test_rejected_transition_does_not_change_saved_state(tmp_path):
     loaded = module()
     path = tmp_path / "fulfillment.json"
-    path.write_text(json.dumps(state_before("table_sync")), encoding="utf-8")
+    path.write_text(json.dumps(state_before("return_sync")), encoding="utf-8")
     original = path.read_bytes()
-    with pytest.raises(SystemExit, match="prepare: cannot start"):
-        loaded.command_set(argparse.Namespace(file=str(path), stage="prepare", status="in_progress",
+    with pytest.raises(SystemExit, match="status_sync: cannot start"):
+        loaded.command_set(argparse.Namespace(file=str(path), stage="status_sync", status="in_progress",
                                              evidence=None, blocker=None, approved_by=None))
     assert path.read_bytes() == original
 
 
-def test_existing_session_approval_is_retained_without_asking_again(tmp_path):
+def test_status_sync_can_start_after_prior_tracking_stages_pass(tmp_path):
     loaded = module()
     path = tmp_path / "fulfillment.json"
-    state = state_before("prepare")
+    state = state_before("status_sync")
     path.write_text(json.dumps(state), encoding="utf-8")
-    assert loaded.command_set(argparse.Namespace(file=str(path), stage="prepare", status="in_progress",
-                                                evidence=["prepare-plan.json"], blocker=None, approved_by=None)) == 0
+    assert loaded.command_set(argparse.Namespace(file=str(path), stage="status_sync", status="in_progress",
+                                                evidence=["wb-readonly-status.json"], blocker=None,
+                                                approved_by=None)) == 0
     saved = loaded.read(path)
-    assert saved["stages"]["approve"]["approved_by"] == state["stages"]["approve"]["approved_by"]
+    assert saved["stages"]["status_sync"]["evidence"] == ["wb-readonly-status.json"]
     assert loaded.validate_state(saved) == []
 
 
 def test_full_fulfillment_state_is_valid():
     loaded = module()
     assert loaded.FLOWS["fulfillment"] == STAGES
+    for legacy_stage in ("approve", "prepare", "wait_imei", "sync_imei", "labels"):
+        assert legacy_stage not in loaded.FLOWS["fulfillment"]
     state = state_before("archive")
     state["stages"]["archive"]["status"] = "passed"
     state["stages"]["archive"]["evidence"] = ["warehouse-archive.json"]
     assert loaded.validate_state(state) == []
+
+
+def test_passive_tracking_contract_forbids_wb_fulfillment_writes_and_mirrors_status_to_wps():
+    text = (Path(__file__).resolve().parents[1]
+            / ".agents/skills/wb-product-workflow/references/fulfillment-workflow.md").read_text(
+                encoding="utf-8")
+    for phrase in (
+        "do not create or select a supply for it",
+        "add it to a supply",
+        "change its WB status or metadata",
+        "submit IMEI",
+        "request and fill an order label or supply QR code",
+        "retrieve fresh same-store/same-order WB evidence in read-only mode",
+        "update only the configured WPS status field",
+        "independent readback",
+    ):
+        assert phrase in text
 
 
 def test_pre_shipment_cancellation_cleanup_keeps_strict_evidence_and_archive_rules():

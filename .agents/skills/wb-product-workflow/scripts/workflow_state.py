@@ -17,7 +17,7 @@ FLOWS = {
     "finance": ["collect", "backfill", "reconcile", "calculate", "verify", "report", "archive"],
     "funding": ["preflight", "plan", "approve", "execute", "readback", "archive"],
     "advertising": ["preflight", "plan", "approve", "execute", "readback", "archive"],
-    "fulfillment": ["collect", "cancel_cleanup", "sequence_sync", "table_sync", "return_sync", "approve", "prepare", "wait_imei", "sync_imei", "labels", "archive"],
+    "fulfillment": ["collect", "cancel_cleanup", "sequence_sync", "table_sync", "return_sync", "status_sync", "archive"],
 }
 STATUSES = {"pending", "in_progress", "waiting_approval", "passed", "blocked"}
 APPROVAL_STAGES = {"approve"}
