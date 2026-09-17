@@ -7,6 +7,7 @@ import subprocess
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
+from openpyxl import load_workbook
 import pytest
 
 
@@ -159,12 +160,32 @@ def _stress_payload():
         }
 
     return {
-        "templateVersion": "wb-owner-dashboard-v2.1",
+        "templateVersion": "wb-owner-dashboard-v2.4",
         "periodEnd": "2026-09-09",
         "sourceCutoff": "2026-09-09",
         "nativeStatistics": [],
         "ownerView": {"periods": list(PERIODS), "stores": stores},
         "ownerPeriodAccounts": accounts,
+        "ownerCashPositions": {
+            "periods": {
+                period["key"]: {
+                    "stores": {
+                        alias: {
+                            "snapshotDay": period["end"],
+                            "accountBalanceCny": "0.00",
+                            "knownSubtotalCny": "0.00",
+                        }
+                        for alias in cash_by_store
+                    },
+                    "ALL": {"accountBalanceCny": "0.00", "knownSubtotalCny": "0.00"},
+                }
+                for period in PERIODS
+            }
+        },
+        "agencySettlementAdjustments": {
+            "entries": [],
+            "byPeriod": {period["key"]: {"cumulativeCny": "0.00"} for period in PERIODS},
+        },
     }
 
 
@@ -179,10 +200,10 @@ def test_repository_release_manifest_matches_builder_bytes():
     import hashlib
 
     release = json.loads(RELEASE_MANIFEST.read_text(encoding="utf-8"))
-    assert release["templateVersion"] == "wb-owner-dashboard-v2.1"
+    assert release["templateVersion"] == "wb-owner-dashboard-v2.4"
     assert (ROOT / release["builder"]).resolve() == BUILDER.resolve()
     assert release["approvedBuilderSha256"] == hashlib.sha256(BUILDER.read_bytes()).hexdigest()
-    assert release["layoutContractVersion"] == "owner-dashboard-layout-v1"
+    assert release["layoutContractVersion"] == "owner-dashboard-layout-v2"
 
 
 def test_real_owner_builder_enforces_full_width_layout_contract(tmp_path):
@@ -215,24 +236,44 @@ def test_real_owner_builder_enforces_full_width_layout_contract(tmp_path):
     verification = json.loads(verification_path.read_text(encoding="utf-8"))
     layout = verification["layoutContract"]
 
-    assert result == {
-        "output": str(workbook_path),
-        "sheets": 8,
-        "formulaErrorCount": 0,
-        "verifiedMetricCount": 136,
-        "reconciliationRows": 96,
-        "recalcVerified": True,
-        "layoutContractPassed": True,
-    }
-    assert verification["templateVersion"] == "wb-owner-dashboard-v2.1"
+    assert result["output"] == str(workbook_path)
+    assert result["sheets"] == 8
+    assert result["formulaErrorCount"] == 0
+    assert result["verifiedMetricCount"] >= 90
+    assert result["reconciliationRows"] == 96
+    assert result["recalcVerified"] is True
+    assert result["layoutContractPassed"] is True
+    assert verification["templateVersion"] == "wb-owner-dashboard-v2.4"
     assert verification["formulaErrorCount"] == 0
     assert verification["totalsVerified"] is True
-    assert verification["verifiedMetricCount"] == 136
+    assert verification["verifiedMetricCount"] == result["verifiedMetricCount"]
     assert verification["reconciliationRows"] == 96
     assert verification["reconciliationDifference"] == 0
     assert verification["recalcVerified"] is True
+    assert verification["summaryMetricCount"] == 18
+    assert verification["summaryMetricRows"] == {
+        "gross_sales": 5,
+        "refunds": 6,
+        "net_sales": 7,
+        "platform_receivable": 8,
+        "net_purchase_cost": 9,
+        "actual_logistics": 10,
+        "other_expenses": 11,
+        "operating_profit_cash_ads": 12,
+        "formal_ad_accrual": 13,
+        "cash_ad_spend": 14,
+        "formal_ad_budget_balance": 15,
+        "agency_accrual": 16,
+        "agency_receipts": 17,
+        "agency_payable": 18,
+        "funds_total": 19,
+        "completed_withdrawals_cumulative": 20,
+        "wb_balance_snapshot": 21,
+        "pending_withdrawals": 22,
+    }
 
     assert layout["passed"] is True
+    assert layout["version"] == "owner-dashboard-layout-v2"
     assert layout["flowMaxColumn"] == "AJ"
     assert layout["orderMaxColumn"] == "AC"
     assert layout["noHelperColumnsBeyond"] is True
@@ -259,8 +300,28 @@ def test_real_owner_builder_enforces_full_width_layout_contract(tmp_path):
     rendered = [Path(item) for item in verification["renderedSheets"]]
     assert len(rendered) == 8
     assert all(item.is_file() and item.stat().st_size > 0 for item in rendered)
+    assert Path(verification["appendixPreview"]).is_file()
     assert workbook_path.is_file() and workbook_path.stat().st_size > 0
     with ZipFile(workbook_path) as archive:
         workbook_xml = ElementTree.fromstring(archive.read("xl/workbook.xml"))
     namespace = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     assert len(workbook_xml.findall("x:sheets/x:sheet", namespace)) == 8
+    saved = load_workbook(workbook_path, read_only=True, data_only=False)
+    assert saved.sheetnames == [
+        "汇总报告", "老店汇总", "新店汇总", "老店订单", "老店流水", "新店订单", "新店流水", "周期对账"
+    ]
+    assert [saved["汇总报告"].cell(1, column).value for column in range(2, 6)] == [
+        "截止日", "上个完整周", "上个完整月", "开业至截止日"
+    ]
+    for name in ("汇总报告", "老店汇总", "新店汇总"):
+        sheet = saved[name]
+        assert sheet["A5"].value.startswith("营业额｜销售额")
+        assert sheet["A22"].value.startswith("资金｜处理中提现")
+        assert sheet["E15"].data_type == "f"
+    assert saved["汇总报告"]["A24"].value == "老店重点｜经营利润"
+    assert saved["汇总报告"]["A25"].value == "新店重点｜经营利润"
+    assert saved["老店汇总"]["A24"].value is None
+    assert {saved["周期对账"].cell(row, 2).value for row in range(105, 126)} >= {
+        "预留广告预算后利润", "含暂估广告预算余额", "有效提现申请",
+        "平台促销金消耗", "独立退货风险净计提", "退货储备超额损失变动"
+    }

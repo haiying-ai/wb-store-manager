@@ -1129,7 +1129,10 @@ def _calculate_group(
         else None
     )
 
-    managed = _money(positive_revenue * policy.managed_rate) if revenue_value is not None else None
+    # The management fee is incurred on confirmed cash withdrawals, not on an
+    # order's sale price.  Order calculations must not pre-accrue it; the
+    # store-level withdrawal ledger carries the independently evidenced fee.
+    managed = ZERO
     return_risk_reserve = (
         _money(positive_revenue * policy.return_risk_rate)
         if revenue_value is not None
@@ -1240,7 +1243,7 @@ def _calculate_group(
         financial_reporting_policy_id=policy.reporting_policy_id,
         selling_price_policy_id=policy.pricing_policy_id,
         reserve_allocation_mode=policy.reserve_allocation_mode,
-        managed_operations_rate=policy.managed_rate,
+        managed_operations_rate=ZERO,
         return_risk_reserve_rate=policy.return_risk_rate,
         promotion_reserve_rate=policy.promotion_rate,
         total_reserve_rate=policy.pool_rate,
@@ -1717,7 +1720,7 @@ def _template_calculation(
             "commissionCny": None,
             "paymentFeeCny": None,
             "fixedOperationsCny": None,
-            "managedOperationsCny": None,
+            "managedOperationsCny": ZERO,
             "returnRiskReserveCny": None,
             "promotionReserveCny": None,
             "totalPolicyReserveCny": None,
@@ -1732,7 +1735,8 @@ def _template_calculation(
         if policy.fixed_operations_fallback_cny is not None
         else None
     )
-    managed = _money(positive_revenue * policy.managed_rate)
+    # Template/order estimates do not include a cash-withdrawal fee.
+    managed = ZERO
     return_risk = _money(positive_revenue * policy.return_risk_rate)
     promotion = _money(positive_revenue * policy.promotion_rate)
     pool = _money(positive_revenue * policy.pool_rate)

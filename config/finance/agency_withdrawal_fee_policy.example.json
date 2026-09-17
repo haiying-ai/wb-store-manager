@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "policyId": "set-approved-policy-id",
+  "status": "requires_configuration",
+  "rate": null,
+  "basis": "confirmed_withdrawal_bank_credit_cny",
+  "rounding": "ROUND_HALF_UP_PER_WITHDRAWAL_TO_CENT",
+  "restatementScope": "all_available_historical_report_periods",
+  "exclusions": [
+    "order_sales",
+    "seller_balance",
+    "withdrawal_requests",
+    "cancelled_or_unconfirmed_withdrawals"
+  ],
+  "configurationNote": "Copy to agency_withdrawal_fee_policy.json only after entering the explicitly approved policy. The current engine enforces its qualified fee policy; changing its rate requires an independently qualified implementation and template release."
+}

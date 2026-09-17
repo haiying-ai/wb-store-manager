@@ -26,19 +26,45 @@ from .finance_running_sources import extract_running_account_sources
 from .finance_costs import normalize_product_key
 from .finance_owner_views import build_owner_view, period_windows
 from .finance_running_lock import serialized_running_account
+from .finance_agency_receipts import prepare_agency_receipt_batches, prepare_agency_settlement_adjustments
+from .finance_cash_positions import build_owner_cash_positions
 
-TEMPLATE_VERSION = "wb-owner-dashboard-v2.1"
-LAYOUT_CONTRACT_VERSION = "owner-dashboard-layout-v1"
+TEMPLATE_VERSION = "wb-owner-dashboard-v2.4"
+LAYOUT_CONTRACT_VERSION = "owner-dashboard-layout-v2"
 TEMPLATE_RELEASE_MANIFEST = Path("config/finance/owner_report_template_release.json")
+AGENCY_FEE_POLICY_PATH = Path("config/finance/agency_withdrawal_fee_policy.json")
 MOSCOW = ZoneInfo("Europe/Moscow")
 FIELD_MAP = {
     "salesAmountGCny": "gross_sales", "forPayCny": "seller_proceeds",
-    "purchaseCostCny": "product_cost", "managedOperationsCny": "agency_accrued",
+    "purchaseCostCny": "product_cost",
     "promotionReserveCny": "promotion_accrued", "returnRiskReserveCny": "return_reserve_accrued",
 }
 
 def _read(path: Path, default=None):
     return json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else ({} if default is None else default)
+
+def _agency_fee_policy(service) -> tuple[str, Decimal]:
+    """The owner-approved cash-basis correction is independent of order-time policy."""
+    path = service.repo_root / AGENCY_FEE_POLICY_PATH
+    if not path.is_file():
+        path = Path(__file__).resolve().parents[1] / AGENCY_FEE_POLICY_PATH
+    policy = _read(path)
+    required = {
+        "schemaVersion": 1,
+        "status": "active",
+        "basis": "confirmed_withdrawal_bank_credit_cny",
+        "rounding": "ROUND_HALF_UP_PER_WITHDRAWAL_TO_CENT",
+        "restatementScope": "all_available_historical_report_periods",
+    }
+    if any(policy.get(key) != value for key, value in required.items()):
+        raise ValueError(f"Invalid approved agency withdrawal fee policy: {path}")
+    try:
+        rate = Decimal(str(policy["rate"]))
+    except (KeyError, ValueError, ArithmeticError) as exc:
+        raise ValueError(f"Invalid agency withdrawal fee rate: {path}") from exc
+    if rate != Decimal("0.02") or not policy.get("policyId"):
+        raise ValueError(f"Agency withdrawal fee must match owner-approved 2%: {path}")
+    return str(policy["policyId"]), rate
 
 def _write(path: Path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -374,6 +400,7 @@ def _supplement_marketplace_orders(service, sources):
 def refresh_running_accounts(service, *, through: date, source_statuses=None) -> dict[str, Any]:
     started = time.perf_counter()
     settings = _settings(service)
+    agency_policy_id, agency_rate = _agency_fee_policy(service)
     previous_state = _read(_state_path(service))
     requested_cutoff = through.isoformat()
     cutoff = max(requested_cutoff, previous_state.get("through", requested_cutoff))
@@ -382,14 +409,41 @@ def refresh_running_accounts(service, *, through: date, source_statuses=None) ->
         historical_cash_path=service.periodic_standard.historical_cash_events_registry,
         policy_timeline=service.policy_timeline)
     _supplement_marketplace_orders(service, sources)
-    # Source extraction returns latest balances; retain earlier observed facts
-    # so a later refresh cannot erase the balance evidence of an older cutoff.
+    # Keep canonical historical observations as well as older retained facts,
+    # so each owner column can select its own balance at its historical cutoff.
     balances = {}
-    for row in [*previous_state.get("sources", {}).get("balanceSnapshots", []), *sources.get("balanceSnapshots", [])]:
+    for row in [*previous_state.get("sources", {}).get("balanceSnapshots", []),
+                *sources.get("balanceSnapshotHistory", []), *sources.get("balanceSnapshots", [])]:
         key = (row.get("storeAlias"), row.get("source"), row.get("observedAt"), row.get("eventId"))
         balances[key] = row
     sources["balanceSnapshots"] = sorted(balances.values(), key=lambda row: (row.get("observedAt", ""), row.get("storeAlias", ""), row.get("source") or ""))
+    sources.pop("balanceSnapshotHistory", None)
     decisions = _read(settings["decisions"])
+    agency_receipts = prepare_agency_receipt_batches(
+        decisions, [row["storeAlias"] for row in sources["stores"]], through=cutoff,
+        report_stores=service.store_aliases,
+        periods=period_windows({"periodEnd": cutoff, "sources": sources}),
+    )
+    source_receipt_identities = {
+        (row["storeAlias"], row["eventId"])
+        for row in sources.get("cashReceipts", [])
+    }
+    source_receipt_references = {
+        (row["storeAlias"], str(reference).strip())
+        for row in sources.get("cashReceipts", [])
+        for reference in (row.get("evidenceReference"), row.get("externalReference"))
+        if reference
+    }
+    for row in decisions.get("cashReceipts", []):
+        if (
+            (row["store"], row["eventId"]) in source_receipt_identities
+            or (row["store"], str(row.get("evidence") or "").strip())
+            in source_receipt_references
+        ):
+            raise ValueError(
+                "Account receipt identity or evidence is present in both the historical "
+                "cash registry and owner decisions; reconcile before refresh"
+            )
     issues = list(sources.get("issues", []))
     counts = {"inserted": 0, "updated": 0, "unchanged": 0}
     native, provisional, desired = [], {}, {}
@@ -466,6 +520,7 @@ def refresh_running_accounts(service, *, through: date, source_statuses=None) ->
         policy = service.policy_timeline.select(created) if created else None
         cost = _historical_cost(sources, sku, created)
         values = {metric: None for metric in FIELD_MAP.values()}
+        values["agency_accrued"] = "0"
         values["shared_pool_accrued"] = None if not policy or policy.reserve_allocation_mode == "LEGACY_SHARED_POOL" else "0"
         values["product_cost"] = extra.get("purchaseCostCnyHistorical") or (cost.get("purchase_cost_cny") if cost else None)
         event = sale_event(alias, event_id, day, amounts=values, order_id=order_id,
@@ -488,7 +543,6 @@ def refresh_running_accounts(service, *, through: date, source_statuses=None) ->
         if policy and estimate.get("priceWithDiscCny") is not None:
             g = Decimal(str(estimate["priceWithDiscCny"]))
             amounts = {**values, "gross_sales": str(money(g)), "seller_proceeds": estimate.get("forPayCny"),
-                "agency_accrued": str(money(g * policy.managed_operations_rate)),
                 "promotion_accrued": str(money(g * policy.promotion_reserve_rate)),
                 "return_reserve_accrued": str(money(g * policy.return_risk_reserve_rate)),
                 "shared_pool_accrued": str(money(g * policy.promotion_reserve_rate)) if policy.reserve_allocation_mode == "LEGACY_SHARED_POOL" else "0"}
@@ -521,10 +575,11 @@ def refresh_running_accounts(service, *, through: date, source_statuses=None) ->
         cost = _historical_cost(sources, sku, created)
         policy = service.policy_timeline.select(created) if created else None
         values = {metric: row.get(field) for field, metric in FIELD_MAP.items()}
+        values["agency_accrued"] = "0"
         if values["product_cost"] is None and cost:
             values["product_cost"] = str(money(Decimal(cost["purchase_cost_cny"]) * abs(Decimal(str(row.get("quantity") or 1)))))
         if policy and values["gross_sales"] is not None:
-            for metric, rate in (("agency_accrued", policy.managed_operations_rate), ("promotion_accrued", policy.promotion_reserve_rate), ("return_reserve_accrued", policy.return_risk_reserve_rate)):
+            for metric, rate in (("promotion_accrued", policy.promotion_reserve_rate), ("return_reserve_accrued", policy.return_risk_reserve_rate)):
                 if values[metric] is None:
                     values[metric] = str(money(Decimal(values["gross_sales"]) * rate))
         mode = row.get("reserveAllocationMode") or (policy.reserve_allocation_mode if policy else None)
@@ -610,6 +665,15 @@ def refresh_running_accounts(service, *, through: date, source_statuses=None) ->
         for store in sources["stores"]:
             if store["storeAlias"] in scope:
                 account.register_store(store["storeAlias"], _day(store.get("openedAt")), "CNY")
+        # Preserve append-only history while restating any legacy sale that no
+        # longer appears in the latest extraction. Refunds derive from the
+        # current original sale revision, so their old fee reversal disappears.
+        for old in account.current_events():
+            if old.store_id not in scope or old.kind != "sale" or old.event_id in desired:
+                continue
+            if old.amounts.get("agency_accrued") not in (None, "0", "0.00"):
+                _upsert(account, replace(old, amounts={**old.amounts, "agency_accrued": "0"},
+                    metadata={**old.metadata, "agencyFeeRestatement": agency_policy_id}), counts)
         for replacement in ad.get("duplicateReplacements", []):
             for superseded in replacement.get("supersededEventIds", []):
                 history = account.event_history(replacement["storeAlias"], "ad:" + superseded)
@@ -640,6 +704,15 @@ def refresh_running_accounts(service, *, through: date, source_statuses=None) ->
                 if event_date and _day(event_date) <= cutoff:
                     _upsert(account, cash_event(alias, identity+":"+suffix, _day(event_date), metric=metric, amount=amount,
                         evidence=(str(row.get("externalReference") or identity),), metadata={"basis": "withdrawal_record", "recordId": row.get("recordId")}), counts)
+            settled_at = row.get("settledAt") if row.get("settledByCutoff") else None
+            if settled_at and _day(settled_at) <= cutoff:
+                fee = money(Decimal(str(amount)) * agency_rate)
+                _upsert(account, cash_event(alias, identity+":agency-fee", _day(settled_at),
+                    metric="agency_accrued", amount=str(fee),
+                    evidence=(str(row.get("externalReference") or identity),),
+                    metadata={"basis": "completed_withdrawal_agency_fee", "recordId": row.get("recordId"),
+                              "policyId": agency_policy_id, "rate": str(agency_rate),
+                              "withdrawalCompletedEventId": identity+":completed", "withdrawalAmountCny": str(amount)}), counts)
         for row in sources.get("excludedWithdrawals", []):
             if row.get("storeAlias") not in scope or not row.get("cancelledAt"):
                 continue
@@ -648,10 +721,37 @@ def refresh_running_accounts(service, *, through: date, source_statuses=None) ->
                 if occurred and _day(occurred) <= cutoff:
                     _upsert(account, cash_event(row["storeAlias"], row["eventId"] + ":" + suffix, _day(occurred), metric=metric,
                         amount=row["amountCny"], evidence=(row["recordId"],), metadata={"basis": "withdrawal_record", "status": "voided"}), counts)
-        for row in decisions.get("agencyPayments", []):
+        for row in sources.get("cashReceipts", []):
+            received_day = _day(row.get("receivedAt"))
+            if row.get("storeAlias") not in scope or not received_day or received_day > cutoff:
+                continue
+            evidence = tuple(str(value) for value in (
+                row.get("evidenceReference"), row.get("externalReference"),
+            ) if value)
+            _upsert(account, cash_event(
+                row["storeAlias"], "cash-received:" + row["eventId"],
+                received_day, metric="receipts_received",
+                amount=row["amountCny"], evidence=evidence,
+                metadata={
+                    "basis": "independently_evidenced_account_receipt",
+                    "scope": "store", "sourceType": row.get("sourceType"),
+                    "evidenceSource": row.get("evidenceSource"),
+                },
+            ), counts)
+        desired_agency_allocations = {(row["store"], "agency-received:" + row["eventId"])
+                                     for row in agency_receipts["allocatedPayments"]}
+        for event in account.current_events():
+            if (event.store_id in scope
+                    and event.metadata.get("basis") == "owner_confirmed_combined_agency_receipt"
+                    and (event.store_id, event.event_id) not in desired_agency_allocations
+                    and money(event.amounts.get("agency_paid", "0")) != 0):
+                _upsert(account, replace(event, amounts={"agency_paid": "0.00"},
+                    metadata={**event.metadata, "allocationWithdrawn": True}), counts)
+        for row in [*decisions.get("agencyPayments", []), *agency_receipts["allocatedPayments"]]:
             if row["store"] in scope and row["date"] <= cutoff:
                 _upsert(account, cash_event(row["store"], "agency-received:"+row["eventId"], row["date"],
-                    metric="agency_paid", amount=row["amountCny"], evidence=(row["evidence"],)), counts)
+                    metric="agency_paid", amount=row["amountCny"], evidence=(row["evidence"],),
+                    metadata=row.get("metadata", {})), counts)
         for row in decisions.get("cashReceipts", []):
             if row["store"] in scope and row["date"] <= cutoff:
                 _upsert(account, cash_event(row["store"], "cash-received:" + row["eventId"], row["date"],
@@ -676,12 +776,28 @@ def refresh_running_accounts(service, *, through: date, source_statuses=None) ->
                             failed_day = _day(issue.get("occurredAt") or issue.get("eventDate"))
                             if failed_day and start <= failed_day <= end:
                                 account.set_coverage(alias, "CNY", metric, failed_day, failed_day, False, (str(issue.get("sourceId") or source),))
+        for coverage in sources.get("cashReceiptCoverage", []):
+            alias = coverage.get("storeAlias")
+            if alias not in scope or coverage.get("complete") is not True:
+                continue
+            start = coverage.get("from")
+            end = min(str(coverage.get("through")), cutoff)
+            if start and end >= start:
+                account.set_coverage(
+                    alias, "CNY", "receipts_received", start, end, True,
+                    (str(coverage.get("coverageId") or coverage.get("evidence")),),
+                )
         for store in sources["stores"]:
             alias, opening = store["storeAlias"], _day(store["openedAt"])
-            if alias not in scope or not opening:
+            if alias not in scope or not opening or opening > cutoff:
                 continue
+            # Older report releases treated settled order coverage as agency
+            # fee coverage. Supersede that stale assertion before applying any
+            # explicit complete withdrawal-history coverage below.
+            account.set_coverage(alias, "CNY", "agency_accrued", opening, cutoff, False,
+                                 (agency_policy_id, "withdrawal_history_not_proven_complete"))
             for group, metrics in (("agencyPaymentCoverage", ("agency_paid",)), ("cashReceiptCoverage", ("receipts_received",)),
-                                   ("withdrawalCoverage", ("withdrawal_requested", "withdrawal_completed", "withdrawal_cancelled"))):
+                                   ("withdrawalCoverage", ("withdrawal_requested", "withdrawal_completed", "withdrawal_cancelled", "agency_accrued"))):
                 for coverage in decisions.get(group, []):
                     if coverage["store"] == alias:
                         end = min(coverage["through"], cutoff)
@@ -813,14 +929,22 @@ def latest_verified_owner_report(service, *, through: date):
 
 
 def _dated_before(row, cutoff):
-    value = next((row.get(key) for key in ("event_date", "eventDate", "occurredAt", "observedAt", "date", "requestedAt") if row.get(key)), None)
+    value = next((row.get(key) for key in ("event_date", "eventDate", "occurredAt", "observedAt", "receivedAt", "date", "requestedAt") if row.get(key)), None)
     return not value or _day(value) <= cutoff
 
 
 def _sources_through(sources, cutoff):
     result = dict(sources)
-    for key in ("settlementSales", "settlementCharges", "rawStatistics", "rawOrders", "rawReturns", "balanceSnapshots", "withdrawals", "excludedWithdrawals", "issues"):
+    for key in ("settlementSales", "settlementCharges", "rawStatistics", "rawOrders", "rawReturns", "balanceSnapshots", "withdrawals", "excludedWithdrawals", "cashReceipts", "issues"):
         result[key] = [row for row in sources.get(key, []) if _dated_before(row, cutoff)]
+    result["cashReceiptCoverage"] = []
+    for original in sources.get("cashReceiptCoverage", []):
+        start = _day(original.get("from"))
+        if not start or start > cutoff:
+            continue
+        row = dict(original)
+        row["through"] = min(_day(row.get("through")) or cutoff, cutoff)
+        result["cashReceiptCoverage"].append(row)
     result["withdrawals"] = [dict(row) for row in result["withdrawals"]]
     for row in result["withdrawals"]:
         if row.get("settledAt") and _day(row["settledAt"]) > cutoff:
@@ -868,7 +992,31 @@ def _business_fingerprint(payload):
     for row in payload.get("sources", {}).get("balanceSnapshots", []):
         if _dated_before(row, cutoff):
             balances.append({key: value for key, value in row.items() if key not in {"observedAt", "eventId", "sourceFetchedAt"}})
-    business = {key: payload.get(key) for key in ("templateVersion", "templateBuilderHash", "period", "periodStart", "periodEnd", "actual", "provisional", "ownerPeriodAccounts", "ownerView")}
+    cash_positions = payload.get("ownerCashPositions")
+    if isinstance(cash_positions, dict):
+        # A later observation of the same balance on the same financial day
+        # does not change the report. Keep the chosen day, amount, freshness,
+        # and whether the latest observations conflict in the business hash.
+        cash_positions = {
+            **cash_positions,
+            "periods": {
+                key: {
+                    **period,
+                    "stores": {
+                        alias: {
+                            **{name: value for name, value in store.items()
+                               if name not in {"snapshotObservedAt", "snapshotEventId",
+                                               "conflictingSnapshotEventIds"}},
+                            "hasConflictingSnapshot": bool(store.get("conflictingSnapshotEventIds")),
+                        }
+                        for alias, store in period.get("stores", {}).items()
+                    },
+                }
+                for key, period in cash_positions.get("periods", {}).items()
+            },
+        }
+    business = {key: payload.get(key) for key in ("templateVersion", "templateBuilderHash", "period", "periodStart", "periodEnd", "actual", "provisional", "ownerPeriodAccounts", "ownerView", "agencyReceiptRegister", "agencySettlementAdjustments", "ownerCashPositions")}
+    business["ownerCashPositions"] = cash_positions
     business.update({"postings": [posting_value(row) for row in scoped_postings],
         "scenarioPostings": [posting_value(row) for row in payload.get("scenarioPostings", []) if _dated_before(row, cutoff)],
         "nativeStatistics": [row for row in payload.get("nativeStatistics", []) if _dated_before(row, cutoff)],
@@ -878,6 +1026,44 @@ def _business_fingerprint(payload):
     for key in ("postings", "scenarioPostings", "nativeStatistics", "balanceSnapshots"):
         business[key] = sorted(business[key], key=lambda row: json.dumps(row, sort_keys=True, default=str))
     return hashlib.sha256(json.dumps(business, sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()
+
+
+def _apply_unallocated_agency_receipts(report, amounts):
+    """Recognize confirmed group cash without assigning it to an invented store."""
+    consolidated = report.get("stores", {}).get("ALL")
+    if not consolidated:
+        return
+    for scope, key in (("period", "periodCny"), ("cumulative", "cumulativeCny")):
+        amount = money(amounts.get(key, "0.00"))
+        if not amount:
+            continue
+        metrics = consolidated[scope]["metrics"]
+        for metric, sign in (("agency_paid", 1), ("agency_payable", -1)):
+            record = metrics[metric]
+            record["known_subtotal"] = str(money(Decimal(record["known_subtotal"]) + sign * amount))
+            if record.get("amount") is not None:
+                record["amount"] = str(money(Decimal(record["amount"]) + sign * amount))
+        consolidated[scope]["unallocatedAgencyPaidCny"] = str(amount)
+
+
+def _apply_agency_settlement_adjustments(report, amounts):
+    """Resolve an evidenced combined payable tail without recording cash."""
+    consolidated = report.get("stores", {}).get("ALL")
+    if not consolidated:
+        return
+    for scope, key in (("period", "periodCny"), ("cumulative", "cumulativeCny")):
+        amount = money(amounts.get(key, "0.00"))
+        if not amount:
+            continue
+        record = consolidated[scope]["metrics"]["agency_payable"]
+        known = money(record["known_subtotal"])
+        # A later real overpayment may make the closing payable negative. The
+        # approved one-cent waiver remains a dated, non-cash adjustment then.
+        record["known_subtotal"] = str(money(known - amount))
+        if record.get("amount") is not None:
+            official = money(record["amount"])
+            record["amount"] = str(money(official - amount))
+        consolidated[scope]["agencySettlementAdjustmentCny"] = str(amount)
 
 
 def _running_account_payload(service, *, period: str, period_start: date | None, through: date,
@@ -923,9 +1109,43 @@ def _running_account_payload(service, *, period: str, period_start: date | None,
                 for key, window in windows.items()
             }
         cutoff = through.isoformat()
+        agency_receipts = prepare_agency_receipt_batches(
+            state["ownerDecisions"], [row["storeAlias"] for row in state["sources"]["stores"]], through=cutoff,
+            report_stores=service.store_aliases,
+            periods={**windows, "report": {"start": start.isoformat(), "end": cutoff}},
+        )
+        agency_settlement = prepare_agency_settlement_adjustments(
+            state["ownerDecisions"], agency_receipts, through=cutoff,
+            report_stores=service.store_aliases,
+            periods={**windows, "report": {"start": start.isoformat(), "end": cutoff}},
+        )
+        for report in (actual, proposed):
+            _apply_unallocated_agency_receipts(report, agency_receipts["unallocatedByPeriod"]["report"])
+            _apply_agency_settlement_adjustments(report, agency_settlement["byPeriod"]["report"])
+        for key, accounts in owner_period_accounts.items():
+            for report in accounts.values():
+                _apply_unallocated_agency_receipts(report, agency_receipts["unallocatedByPeriod"][key])
+                _apply_agency_settlement_adjustments(report, agency_settlement["byPeriod"][key])
         issues = [row for row in state["issues"] if _dated_before(row, cutoff)]
         issues.extend(actual.get("issues", []))
+        for receipt in [*agency_receipts["unallocatedReceipts"], *agency_receipts.get("excludedGroupReceipts", [])]:
+            issues.append({"code": "AGENCY_RECEIPT_STORE_ALLOCATION_PENDING", **receipt})
+            actual["status"] = proposed["status"] = "PENDING_DATA"
+        for adjustment in agency_settlement["excludedGroupAdjustments"]:
+            issues.append({"code": "AGENCY_SETTLEMENT_ADJUSTMENT_OUTSIDE_STORE_SCOPE", **adjustment})
+            actual["status"] = proposed["status"] = "PENDING_DATA"
         issues = list({json.dumps(row, sort_keys=True): row for row in issues}.values())
+        report_decisions = dict(state["ownerDecisions"])
+        if "agencyReceiptBatches" in report_decisions:
+            report_decisions["agencyReceiptBatches"] = [
+                row for row in report_decisions["agencyReceiptBatches"]
+                if row["date"] <= cutoff
+            ]
+        if "agencySettlementAdjustments" in report_decisions:
+            report_decisions["agencySettlementAdjustments"] = [
+                row for row in report_decisions["agencySettlementAdjustments"]
+                if row["date"] <= cutoff
+            ]
         payload = {"templateVersion": TEMPLATE_VERSION, "period": period,
             "templateBuilderHash": hashlib.sha256(settings["builder"].read_bytes()).hexdigest() if settings["builder"].is_file() else None,
             "periodStart": start.isoformat(), "periodEnd": through.isoformat(),
@@ -933,8 +1153,13 @@ def _running_account_payload(service, *, period: str, period_start: date | None,
             "actual": actual, "provisional": proposed, "postings": [row for row in postings if _dated_before(row, cutoff)],
             "scenarioPostings": [row for row in scenario_postings if _dated_before(row, cutoff)],
             "nativeStatistics": [row for row in state["nativeStatistics"] if _dated_before(row, cutoff)],
-            "sources": _sources_through(state["sources"], cutoff), "issues": issues, "ownerDecisions": state["ownerDecisions"],
-            "ownerPeriodAccounts": owner_period_accounts}
+            "sources": _sources_through(state["sources"], cutoff), "issues": issues, "ownerDecisions": report_decisions,
+            "ownerPeriodAccounts": owner_period_accounts,
+            "agencyReceiptRegister": agency_receipts,
+            "agencySettlementAdjustments": agency_settlement,
+            "ownerCashPositions": build_owner_cash_positions(
+                state["sources"], owner_period_accounts, windows, service.store_aliases),
+        }
         payload["ownerView"] = build_owner_view(payload)
         snapshot = account.save_report_snapshot(payload) if persist_snapshot else {}
     return payload, snapshot

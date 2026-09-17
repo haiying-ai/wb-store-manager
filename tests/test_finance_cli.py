@@ -85,6 +85,20 @@ def test_withdrawal_record_omitted_ad_fee_flags_are_none() -> None:
     assert args.ad_fee_status is None
 
 
+def test_receipt_import_cli_accepts_only_an_explicit_manifest() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    add_finance_parser(subparsers)
+
+    args = parser.parse_args(
+        ["finance", "receipt-import", "--file", "receipts.json"]
+    )
+
+    assert args.finance_command == "receipt-import"
+    assert args.file == "receipts.json"
+    assert not hasattr(args, "amount_cny")
+
+
 def test_withdrawal_record_cli_accepts_settlement_balance_without_fee_amounts() -> None:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)

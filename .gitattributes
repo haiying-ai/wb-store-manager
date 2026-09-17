@@ -1,1 +1,2 @@
-wb_manager/assets/build_running_finance_report.mjs text eol=lf
+# Preserve the exact approved builder bytes on every checkout.
+wb_manager/assets/build_running_finance_report.mjs -text whitespace=cr-at-eol

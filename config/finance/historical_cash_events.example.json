@@ -8,5 +8,6 @@
     "neverInferFromBalanceDelta": true,
     "correctionsRequireNewEvent": true
   },
-  "events": []
+  "events": [],
+  "receiptCoverage": []
 }

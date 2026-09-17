@@ -208,6 +208,61 @@ def test_idempotency_and_void_correction_are_append_only(tmp_path):
         ledger.close()
 
 
+def test_reported_withdrawal_accepts_later_settlement_evidence_without_replacing_record(tmp_path):
+    ledger = _ledger(tmp_path)
+    try:
+        record_id = ledger.record_withdrawal_record(
+            "portal-payment-1",
+            "owner-store",
+            amount_cny="1200.00",
+            withdrawn_at="2026-09-01T00:00:00+03:00",
+            advertising_fee_status="settlement_balance",
+            external_reference="portal-payment-1",
+        )
+        original = ledger.list_withdrawal_records(store_alias="owner-store")[0]
+        assert original["current_status"] == "reported"
+        assert original["settled_at"] is None
+        assert original["effective_settled_at"] is None
+
+        with pytest.raises(FinanceLedgerError, match="requires settledAt evidence"):
+            ledger.update_withdrawal_record_status(
+                record_id, "readback_confirmed",
+                occurred_at="2026-09-16T10:00:00+03:00",
+            )
+        with pytest.raises(FinanceLedgerError, match="settledAt cannot precede withdrawn_at"):
+            ledger.update_withdrawal_record_status(
+                record_id, "readback_confirmed",
+                occurred_at="2026-09-16T10:00:00+03:00",
+                evidence={"settledAt": "2026-08-31T23:59:00+03:00"},
+            )
+        assert ledger.list_withdrawal_records(store_alias="owner-store")[0]["current_status"] == "reported"
+
+        evidence = {
+            "settledAt": "2026-09-10T00:00:00+03:00",
+            "source": "user-provided portal payment-record screenshot",
+        }
+        for _ in range(2):
+            ledger.update_withdrawal_record_status(
+                record_id, "readback_confirmed",
+                occurred_at="2026-09-16T10:00:00+03:00",
+                external_reference="portal-payment-1",
+                evidence=evidence,
+            )
+        rows = ledger.list_withdrawal_records(store_alias="owner-store")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["record_id"] == record_id
+        assert row["current_status"] == "readback_confirmed"
+        assert row["settled_at"] is None  # The original immutable request is unchanged.
+        assert row["effective_settled_at"] == "2026-09-09T21:00:00+00:00"
+        assert row["latest_status_event"]["evidence"]["settledAt"] == row["effective_settled_at"]
+        assert ledger.connection.execute(
+            "SELECT COUNT(*) FROM withdrawal_record_events WHERE record_id=?", (record_id,)
+        ).fetchone()[0] == 2  # Initial request plus one idempotent success event.
+    finally:
+        ledger.close()
+
+
 def test_platform_payment_import_rejects_balance_only_rows_and_is_idempotent(tmp_path):
     ledger = _ledger(tmp_path)
     try:

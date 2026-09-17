@@ -1,10 +1,16 @@
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 import json
+from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
 from threading import Barrier
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 import pytest
 
@@ -104,7 +110,8 @@ def test_statistics_becomes_settlement_revision_without_double_cost(tmp_path, mo
     assert result["updated"] == 1 and result["inserted"] == 0
     report = _report(service)
     assert _known(report, "product_cost") == "1000.00"
-    assert _known(report, "agency_accrued") == "100.00"
+    # The source still carries the old order-price fee, but a sale is not a payout.
+    assert _known(report, "agency_accrued") == "0.00"
     assert adapter._read(adapter._state_path(service))["provisionalEvents"] == []
 
 
@@ -119,7 +126,7 @@ def test_official_refund_replaces_statistical_reversal_and_preserves_actual_delt
         "salesAmountGCny": "-1950", "forPayCny": "-1700", "evidenceIds": ["finance:rrdId:2"]})
     adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
     report = _report(service)
-    assert _known(report, "agency_accrued", "period") == "-100.00"
+    assert _known(report, "agency_accrued", "period") == "0.00"
     assert _known(report, "agency_accrued") == "0.00"
     assert _known(report, "seller_proceeds") == "100.00"
     assert _known(report, "gross_sales") == "50.00"
@@ -159,7 +166,7 @@ def test_charge_eventtype_routes_actual_return_pool_without_double_cost(tmp_path
     assert _known(report, "logistics_cost") == "12.00"
     assert _known(report, "shared_pool_return_cost") == "9.00"
     assert _known(report, "other_cost") == "4.00"
-    assert _known(report, "operating_contribution") == "675.00"
+    assert _known(report, "operating_contribution") == "775.00"
 
 
 def test_earlier_refresh_does_not_erase_latest_state_and_report_filters_future(tmp_path, monkeypatch):
@@ -211,6 +218,271 @@ def test_voided_withdrawal_request_and_release_cancel_without_duplicate_new_requ
     assert _known(report, "withdrawal_requested") == "600.00"
     assert _known(report, "withdrawal_cancelled") == "300.00"
     assert _known(report, "withdrawal_pending") == "300.00"
+    assert _known(report, "agency_accrued") == "0.00"
+
+
+def test_agency_fee_starts_only_when_requested_withdrawal_is_confirmed_paid(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    _official_sale(data)
+    data["withdrawals"] = [{"storeAlias": "test-store", "eventId": "payout-one",
+        "recordId": "record-one", "amountCny": "100.00",
+        "requestedAt": "2026-09-01T00:00:00+03:00", "settledAt": None,
+        "settledByCutoff": False}]
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    pending = _report(service)
+    assert _known(pending, "gross_sales") == "2000.00"
+    assert _known(pending, "withdrawal_requested") == "100.00"
+    assert _known(pending, "withdrawal_completed") == "0.00"
+    assert _known(pending, "agency_accrued") == "0.00"
+
+    data["withdrawals"][0].update(settledAt="2026-09-03T00:00:00+03:00", settledByCutoff=True)
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    paid = _report(service)
+    assert _known(paid, "withdrawal_completed") == "100.00"
+    assert _known(paid, "agency_accrued") == "2.00"
+    assert _known(paid, "agency_payable") == "2.00"
+    with RunningAccount(adapter._settings(service)["db"]) as account:
+        agency_events = [event for event in account.current_events()
+            if event.amounts.get("agency_accrued") not in (None, "0", "0.00")]
+        assert len(agency_events) == 1
+        assert agency_events[0].event_date == "2026-09-03"
+
+def test_old_sales_coverage_cannot_prove_complete_withdrawal_fee_history(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    data["withdrawals"] = [{"storeAlias": "test-store", "eventId": "payout-one",
+        "recordId": "record-one", "amountCny": "100.00",
+        "requestedAt": "2026-09-01T00:00:00+03:00",
+        "settledAt": "2026-09-03T00:00:00+03:00", "settledByCutoff": True}]
+    with RunningAccount(adapter._settings(service)["db"]) as account:
+        account.register_store("test-store", "2026-08-01")
+        account.set_coverage("test-store", "CNY", "agency_accrued",
+            "2026-08-01", "2026-09-06", True, ("obsolete-order-coverage",))
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    metrics = _report(service)["stores"]["test-store"]["cumulative"]["metrics"]
+    assert metrics["agency_accrued"]["known_subtotal"] == "2.00"
+    assert metrics["agency_accrued"]["amount"] is None
+    assert metrics["agency_payable"]["amount"] is None
+
+
+def test_agency_fee_rounds_each_completed_payout_and_refresh_is_idempotent(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    data["withdrawals"] = [{"storeAlias": "test-store", "eventId": f"payout-{index}",
+        "recordId": f"record-{index}", "amountCny": "100.25",
+        "requestedAt": "2026-09-01T00:00:00+03:00",
+        "settledAt": "2026-09-03T00:00:00+03:00", "settledByCutoff": True}
+        for index in (1, 2)]
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    assert _known(_report(service), "withdrawal_completed") == "200.50"
+    # 100.25 × 2% = 2.005, rounded to 2.01 per payout, not 4.01 in aggregate.
+    assert _known(_report(service), "agency_accrued") == "4.02"
+    repeat = adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    assert repeat["inserted"] == repeat["updated"] == 0
+    with RunningAccount(adapter._settings(service)["db"]) as account:
+        agency_events = [event for event in account.current_events()
+            if event.amounts.get("agency_accrued") not in (None, "0", "0.00")]
+        assert len(agency_events) == 2
+        assert all(len(account.event_history("test-store", event.event_id)) == 1 for event in agency_events)
+
+
+def test_combined_agency_receipt_preserves_periods_and_unallocated_store_truth(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    service.store_aliases = ["test-store", "other-store"]
+    data["stores"].append({"storeAlias": "other-store", "openedAt": "2026-08-01T00:00:00+03:00", "currency": "CNY"})
+    data["withdrawals"] = [
+        {"storeAlias": store, "eventId": identity, "amountCny": amount,
+         "requestedAt": settled, "settledAt": settled, "settledByCutoff": True}
+        for store, identity, amount, settled in (
+            ("test-store", "aug-credit", "100.00", "2026-08-28T00:00:00+03:00"),
+            ("test-store", "sep-credit", "200.00", "2026-09-10T00:00:00+03:00"),
+            ("other-store", "other-credit", "300.00", "2026-09-10T00:00:00+03:00"),
+        )
+    ]
+    decisions_path = adapter._settings(service)["decisions"]
+    decisions = adapter._read(decisions_path)
+    decisions["agencyReceiptMode"] = "owner_notifies_each_receipt"
+    decisions["agencyPaymentCoverage"].append({"store": "other-store", "through": "2026-09-06", "receivedCny": "0", "evidence": "fixture baseline"})
+    decisions["agencyReceiptBatches"] = [{"eventId": "joint-receipt", "date": "2026-09-16",
+        "amountCny": "11.99", "stores": service.store_aliases, "evidence": "owner fixture receipt", "allocations": []}]
+    adapter._write(decisions_path, decisions)
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 16))
+    model, _ = adapter._running_account_payload(service, period="as-of", period_start=None, through=date(2026, 9, 16), persist_snapshot=False)
+    for key, accrued, paid, payable in (
+        ("cumulative", "12.00", "11.99", "0.01"),
+        ("last_month", "2.00", "0.00", "2.00"),
+        ("last_week", "10.00", "0.00", "12.00"),
+        ("yesterday", "0.00", "11.99", "0.01"),
+    ):
+        summary = model["ownerPeriodAccounts"][key]["actual"]["stores"]["ALL"]
+        assert summary["period"]["metrics"]["agency_accrued"]["known_subtotal"] == accrued
+        assert summary["period"]["metrics"]["agency_paid"]["amount"] == paid
+        assert summary["cumulative"]["metrics"]["agency_payable"]["known_subtotal"] == payable
+    assert model["actual"]["stores"]["test-store"]["cumulative"]["metrics"]["agency_paid"]["amount"] == "0.00"
+    assert model["ownerDecisions"]["agencyReceiptBatches"] == decisions["agencyReceiptBatches"]
+    earlier, _ = adapter._running_account_payload(service, period="as-of", period_start=None, through=date(2026, 9, 13), persist_snapshot=False)
+    assert earlier["agencyReceiptRegister"]["batches"] == []
+    assert earlier["ownerDecisions"]["agencyReceiptBatches"] == []
+    assert earlier["actual"]["stores"]["ALL"]["cumulative"]["metrics"]["agency_paid"]["amount"] == "0.00"
+    for period, start, end in (("weekly", date(2026, 9, 7), date(2026, 9, 13)),
+                               ("monthly", date(2026, 8, 1), date(2026, 8, 31))):
+        historical, _ = adapter._running_account_payload(
+            service, period=period, period_start=start, through=end, persist_snapshot=False)
+        assert historical["ownerDecisions"]["agencyReceiptBatches"] == []
+        assert historical["agencyReceiptRegister"]["batches"] == []
+    assert adapter._read(decisions_path)["agencyReceiptBatches"] == decisions["agencyReceiptBatches"]
+
+    # The owner separately waives the one-cent settlement tail. It changes
+    # only the combined payable, never the 11.99 cash receipt or store fees.
+    decisions["agencySettlementAdjustments"] = [{
+        "eventId": "joint-receipt-tail-cent", "date": "2026-09-16",
+        "amountCny": "0.01", "batchEventId": "joint-receipt",
+        "evidence": "owner confirmed one-cent non-cash settlement tail",
+    }]
+    adapter._write(decisions_path, decisions)
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 16))
+    settled, _ = adapter._running_account_payload(
+        service, period="as-of", period_start=None, through=date(2026, 9, 16), persist_snapshot=False)
+    combined = settled["ownerPeriodAccounts"]["cumulative"]["actual"]["stores"]["ALL"]["cumulative"]["metrics"]
+    assert combined["agency_accrued"]["known_subtotal"] == "12.00"
+    assert combined["agency_paid"]["amount"] == "11.99"
+    assert combined["agency_payable"]["known_subtotal"] == "0.00"
+    assert settled["agencySettlementAdjustments"]["byPeriod"]["yesterday"]["periodCny"] == "0.01"
+    assert settled["actual"]["stores"]["test-store"]["cumulative"]["metrics"]["agency_payable"]["known_subtotal"] == "6.00"
+    repeated_settled, _ = adapter._running_account_payload(
+        service, period="as-of", period_start=None, through=date(2026, 9, 16), persist_snapshot=False)
+    assert repeated_settled["actual"]["stores"]["ALL"]["cumulative"]["metrics"]["agency_payable"]["known_subtotal"] == "0.00"
+    earlier_adjustment, _ = adapter._running_account_payload(
+        service, period="weekly", period_start=date(2026, 9, 7), through=date(2026, 9, 13), persist_snapshot=False)
+    assert earlier_adjustment["agencySettlementAdjustments"]["entries"] == []
+    assert earlier_adjustment["ownerDecisions"]["agencySettlementAdjustments"] == []
+    assert earlier_adjustment["actual"]["stores"]["ALL"]["cumulative"]["metrics"]["agency_payable"]["known_subtotal"] == "12.00"
+
+    # Later explicit splitting reallocates existing cash, never creates a second receipt.
+    decisions["agencyReceiptBatches"][0]["allocations"] = [
+        {"store": "test-store", "amountCny": "5.99"}, {"store": "other-store", "amountCny": "6.00"}]
+    adapter._write(decisions_path, decisions)
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 16))
+    split, _ = adapter._running_account_payload(service, period="as-of", period_start=None, through=date(2026, 9, 16), persist_snapshot=False)
+    assert split["actual"]["stores"]["ALL"]["cumulative"]["metrics"]["agency_paid"]["amount"] == "11.99"
+    assert split["agencyReceiptRegister"]["unallocatedReceipts"] == []
+    # Withdrawing a mistaken allocation restores group cash without stale store events.
+    decisions["agencyReceiptBatches"][0]["allocations"] = []
+    adapter._write(decisions_path, decisions)
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 16))
+    restored, _ = adapter._running_account_payload(service, period="as-of", period_start=None, through=date(2026, 9, 16), persist_snapshot=False)
+    assert restored["actual"]["stores"]["ALL"]["cumulative"]["metrics"]["agency_paid"]["amount"] == "11.99"
+    assert restored["actual"]["stores"]["test-store"]["cumulative"]["metrics"]["agency_paid"]["amount"] == "0.00"
+    repeated = adapter.refresh_running_accounts(service, through=date(2026, 9, 16))
+    assert repeated["inserted"] == repeated["updated"] == 0
+
+    # A later real prepayment may produce a negative closing payable. The
+    # earlier non-cash one-cent settlement remains applied exactly once.
+    decisions["agencyReceiptBatches"].append({
+        "eventId": "later-agency-prepayment", "date": "2026-09-17",
+        "amountCny": "0.02", "stores": service.store_aliases,
+        "evidence": "owner fixture later cash prepayment", "allocations": [],
+    })
+    adapter._write(decisions_path, decisions)
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 17))
+    later, _ = adapter._running_account_payload(
+        service, period="as-of", period_start=None, through=date(2026, 9, 17), persist_snapshot=False)
+    later_metrics = later["actual"]["stores"]["ALL"]["cumulative"]["metrics"]
+    assert later_metrics["agency_accrued"]["known_subtotal"] == "12.00"
+    assert later_metrics["agency_paid"]["amount"] == "12.01"
+    assert later_metrics["agency_payable"]["known_subtotal"] == "-0.02"
+    assert later["agencySettlementAdjustments"]["byPeriod"]["yesterday"]["periodCny"] == "0.00"
+    assert later["agencySettlementAdjustments"]["byPeriod"]["cumulative"]["cumulativeCny"] == "0.01"
+
+
+def test_real_owner_workbook_shows_completed_payout_fee_and_store_level_flow(tmp_path, monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    builder = repo_root / "wb_manager" / "assets" / "build_running_finance_report.mjs"
+    node = shutil.which("node")
+    if not node or not (repo_root / "node_modules" / "@oai" / "artifact-tool" / "package.json").is_file():
+        pytest.skip("offline Node spreadsheet runtime is not installed")
+
+    service, data = _setup(tmp_path, monkeypatch)
+    _official_sale(data)
+    data["withdrawals"] = [{"storeAlias": "test-store", "eventId": "payout-100",
+        "recordId": "record-100", "amountCny": "100.00",
+        "requestedAt": "2026-09-01T00:00:00+03:00",
+        "settledAt": "2026-09-03T00:00:00+03:00", "settledByCutoff": True}]
+    # The builder's recalc check perturbs a positive cash-ad row and restores it.
+    data["advertisingReconciliation"]["events"] = [{"storeAlias": "test-store",
+        "eventId": "fixture-cash-ad", "eventType": "advertising_expense",
+        "occurredAt": "2026-09-02T00:00:00+03:00", "currency": "CNY",
+        "costFundingClass": "seller_cash", "sellerCashCostCny": "1.00",
+        "platformPromoConsumptionCny": "0"}]
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    model, _ = adapter._running_account_payload(service, period="as-of", period_start=None,
+        through=date(2026, 9, 6), persist_snapshot=False)
+    assert model["templateVersion"] == "wb-owner-dashboard-v2.4"
+    fee_rows = [row for row in model["ownerView"]["stores"]["test-store"]["flowRows"]
+        if row.get("sourceBasis") == "completed_withdrawal_agency_fee"]
+    assert len(fee_rows) == 1
+    assert fee_rows[0]["isOrderEvent"] is False
+    assert Decimal(fee_rows[0]["amounts"]["agency_accrued"]) == Decimal("2.00")
+
+    input_path = tmp_path / "report.json"
+    workbook_path = tmp_path / "report.xlsx"
+    verification_path = tmp_path / "verification.json"
+    input_path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
+    completed = subprocess.run([node, str(builder), "--input", str(input_path),
+        "--output", str(workbook_path), "--verification", str(verification_path)],
+        cwd=repo_root, capture_output=True, text=True, encoding="utf-8", timeout=120, check=False)
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    verification = json.loads(verification_path.read_text(encoding="utf-8"))
+    assert verification["formulaErrorCount"] == 0
+    assert verification["totalsVerified"] is True
+    assert verification["recalcVerified"] is True
+    assert verification["layoutContract"]["passed"] is True
+
+    # The real builder emits the only store's summary as sheet2 and flow as sheet4.
+    # Check saved Excel cells, not only the input model or in-memory verifier.
+    namespace = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    with ZipFile(workbook_path) as workbook:
+        summary = ElementTree.fromstring(workbook.read("xl/worksheets/sheet2.xml"))
+        flow = ElementTree.fromstring(workbook.read("xl/worksheets/sheet4.xml"))
+        shared = []
+        if "xl/sharedStrings.xml" in workbook.namelist():
+            strings = ElementTree.fromstring(workbook.read("xl/sharedStrings.xml"))
+            shared = ["".join(item.itertext()) for item in strings.findall("x:si", namespace)]
+
+    def cell_value(sheet, address):
+        cell = sheet.find(f".//x:c[@r='{address}']", namespace)
+        assert cell is not None, address
+        if cell.get("t") == "inlineStr":
+            return "".join(cell.find("x:is", namespace).itertext())
+        value = cell.find("x:v", namespace)
+        assert value is not None, address
+        return shared[int(value.text)] if cell.get("t") == "s" else value.text
+
+    assert Decimal(cell_value(summary, "E16")) == Decimal("2.00")
+    assert Decimal(cell_value(summary, "E20")) == Decimal("100.00")
+    flow_rows = sorted(model["ownerView"]["stores"]["test-store"]["flowRows"],
+        key=lambda row: (-int(row["eventDate"].replace("-", "")), row["eventId"]))
+    fee_excel_row = 7 + next(index for index, row in enumerate(flow_rows)
+        if row["eventId"] == fee_rows[0]["eventId"])
+    assert cell_value(flow, f"C{fee_excel_row}") == "店铺级"
+    assert Decimal(cell_value(flow, f"E{fee_excel_row}")) == Decimal("2.00")
+    assert Decimal(cell_value(flow, f"I{fee_excel_row}")) == Decimal("2.00")
+
+
+def test_old_order_price_agency_accrual_is_revised_to_zero_without_erasing_history(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    _official_sale(data)
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    with RunningAccount(adapter._settings(service)["db"]) as account:
+        current = next(event for event in account.current_events() if event.kind == "sale")
+        account.upsert_event(replace(current, amounts={**current.amounts, "agency_accrued": "100.00"}),
+            expected_revision=1, correction_reason="fixture for old order-price policy")
+        assert _known(account.report("2026-08-31", "2026-09-06", service.store_aliases), "agency_accrued") == "100.00"
+    result = adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    assert result["updated"] >= 1
+    assert _known(_report(service), "agency_accrued") == "0.00"
+    with RunningAccount(adapter._settings(service)["db"]) as account:
+        history = account.event_history("test-store", current.event_id)
+        assert [Decimal(item["payload"]["amounts"]["agency_accrued"]) for item in history] == [
+            Decimal("0"), Decimal("100"), Decimal("0")]
 
 
 def test_custom_ledger_isolates_database_owner_decisions_imports_and_inherited_output(tmp_path, monkeypatch):
@@ -514,6 +786,67 @@ def test_future_event_and_balance_do_not_republish_unchanged_prior_week(tmp_path
     assert result["status"] == "NOOP"
 
 
+def test_later_same_day_equal_balance_snapshot_keeps_publication_noop(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    data["balanceSnapshots"] = [{
+        "storeAlias": "test-store", "source": "seller_balance", "currency": "CNY",
+        "observedAt": "2026-09-06T10:00:00+03:00", "eventId": "first-observation",
+        "accountBalanceCny": "500.00",
+    }]
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    before = _published_fixture(service)
+
+    data["balanceSnapshots"][0].update({
+        "observedAt": "2026-09-06T12:00:00+03:00", "eventId": "later-observation",
+    })
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    after, _ = adapter._running_account_payload(
+        service, period="weekly", period_start=date(2026, 8, 31),
+        through=date(2026, 9, 6), persist_snapshot=False,
+    )
+    assert after["ownerCashPositions"]["periods"]["yesterday"]["stores"]["test-store"]["snapshotEventId"] == "later-observation"
+    assert adapter._business_fingerprint(after) == adapter._business_fingerprint(before)
+    monkeypatch.setattr(adapter.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("No workbook rebuild expected")))
+    assert adapter.build_running_account_report(
+        service, period="weekly", period_start=date(2026, 8, 31),
+        through=date(2026, 9, 6),
+    )["status"] == "NOOP"
+
+
+def test_cash_position_fingerprint_keeps_day_amount_and_conflict_state(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    data["balanceSnapshots"] = [{
+        "storeAlias": "test-store", "source": "seller_balance", "currency": "CNY",
+        "observedAt": "2026-09-06T10:00:00+03:00", "eventId": "first-observation",
+        "accountBalanceCny": "500.00",
+    }]
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    model, _ = adapter._running_account_payload(
+        service, period="weekly", period_start=date(2026, 8, 31),
+        through=date(2026, 9, 6), persist_snapshot=False,
+    )
+    original = adapter._business_fingerprint(model)
+    row = model["ownerCashPositions"]["periods"]["yesterday"]["stores"]["test-store"]
+
+    changed_day = deepcopy(model)
+    day_row = changed_day["ownerCashPositions"]["periods"]["yesterday"]["stores"]["test-store"]
+    day_row.update(snapshotDay="2026-09-05", snapshotFreshness="stale")
+    assert adapter._business_fingerprint(changed_day) != original
+
+    changed_amount = deepcopy(model)
+    changed_amount["ownerCashPositions"]["periods"]["yesterday"]["stores"]["test-store"]["accountBalanceCny"] = "501.00"
+    assert adapter._business_fingerprint(changed_amount) != original
+
+    conflict = deepcopy(model)
+    conflict_row = conflict["ownerCashPositions"]["periods"]["yesterday"]["stores"]["test-store"]
+    conflict_row["conflictingSnapshotEventIds"] = ["source-a", "source-b"]
+    conflict_fingerprint = adapter._business_fingerprint(conflict)
+    assert conflict_fingerprint != original
+    conflict_row["conflictingSnapshotEventIds"] = ["source-c", "source-d"]
+    assert adapter._business_fingerprint(conflict) == conflict_fingerprint
+    assert row["conflictingSnapshotEventIds"] == []
+
+
 def test_publication_check_legacy_compatible_and_does_not_append_snapshots(tmp_path, monkeypatch):
     service, data = _setup(tmp_path, monkeypatch)
     _statistics(data)
@@ -553,6 +886,10 @@ def test_fingerprint_ignores_capture_timestamps_and_unrelated_future_owner_payme
 def test_four_period_accounts_keep_each_columns_cumulative_closing_balance(tmp_path, monkeypatch):
     service, data = _setup(tmp_path, monkeypatch)
     _official_sale(data)
+    data["withdrawals"] = [{"storeAlias": "test-store", "eventId": "period-payout",
+        "recordId": "period-payout-record", "amountCny": "5000.00",
+        "requestedAt": "2026-08-27T00:00:00+03:00",
+        "settledAt": "2026-08-28T00:00:00+03:00", "settledByCutoff": True}]
     decisions_path = adapter._settings(service)["decisions"]
     decisions = adapter._read(decisions_path)
     decisions["agencyPaymentCoverage"][0]["through"] = "2026-08-31"
@@ -563,10 +900,10 @@ def test_four_period_accounts_keep_each_columns_cumulative_closing_balance(tmp_p
     adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
     model, _ = adapter._running_account_payload(service, period="as-of", period_start=None,
         through=date(2026, 9, 6), persist_snapshot=False)
-    assert model["templateVersion"] == "wb-owner-dashboard-v2.1"
+    assert model["templateVersion"] == "wb-owner-dashboard-v2.4"
     windows = {row["key"]: row for row in model["ownerView"]["periods"]}
     accounts = model["ownerPeriodAccounts"]
-    assert list(accounts) == ["cumulative", "last_month", "last_week", "yesterday"]
+    assert list(accounts) == ["yesterday", "last_week", "last_month", "cumulative"]
     assert (windows["last_month"]["start"], windows["last_month"]["end"]) == ("2026-08-01", "2026-08-31")
     assert (windows["last_week"]["start"], windows["last_week"]["end"]) == ("2026-08-31", "2026-09-06")
     assert windows["yesterday"]["start"] == windows["yesterday"]["end"] == "2026-09-06"
@@ -717,7 +1054,7 @@ def test_daily_dashboard_uses_short_chinese_filename_and_verified_noop(tmp_path,
     assert adapter.Path(first["workbook"]).name == "WB双店财务汇总_截至2026-09-06.xlsx"
     assert repeated["status"] == "NOOP"
     assert repeated["workbook"] == first["workbook"]
-    assert repeated["templateVersion"] == "wb-owner-dashboard-v2.1"
+    assert repeated["templateVersion"] == "wb-owner-dashboard-v2.4"
     assert len(calls) == 1
     assert len(payload_calls) == 2
 
@@ -753,6 +1090,10 @@ def test_atomic_replace_retries_short_windows_lock_and_does_not_swallow_permanen
 def test_owner_notifies_receipts_mode_extends_registered_zero_and_payment_reduces_once(tmp_path, monkeypatch):
     service, data = _setup(tmp_path, monkeypatch)
     _official_sale(data)
+    data["withdrawals"] = [{"storeAlias": "test-store", "eventId": "receipt-mode-payout",
+        "recordId": "receipt-mode-payout-record", "amountCny": "5000.00",
+        "requestedAt": "2026-09-01T00:00:00+03:00",
+        "settledAt": "2026-09-02T00:00:00+03:00", "settledByCutoff": True}]
     path = adapter._settings(service)["decisions"]
     decisions = adapter._read(path)
     decisions["agencyReceiptMode"] = "owner_notifies_each_receipt"
@@ -779,6 +1120,76 @@ def test_default_receipt_coverage_does_not_silently_extend_after_confirmed_cutof
     adapter.refresh_running_accounts(service, through=date(2026, 9, 8))
     metrics = _report(service, "2026-09-08")["stores"]["test-store"]["cumulative"]["metrics"]
     assert metrics["agency_paid"]["amount"] is None
+
+
+def test_evidenced_receipt_supports_partial_coverage_without_claiming_opening_history(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    data["cashReceipts"] = [{
+        "eventId": "portal-payment-1", "storeAlias": "test-store",
+        "receivedAt": "2026-09-01T09:00:00+03:00", "amountCny": "900.00",
+        "sourceType": "wb_settlement_account_credit_history",
+        "evidenceReference": "evidence/payment-1", "evidenceSource": "cash.json",
+    }]
+    data["cashReceiptCoverage"] = [{
+        "coverageId": "test-store-partial", "storeAlias": "test-store",
+        "from": "2026-08-15", "through": "2026-09-06",
+        "complete": True, "evidence": "complete export range",
+    }]
+
+    adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+
+    with RunningAccount(adapter._settings(service)["db"]) as account:
+        partial = account.report("2026-08-15", "2026-09-06", service.store_aliases)
+        cumulative = account.report("2026-08-01", "2026-09-06", service.store_aliases)
+        events = account.current_events("test-store")
+    assert partial["stores"]["test-store"]["period"]["metrics"]["receipts_received"]["amount"] == "900.00"
+    cumulative_metric = cumulative["stores"]["test-store"]["period"]["metrics"]["receipts_received"]
+    assert cumulative_metric["amount"] is None
+    assert cumulative_metric["known_subtotal"] == "900.00"
+    receipt = next(event for event in events if event.event_id == "cash-received:portal-payment-1")
+    assert receipt.metadata["basis"] == "independently_evidenced_account_receipt"
+
+
+def test_refresh_rejects_receipt_identity_present_in_both_sources(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    data["cashReceipts"] = [{
+        "eventId": "same-receipt", "storeAlias": "test-store",
+        "receivedAt": "2026-09-01T09:00:00+03:00", "amountCny": "100.00",
+        "sourceType": "wb_settlement_account_credit_history",
+        "evidenceReference": "evidence/payment-1",
+    }]
+    path = adapter._settings(service)["decisions"]
+    decisions = adapter._read(path)
+    decisions["cashReceipts"] = [{
+        "store": "test-store", "eventId": "same-receipt",
+        "date": "2026-09-01", "amountCny": "100.00",
+        "evidence": "owner confirmed payment",
+    }]
+    adapter._write(path, decisions)
+
+    with pytest.raises(ValueError, match="both the historical cash registry"):
+        adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
+    assert not adapter._settings(service)["db"].exists()
+
+
+def test_refresh_rejects_same_receipt_reference_with_different_id(tmp_path, monkeypatch):
+    service, data = _setup(tmp_path, monkeypatch)
+    data["cashReceipts"] = [{
+        "eventId": "source-receipt", "storeAlias": "test-store",
+        "receivedAt": "2026-09-01T09:00:00+03:00", "amountCny": "100.00",
+        "evidenceReference": "shared-payment-reference",
+    }]
+    path = adapter._settings(service)["decisions"]
+    decisions = adapter._read(path)
+    decisions["cashReceipts"] = [{
+        "store": "test-store", "eventId": "owner-receipt",
+        "date": "2026-09-01", "amountCny": "100.00",
+        "evidence": "shared-payment-reference",
+    }]
+    adapter._write(path, decisions)
+
+    with pytest.raises(ValueError, match="identity or evidence"):
+        adapter.refresh_running_accounts(service, through=date(2026, 9, 6))
 
 
 def test_concurrent_publication_merge_keeps_both_periods_and_existing_history(tmp_path):

@@ -42,6 +42,7 @@ from .finance_policy import (
 )
 from .finance_reporting import ensure_readable_workbook, write_report_artifacts
 from .finance_reporting_standard import load_active_wb_periodic_reporting_standard
+from .finance_running_lock import serialized_running_account
 from .finance_sources import (
     ADVERTISING_BASE_URL,
     SELLER_BALANCE_URL,
@@ -522,6 +523,43 @@ class FinanceService:
             settled_at=settled_at,
             external_reference=external_reference,
             evidence=evidence,
+        )
+
+    @serialized_running_account
+    def receipt_import(self, *, manifest_path: Path) -> dict[str, Any]:
+        """Append normalized, independently evidenced account receipts.
+
+        This is a local accounting import only.  It performs no marketplace or
+        bank write and deliberately rejects balance-derived or settlement-only
+        estimates by requiring a stable source event and evidence reference.
+        """
+
+        from .finance_receipts import import_receipt_manifest
+        from .finance_running_adapter import _read, _settings
+
+        registry_path = self.periodic_standard.historical_cash_events_registry
+        configured_example = self._resolve_path(
+            Path(self.periodic_standard.raw["historicalCashEventsRegistry"])
+        ).resolve()
+        if registry_path.resolve() == configured_example:
+            raise FinanceServiceError(
+                "Account receipts require a private local cash-event registry; "
+                "the configured example/fallback registry is read-only"
+            )
+        decisions = _read(_settings(self)["decisions"])
+        if not isinstance(decisions, dict) or not isinstance(decisions.get("cashReceipts", []), list):
+            raise FinanceServiceError("Owner cashReceipts decisions must be a list")
+        openings = {
+            str(store["alias"]): str(store.get("openedAt") or "")
+            for store in self.registry.get("stores", [])
+            if store.get("enabled") and store.get("alias")
+        }
+        return import_receipt_manifest(
+            registry_path,
+            self._resolve_path(manifest_path),
+            enabled_stores=self.store_aliases,
+            store_openings=openings,
+            legacy_receipts=decisions.get("cashReceipts", []),
         )
 
     def advertising_debt_status(

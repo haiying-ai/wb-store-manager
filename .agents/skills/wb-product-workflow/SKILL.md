@@ -150,7 +150,9 @@ For every change to this Skill package, also mirror the complete project package
    - For Analytics Sales Funnel v3, use its current official request contract: `nmIds`, `subjectIds`, `tagIds`, required `orderBy`, `limit`, and `offset`; do not send legacy capitalized filter names or unrelated cursor fields. For per-product history, send `nmIds` in batches of at most 20. Honor the 20-second Analytics interval and do not accept a report as complete unless the core funnel read is HTTP 200.
 
 13. Reconcile completed-order finances.
-   - For daily running accounts, cross-period refunds, agency receipts/payables, advertising available budgets, and stable weekly/monthly/as-of owner reports, also read `references/owner-running-reporting.md`. Use signed event revisions and one fixed template; never sum cumulative snapshot versions.
+   - For daily running accounts, cross-period refunds, agency receipts/payables, advertising available budgets, and stable weekly/monthly/as-of owner reports, also read `references/owner-running-reporting.md` and any approved project owner-report contract. Follow the approved compact layout: 18 core metrics, cutoff day / previous complete week / previous complete month / cumulative columns, independent store summaries, and eight worksheets for the approved two-store layout. Use signed event revisions and one fixed template; never sum cumulative snapshot versions.
+   - Agency fees follow the approved private confirmed-bank-withdrawal policy, not order sales. Apply registered receipts and explicitly approved noncash adjustments once by event identity and cutoff; never invent store allocations or generalize a batch-specific rounding adjustment. Owner cash position includes cumulative completed withdrawals plus the latest eligible CNY WB balance snapshot at each period end; keep negative balances, dated gaps and processing withdrawals distinct.
+   - Before WB source calls, validate the approved template version, builder path and SHA-256; revalidate the same fingerprint after generation and before publication/archive. A scheduled run must not edit code, configuration, tests, prompts or templates to repair a failure. Stop the live run and return the latest verified report with its real cutoff when available; template changes require separate authorized development and automated/visual qualification.
    - Read `references/financial-reporting.md` and use the `finance` flow for platform-first ingestion, bootstrap, reconciliation, weekly reports, and monthly reports. Load all seller-specific prices, costs, rates, thresholds, and formulas from the authorized private policy at runtime; do not embed them in this Skill.
    - Select historical cost and transaction-price evidence by the order-time effective version. Never value an old order with a current policy merely because it completed or settled later.
    - Read actual return-logistics deductions from all confidently linked WB financial rows. If evidence is missing, duplicated, unsettled, or ambiguous, keep the row open rather than inventing a fixed charge.
@@ -231,7 +233,7 @@ Before saying a product is sellable, verify:
 - Read user-supplied JSON with `utf-8-sig` tolerance.
 - Avoid PowerShell `Set-Content` for multilingual JSON/Markdown unless encoding is controlled.
 - **WB fixed morning daily reports must be written in Simplified Chinese.** This applies to every report title, section heading, metric label, status explanation, finding, inference, and recommended read-only action. Preserve only proper nouns, API paths, SKU/vendor codes, HTTP status codes, currencies, and field names where translation would reduce precision.
-- Treat English-only report text or Chinese mojibake as a blocking output defect: correct the report template and regenerate the local report before delivery. Verify generated Markdown is UTF-8 and that its fixed template headings are Chinese.
+- Treat English-only report text or Chinese mojibake as a blocking output defect. In an authorized development run, correct the template and regenerate before delivery; a scheduled finance run stops and reports the defect without mutating its locked template. Verify generated Markdown is UTF-8 and that its fixed template headings are Chinese.
 - Treat Chinese/Russian mojibake as a workflow blocker before moving materials into `03上线资料`.
 
 ## References
@@ -254,6 +256,7 @@ Before saying a product is sellable, verify:
 - `references/operations-analytics.md`
 - `references/daily-report-template-v2.md`
 - `references/financial-reporting.md`
+- `references/owner-running-reporting.md`
 - `references/advertising-workflow.md`
 - `references/buyer-perspective-post-publish-audit.md`
 - `references/github-ssh.md`

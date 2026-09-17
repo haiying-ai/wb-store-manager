@@ -19,3 +19,9 @@
 - Revalidate the same builder fingerprint after workbook generation and before updating any publication manifest or archive. Never publish a workbook built while its template changed.
 - Template, layout, formula, or preview changes must happen in a separate user-authorized development run. Run the complete automated and visual qualification there, then update the approved fingerprint as one reviewed release.
 - Do not repair and repeatedly rebuild a template inside the scheduled daily run. A failed template gate is an actionable failure, not permission to mutate production code.
+
+## Approved WB Daily Owner Report
+
+- Before daily finance or owner-report work, read `docs/wb-finance-daily-report-contract.md`. It records the owner-approved 2026-09-17 reporting rules and supersedes older generic skill examples for this project's layout, agency fees and cash-position presentation.
+- Use the approved release and active private configuration together. Keep yesterday, last complete week, last complete month, cumulative in that order, with 18 core metrics and independent store summaries.
+- Read agency receipts and explicitly approved settlement adjustments from the private event register once by event identity. Do not re-enter past receipts or turn a one-time rounding adjustment into a general write-off policy.

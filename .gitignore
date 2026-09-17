@@ -42,3 +42,6 @@ _update*.py
 _fix*.py
 update_card_v2.py
 wb_cards_update_v2_payload.json
+
+# Owner-approved withdrawal fee policy is configured locally.
+config/finance/agency_withdrawal_fee_policy.json

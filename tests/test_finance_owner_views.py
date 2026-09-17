@@ -25,7 +25,7 @@ def _payload(events=None, *, scenario=None, cutoff="2026-09-06", approved=True):
 def test_four_windows_use_cutoff_plus_one_as_run_day():
     p = _payload()
     windows = period_windows(p)
-    assert list(windows) == ["cumulative", "last_month", "last_week", "yesterday"]
+    assert list(windows) == ["yesterday", "last_week", "last_month", "cumulative"]
     assert windows["cumulative"]["start"] == "2026-07-15"
     assert (windows["last_month"]["start"], windows["last_month"]["end"]) == ("2026-08-01", "2026-08-31")
     assert (windows["last_week"]["start"], windows["last_week"]["end"]) == ("2026-08-31", "2026-09-06")
@@ -119,6 +119,16 @@ def test_advertising_and_withdrawal_are_store_flows_not_sku_allocations():
     assert len(store["flowRows"]) == 3
     assert all(row["orderId"] is None and row["mappingStatus"] == "店铺级" for row in store["flowRows"] if row["eventId"] != sale["event_id"])
     assert store["mappingSummary"]["partitionComplete"] is True
+
+def test_completed_withdrawal_agency_fee_is_labeled_store_level_not_order_sale():
+    fee = _event("withdrawal:one:agency-fee", kind="cash", order_id=None,
+                 amounts={"agency_accrued": "2.00"},
+                 metadata={"basis": "completed_withdrawal_agency_fee"})
+    store = build_owner_view(_payload([fee]))["stores"]["s"]
+    assert store["orderRows"] == []
+    assert store["flowRows"][0]["kindLabel"] == "代运营费：提现到账×2%"
+    assert store["flowRows"][0]["mappingStatus"] == "店铺级"
+    assert store["flowRows"][0]["amounts"]["agency_accrued"] == "2.00"
 
 
 @pytest.mark.parametrize("scope", ["store", "store_level"])

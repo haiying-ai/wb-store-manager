@@ -160,7 +160,7 @@ def refund_event(store_id: str, event_id: str, event_date: str, *,
 
 def cash_event(store_id: str, event_id: str, event_date: str, *, metric: str,
                amount: Any, **kwargs: Any) -> FinanceEvent:
-    if metric not in {"cash_ad_spend", "promo_credit_spend", "agency_paid", "receipts_received",
+    if metric not in {"cash_ad_spend", "promo_credit_spend", "agency_accrued", "agency_paid", "receipts_received",
                        "withdrawal_requested", "withdrawal_completed", "withdrawal_cancelled",
                        "logistics_cost", "other_cost", "shared_pool_return_cost", "separate_return_cost"}:
         raise RunningAccountError("Cash events require an explicit supported cash or expense metric")

@@ -17,6 +17,10 @@ For running cumulative balances, cross-period refund reversals, fixed owner
 weekly/monthly templates or arbitrary cutoff reports, also read
 `owner-running-reporting.md`. It defines the signed-event owner-account layer
 and the distinction between confirmed balances and provisional estimates.
+Read the project's approved owner-report contract when supplied, including its
+18-metric compact layout, cutoff-day/week/month/cumulative column order,
+confirmed-withdrawal agency policy and period-end cash-position definition.
+Private rates, receipts, settlement adjustments and store names remain private.
 
 Use the read-only `finance` flow for:
 
@@ -110,9 +114,12 @@ active private financial policy. The methodology only requires that:
   evidence, not today's price, a converted display price, or the settlement
   amount itself;
 - platform deductions and direct settlement reconcile to one another;
-- effective-dated reporting policies are selected by `orderCreatedAt`; every
-  operating, return-risk, promotion, or legacy shared reserve uses that same
-  order-time basis and retains its policy ID, rates, and evidence;
+- order-linked reporting policies are selected by `orderCreatedAt`; return-risk,
+  promotion and legacy shared reserves retain that original order-time basis,
+  policy ID, rates and evidence. Confirmed-withdrawal agency accrual instead
+  follows the approved private withdrawal policy, bank-credit business date
+  and per-event rounding; do not accrue it from order sales or reverse it merely
+  because an unrelated order was refunded;
 - actual return logistics is linked from all applicable WB finance rows and is
   allocated once at store-and-period scope;
 - when the selected policy separates return risk and promotion, actual return
@@ -121,8 +128,11 @@ active private financial policy. The methodology only requires that:
 - when an older selected policy uses a shared advertising/return pool, retain
   that historical allocation behavior instead of restating the order under the
   newest policy;
-- actual advertising spend is reconciliation evidence and is never deducted a
-  second time outside the policy reserve;
+- reference operating profit deducts actual seller-funded advertising, agency
+  accrual and other actual costs once. A separately labelled policy-reserve
+  profit uses its own allocation basis; never subtract both the reserve and the
+  same cash consumption in one profit figure. Formal advertising balances
+  exclude estimates even when approved reference profit includes them;
 - planned/template values and actual settlement values occupy separate fields.
 
 ## Returns and period corrections
@@ -138,8 +148,10 @@ when the platform linkage is missing; keep the row open instead.
 
 ## Report publication gates
 
-- `PENDING_DATA` means evidence is incomplete. Publish the scheduled report,
-  show the open items, and keep unavailable values unavailable.
+- `PENDING_DATA` means evidence is incomplete. If the template and artifact
+  gates pass, publish the scheduled report with open items and keep unavailable
+  values unavailable. Source incompleteness never permits bypassing a template
+  fingerprint failure or publishing an unverified workbook.
 - `FINAL` means every required store and every in-scope row has the required
   identity, historical version, settlement evidence, and reconciled lifecycle.
 - `RESTATED` is a later auditable replacement of an already published period;
@@ -169,6 +181,14 @@ Historical withdrawals are separate cash events: a confirmed event is counted
 once in the cumulative cash adjustment, never as an order expense. A request
 reported as processing is not a settled withdrawal; keep it in a separate
 pending view until platform success or settlement evidence arrives.
+The approved owner cash-position view includes unwithdrawn funds: cumulative
+completed confirmed withdrawals plus the latest CNY WB balance snapshot at or
+before each cutoff. Preserve negative balances and historical observation
+dates, and mark missing or stale evidence. This period-end stock is distinct
+from account-credit flows and live withdrawable funds. Processing withdrawals
+stay separate and are not added again; never invent receipts from balance
+changes. See `owner-running-reporting.md` for receipt and adjustment idempotency,
+cutoff filtering and unsupported store-allocation treatment.
 
 WB withdrawal remains a manual seller-portal action unless a supported public
 write route is independently verified. Under the active policy from
@@ -241,8 +261,10 @@ do not invent a reserve increase or assume that an account balance is budget.
 
 Reconcile actual campaign consumption from official promotion evidence and
 the later settlement-cycle charge from official finance/balance evidence.
-Neither is a second expense outside the policy-derived advertising-and-return
-pool. Exclude a finance deduction from generic other-platform cost only when a
+Count actual seller-funded consumption once in reference operating profit and
+as budget usage; do not also charge the deposit, reserve allocation or later
+settlement deduction as the same expense. Keep policy-reserve profit separately
+labelled. Exclude a finance deduction from generic other-platform cost only when a
 stable operation code or an exact approved operation name identifies it as the
 settlement-cycle advertising charge; retain the source row for reconciliation.
 
@@ -267,12 +289,27 @@ never delete or silently replace an earlier report version.
 
 ## Scheduler and safety
 
-The daily controller should sync through the last complete financial day, run
-read-only advertising consumption/settlement reconciliation plus any legacy
-advertising-payment debt reconciliation, generate due weekly/monthly reports,
-and bridge the canonical workbook. Period-close runs use the longer
-repair window and publish open items on schedule. Record phase timings, source
-coverage, watermarks, hashes, and failures.
+Before any WB source call, the daily controller validates the configured
+template version, builder path and approved SHA-256 against the release
+manifest and actual builder. Revalidate that same fingerprint after workbook
+generation and before publication or archive. A scheduled run never edits code,
+configuration, tests, prompts or layout rules to bypass a failed gate; stop and
+return a locally verified report with its real earlier cutoff when available.
+Template changes belong to a separately authorized development run with
+automated and visual qualification before the approved release is updated.
+
+The daily controller freezes the last complete financial day in the business
+timezone, syncs bounded correction windows and gaps, then refreshes running
+accounts. Generate or reuse the primary as-of report before checking whether
+it covers a due weekly/monthly report at the same cutoff. Keep optional legacy
+workbook bridging separate. Read-only advertising/settlement and applicable
+legacy-debt reconciliation use the same materialized evidence. Daily funds-plan
+uses that same frozen cutoff and shared ledger without a weekly report ID,
+another full source fetch, a workbook rebuild or any money-moving action.
+Period-close runs use the longer repair window and publish source open items
+after the artifact gates pass. Record phase timings, source coverage,
+watermarks, hashes and failures. Preserve any owner-disabled proactive funding
+monitor; the daily report is not authority to restore it.
 
 No finance report may implicitly change price, stock, advertising, campaign,
 withdrawal, or account state. Any write requires a separately scoped approval,

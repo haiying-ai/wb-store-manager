@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -12,6 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 ACTIVE_WB_PERIODIC_REPORTING_STANDARD = (
     ROOT / "config" / "finance" / "active_wb_periodic_reporting_standard.json"
 )
+ACCOUNT_RECEIPT_SOURCE_TYPES = frozenset({
+    "wb_settlement_account_credit_history",
+    "verified_settlement_account_credit_statement",
+})
 
 
 class PeriodicReportingStandardError(RuntimeError):
@@ -91,7 +96,9 @@ def load_active_wb_periodic_reporting_standard(
         )
     else:
         history_registry = default_history_registry
-    _validate_cash_events(_read_object(history_registry, "historical cash events"))
+    validate_historical_cash_events(
+        _read_object(history_registry, "historical cash events")
+    )
 
     periods = _mapping(raw.get("periods"), "periods")
     weekly = _mapping(periods.get("weekly"), "periods.weekly")
@@ -239,7 +246,7 @@ def load_active_wb_periodic_reporting_standard(
     )
 
 
-def _validate_cash_events(raw: Mapping[str, Any]) -> None:
+def validate_historical_cash_events(raw: Mapping[str, Any]) -> None:
     if raw.get("status") != "active":
         raise PeriodicReportingStandardError("Historical cash-event registry is not active")
     governance = _mapping(raw.get("governance"), "historical cash-event governance")
@@ -251,6 +258,10 @@ def _validate_cash_events(raw: Mapping[str, Any]) -> None:
     events = raw.get("events")
     if not isinstance(events, list):
         raise PeriodicReportingStandardError("Historical cash events must be a list")
+    if str(raw.get("currency") or "").upper() != "CNY":
+        raise PeriodicReportingStandardError(
+            "Historical cash-event registry currency must be CNY"
+        )
     seen: set[str] = set()
     for index, event in enumerate(events):
         item = _mapping(event, f"historical cash event {index}")
@@ -258,26 +269,73 @@ def _validate_cash_events(raw: Mapping[str, Any]) -> None:
         if event_id in seen:
             raise PeriodicReportingStandardError(f"Duplicate historical eventId: {event_id}")
         seen.add(event_id)
-        if item.get("eventType") != "withdrawal":
+        event_type = item.get("eventType")
+        if event_type not in {"withdrawal", "account_receipt"}:
             raise PeriodicReportingStandardError(
-                f"Unsupported historical cash event type: {item.get('eventType')}"
+                f"Unsupported historical cash event type: {event_type}"
             )
         if not str(item.get("store") or "").strip():
-            raise PeriodicReportingStandardError("Historical withdrawal requires store")
+            raise PeriodicReportingStandardError("Historical cash event requires store")
         try:
-            amount = float(item.get("amountCny"))
-        except (TypeError, ValueError) as exc:
+            amount = Decimal(str(item.get("amountCny")))
+        except (InvalidOperation, TypeError, ValueError) as exc:
             raise PeriodicReportingStandardError(
-                "Historical withdrawal amountCny must be numeric"
+                "Historical cash event amountCny must be numeric"
             ) from exc
-        if amount <= 0:
+        if not amount.is_finite() or amount <= 0:
             raise PeriodicReportingStandardError(
-                "Historical withdrawal amountCny must be positive"
+                "Historical cash event amountCny must be finite and positive"
             )
         if item.get("status") != "readback_confirmed":
             raise PeriodicReportingStandardError(
-                "Historical withdrawal requires readback_confirmed status"
+                "Historical cash event requires readback_confirmed status"
             )
+        if event_type == "account_receipt":
+            _instant(
+                _text(item, "receivedAt", f"historical cash event {index}"),
+                f"historical cash event {index}.receivedAt",
+            )
+            source_type = _text(item, "sourceType", f"historical cash event {index}")
+            if source_type not in ACCOUNT_RECEIPT_SOURCE_TYPES:
+                raise PeriodicReportingStandardError(
+                    f"Unsupported account receipt sourceType: {source_type}"
+                )
+            _text(item, "evidenceReference", f"historical cash event {index}")
+
+    receipt_coverage = raw.get("receiptCoverage", [])
+    if not isinstance(receipt_coverage, list):
+        raise PeriodicReportingStandardError(
+            "Historical receiptCoverage must be a list"
+        )
+    seen_coverage: set[str] = set()
+    for index, coverage in enumerate(receipt_coverage):
+        item = _mapping(coverage, f"historical receipt coverage {index}")
+        coverage_id = _text(
+            item, "coverageId", f"historical receipt coverage {index}"
+        )
+        if coverage_id in seen_coverage:
+            raise PeriodicReportingStandardError(
+                f"Duplicate historical receipt coverageId: {coverage_id}"
+            )
+        seen_coverage.add(coverage_id)
+        _text(item, "store", f"historical receipt coverage {index}")
+        start = _instant(
+            _text(item, "from", f"historical receipt coverage {index}"),
+            f"historical receipt coverage {index}.from",
+        )
+        through = _instant(
+            _text(item, "through", f"historical receipt coverage {index}"),
+            f"historical receipt coverage {index}.through",
+        )
+        if through < start:
+            raise PeriodicReportingStandardError(
+                "Historical receipt coverage through precedes from"
+            )
+        if item.get("complete") is not True:
+            raise PeriodicReportingStandardError(
+                "Historical receipt coverage requires complete=true"
+            )
+        _text(item, "evidence", f"historical receipt coverage {index}")
 
 
 def _read_object(path: Path, label: str) -> dict[str, Any]:

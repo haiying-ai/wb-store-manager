@@ -203,6 +203,20 @@ def add_finance_parser(subparsers: Any) -> None:
         help="Required for the live campaign-budget write; otherwise validate only",
     )
 
+    receipt_import = commands.add_parser(
+        "receipt-import",
+        help=(
+            "Append normalized, evidenced account receipts and explicit coverage; "
+            "never infer receipts from balances or settlement proceeds"
+        ),
+    )
+    _add_runtime_paths(receipt_import, output=False)
+    receipt_import.add_argument(
+        "--file",
+        required=True,
+        help="Normalized CNY receipt JSON manifest with events and/or receiptCoverage",
+    )
+
     withdrawal_record = commands.add_parser(
         "withdrawal-record",
         help=(
@@ -360,6 +374,8 @@ def dispatch_finance(args: argparse.Namespace) -> int:
                 approved_by=args.approved_by,
                 confirm_live=args.confirm_live,
             )
+        elif command == "receipt-import":
+            result = service.receipt_import(manifest_path=Path(args.file))
         elif command == "withdrawal-record":
             evidence = None
             if args.evidence_json:

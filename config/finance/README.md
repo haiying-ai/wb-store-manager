@@ -2,6 +2,15 @@
 
 `active_phone_financial_reporting_policy.json` is the active order-profit and cost-reporting policy for every enabled WB smartphone store in `stores.json`.
 
+The owner-approved agency fee correction is recorded separately in
+`agency_withdrawal_fee_policy.json`. For restated owner running reports, the
+2% fee is calculated on each independently confirmed bank-credited withdrawal,
+rounded to cents per withdrawal, and posted on its settlement date as a
+store-level event. Orders, balances, withdrawal requests, and cancelled or
+unconfirmed withdrawals do not create this fee. Historical order-policy files
+remain unchanged for audit; their former sale-based management-fee formula is
+superseded for this component only. Prior published workbooks remain immutable.
+
 It does not control WB live prices. Live price strategy remains governed by `config/pricing/active_phone_pricing_policy.json` and `config/pricing/active_phone_pricing_store_scope.json`.
 
 The order-time signed sale amount `G` and all platform deductions come from matched platform settlement evidence. Purchase cost, selling-price policy, and reporting-policy versions are selected using the order creation timestamp and are locked on the order row. A later quotation or price-policy change creates a new effective-dated version and never silently rewrites older orders.
@@ -11,6 +20,64 @@ Return logistics has no 8/16 CNY fallback. A final report requires the actual si
 Scheduled publication and evidence completeness are separate. The same canonical Excel workbook is published on time even when auxiliary evidence is incomplete; missing evidence is shown as an open item and unsettled orders stay outside confirmed cash allocation. `PENDING_DATA` therefore describes evidence status only, not permission to withhold the weekly or monthly report. `FINAL` means the evidence is complete, and `RESTATED` is a later auditable replacement caused by a late settlement, refund, correction, or recovered historical version. A restatement never overwrites the earlier report.
 
 The periodic output contract is defined in `active_wb_periodic_reporting_standard.json`. Weekly reports cover the prior Monday through Sunday; monthly reports cover the prior calendar month. The first monthly report also includes the bootstrap cumulative period from each enabled store's opening date through the month-end cutoff. Both stores are calculated separately and then consolidated. Repository defaults resolve relative to the checkout; a scheduled installation may override them with `WB_FINANCE_CANONICAL_WORKBOOK`, `WB_FINANCE_REPORT_ROOT`, and `WB_FINANCE_CASH_EVENTS`. The committed cash-event file is an empty schema example, while the real `historical_cash_events.json` remains local and Git-ignored.
+
+Actual settlement-account credits are not available from the public WB balance
+API. Add them only from an independently evidenced seller-portal account-credit
+export or equivalent account-transaction record through the normalized local
+importer:
+
+```text
+python -m wb_manager finance receipt-import --file <receipt-manifest.json>
+python -m wb_manager finance account-refresh --through <complete-day>
+```
+
+The private `historicalCashEventsLocalOverride` must exist before import. If
+configuration falls back to the tracked example registry, the import stops
+without writing any receipt data.
+
+The manifest is CNY-only and uses stable source identities. A coverage interval
+asserts that the cited source is complete for every day in that exact interval;
+omit `receiptCoverage` when only selected known receipts are available. Partial
+coverage is retained as partial and does not make an opening-to-cutoff total
+complete.
+
+```json
+{
+  "schemaVersion": 1,
+  "currency": "CNY",
+  "events": [
+    {
+      "eventId": "stable-source-payment-id",
+      "store": "owner-store",
+      "eventType": "account_receipt",
+      "amountCny": "1000.00",
+      "receivedAt": "2026-09-15T10:00:00+03:00",
+      "status": "readback_confirmed",
+      "sourceType": "wb_settlement_account_credit_history",
+      "evidenceReference": "local evidence reference"
+    }
+  ],
+  "receiptCoverage": [
+    {
+      "coverageId": "owner-store-payments-through-2026-09-15",
+      "store": "owner-store",
+      "from": "2026-07-15",
+      "through": "2026-09-15",
+      "complete": true,
+      "evidence": "complete export range and bank reconciliation reference"
+    }
+  ]
+}
+```
+
+Never populate this registry from order receivables, `bankPaymentSum`, a single
+balance snapshot, balance differences, a withdrawal amount, or a bank payout
+that belongs in `withdrawal_completed` instead.
+Allowed `sourceType` values are `wb_settlement_account_credit_history` and
+`verified_settlement_account_credit_statement`; this label and the cited
+reference still require human verification of the underlying source. An
+existing `cashReceipts` entry in owner decisions with the same store and ID or
+evidence reference must be reconciled before import.
 
 Workbook creation and synchronization use the Codex bundled Node spreadsheet runtime and its private `@oai/artifact-tool` package. On a fresh checkout, load the workspace dependencies and create a local, Git-ignored `node_modules` junction to the returned Node package directory. Do not vendor or commit that runtime.
 
@@ -125,3 +192,11 @@ When the selected report contents, store registry, cash-event registry, debt
 snapshot, and workbook state are unchanged, it returns `NOOP` before importing
 or exporting the workbook. Any input change falls back to the existing locked,
 backup-and-readback-verified append flow.
+
+## Confirmed-withdrawal agency policy and owner dashboard
+
+Read `../../docs/wb-finance-daily-report-contract.md` for the approved owner dashboard: 18 core metrics, yesterday/week/month/cumulative columns, independent stores, and period-end cash positions.
+
+The executable agency policy is local and Git-ignored: `agency_withdrawal_fee_policy.json`. Use `agency_withdrawal_fee_policy.example.json` as a schema only; it intentionally has no active status or rate. Supply the explicitly approved policy before running account refresh. Missing or invalid policy must fail; never infer it from the pricing policy, example, receipt, or balance. The current qualified engine enforces its specific fee contract. A different rate requires a separately authorized and qualified code/template release, including labels and tests.
+
+Keep real receipts, settlement adjustments, evidence, balances and store allocations in private registries. Public test data is synthetic. Configure output/archive locations locally; the checked-in standard uses relative paths.

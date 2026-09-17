@@ -131,6 +131,9 @@ def extract_running_account_sources(
                      "eventType": "refund" if is_refund else "sale", "quantity": sign * int(raw.get("quantity") or 1),
                      "salesAmountGCny": _money(sign * abs(Decimal(g))) if g is not None else None,
                      "forPayCny": _money(sign * abs(Decimal(pay))) if pay is not None else None,
+                     # Management fee is based on completed withdrawals, not
+                     # the gross amount of any individual order.
+                     "managedOperationsCny": "0.00", "managedOperationsRate": "0",
                      "platformDeductionCny": _money(sign * (abs(Decimal(g)) - abs(Decimal(pay)))) if g is not None and pay is not None else None,
                      "acquiringFeeCny": _money(raw.get("acquiringFee")),
                      "purchaseCostCny": None, "costVersionId": None, "policyId": None}
@@ -147,19 +150,17 @@ def extract_running_account_sources(
                               "costEvidence": {key: cost.get(key) for key in ("quote_path", "quote_sha256", "quote_sheet", "quote_row", "approved_by", "approved_at", "effective_from", "effective_to")},
                               "policyId": snapshot.get("financialReportingPolicyVersionId"),
                               "reserveAllocationMode": snapshot.get("reserveAllocationMode")})
-                for key in ("managedOperationsCny", "managedOperationsRate", "promotionReserveCny", "promotionReserveRate", "returnRiskReserveCny", "returnRiskReserveRate", "totalPolicyReserveCny", "totalReserveRate"):
+                for key in ("promotionReserveCny", "promotionReserveRate", "returnRiskReserveCny", "returnRiskReserveRate", "totalPolicyReserveCny", "totalReserveRate"):
                     event[key] = snapshot.get(key)
                 # Some early snapshots predate explicit policy-rate columns.
                 # Reconstruct allocations from the approved order-time policy,
                 # never from the most recent report's current policy.
                 policy = policy_timeline.select(base["orderCreatedAt"])
                 event.update({"policyId": policy.reporting_policy_id, "reserveAllocationMode": policy.reserve_allocation_mode,
-                              "managedOperationsRate": str(policy.managed_operations_rate),
                               "promotionReserveRate": str(policy.promotion_reserve_rate),
                               "returnRiskReserveRate": str(policy.return_risk_reserve_rate),
                               "totalReserveRate": str(policy.total_reserve_rate)})
-                for key, rate in (("managedOperationsCny", policy.managed_operations_rate),
-                                  ("promotionReserveCny", policy.promotion_reserve_rate),
+                for key, rate in (("promotionReserveCny", policy.promotion_reserve_rate),
                                   ("returnRiskReserveCny", policy.return_risk_reserve_rate),
                                   ("totalPolicyReserveCny", policy.total_reserve_rate)):
                     event[key] = _money(Decimal(event["salesAmountGCny"]) * rate)
@@ -197,6 +198,11 @@ def extract_running_account_sources(
     for event in data["withdrawal_record_events"]:
         evidence = json.loads(event.get("evidence_json") or "{}")
         withdrawal = withdrawal_by_id.get(event["record_id"], {})
+        # A later portal readback can confirm a payment made on an earlier
+        # business day. Keep the observation timestamp, but restate the cash
+        # event on the evidenced bank-credit day.
+        confirmed_settlement = (evidence.get("settledAt")
+                                if event["status"] == "readback_confirmed" else None)
         wrong_reference = evidence.get("incorrectExternalReference")
         correct_reference = evidence.get("correctExternalReference")
         # An evidenced OCR identity correction discovers that the extra
@@ -205,10 +211,12 @@ def extract_running_account_sources(
         identity_correction = (event["status"] == "voided" and bool(wrong_reference)
                                and bool(correct_reference) and wrong_reference != correct_reference
                                and wrong_reference == withdrawal.get("external_reference"))
-        effective_at = withdrawal.get("withdrawn_at") if identity_correction else event["occurred_at"]
+        effective_at = (withdrawal.get("withdrawn_at") if identity_correction
+                        else confirmed_settlement or event["occurred_at"])
         if effective_at and _instant(effective_at) < end:
             status_events.setdefault(event["record_id"], []).append({
                 **event, "effective_at": effective_at,
+                "confirmed_settlement": confirmed_settlement,
                 "historical_identity_correction": identity_correction,
                 "correct_external_reference": correct_reference if identity_correction else None,
             })
@@ -232,19 +240,42 @@ def extract_running_account_sources(
                              "correctedExternalReference": latest.get("correct_external_reference"),
                              "latestStatus": "voided"})
             continue
-        settled = row.get("settled_at")
+        settled = (latest.get("confirmed_settlement") or row.get("settled_at")) if latest["status"] == "readback_confirmed" else None
         success = latest["status"] == "readback_confirmed" and bool(settled) and _instant(settled) < end
         withdrawals.append({"eventId": "withdrawal:" + row["store_alias"] + ":" + str(row.get("external_reference") or row["record_id"]),
                             "recordId": row["record_id"], "storeAlias": row["store_alias"],
                             "amountCny": _money(row["withdrawal_amount_cny"]), "requestedAt": row["withdrawn_at"],
                             "settledAt": settled, "latestStatus": latest["status"], "settledByCutoff": success,
                             "externalReference": row.get("external_reference"), "evidenceSource": "withdrawal_records + latest withdrawal_record_events"})
+    cash_receipts: list[dict[str, Any]] = []
+    cash_receipt_coverage: list[dict[str, Any]] = []
     # Same withdrawal is often also in the historical configuration. Match
     # store/external identity across sources before appending an extra fact.
+    # The same private registry may also carry independently evidenced account
+    # receipts.  They remain distinct from settlement proceeds, withdrawals,
+    # and point-in-time balance snapshots.
     if historical_cash_path is not None and Path(historical_cash_path).exists():
         historical = json.loads(Path(historical_cash_path).read_text(encoding="utf-8-sig"))
         identities = {(x["storeAlias"], x["externalReference"]) for x in withdrawals + excluded}
         for row in historical.get("events", []):
+            if row.get("eventType") == "account_receipt":
+                if row.get("store") not in scope or _instant(row["receivedAt"]) >= end:
+                    continue
+                amount = _money(row.get("amountCny"))
+                if row.get("status") != "readback_confirmed" or amount is None or Decimal(amount) <= 0:
+                    raise ValueError(
+                        "Historical account receipts require readback_confirmed status "
+                        "and a positive amountCny"
+                    )
+                cash_receipts.append({
+                    "eventId": row["eventId"], "storeAlias": row["store"],
+                    "amountCny": amount, "receivedAt": row["receivedAt"],
+                    "externalReference": row.get("externalReference"),
+                    "sourceType": row.get("sourceType"),
+                    "evidenceReference": row.get("evidenceReference"),
+                    "evidenceSource": str(historical_cash_path),
+                })
+                continue
             if row.get("eventType") != "withdrawal" or row.get("store") not in scope or _instant(row["requestedAt"]) >= end:
                 continue
             if row.get("status") == "voided":
@@ -259,14 +290,30 @@ def extract_running_account_sources(
                                 "settledByCutoff": row["status"] == "readback_confirmed" and bool(settled) and _instant(settled) < end,
                                 "evidenceSource": str(historical_cash_path)})
             identities.add((row["store"], row.get("externalReference")))
+        for row in historical.get("receiptCoverage", []):
+            if row.get("store") not in scope or row.get("complete") is not True:
+                continue
+            start_day = _instant(row["from"]).astimezone(MOSCOW).date()
+            through_day = _instant(row["through"]).astimezone(MOSCOW).date()
+            if start_day > cutoff_date:
+                continue
+            cash_receipt_coverage.append({
+                "coverageId": row["coverageId"], "storeAlias": row["store"],
+                "from": start_day.isoformat(),
+                "through": min(through_day, cutoff_date).isoformat(),
+                "complete": True, "evidence": row["evidence"],
+                "evidenceSource": str(historical_cash_path),
+            })
     balances: dict[tuple[str, str], dict[str, Any]] = {}
+    balance_history: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for row in sorted(data["raw_balance"], key=lambda item: item["observed_at"]):
         if row["store_alias"] not in scope or _instant(row["observed_at"]) >= end:
             continue
         raw = json.loads(row["payload_json"])
         if str(raw.get("currency", "")).upper() != "CNY":
             continue
-        balances[(row["store_alias"], raw.get("source", "unknown"))] = {
+        source = raw.get("source", "unknown")
+        snapshot = {
             "storeAlias": row["store_alias"], "observedAt": row["observed_at"], "source": raw.get("source"),
             "currency": "CNY", "sourceCurrencyField": "raw_balance.payload_json.currency",
             "accountBalanceCny": _money(row.get("account_balance_cny")),
@@ -274,6 +321,16 @@ def extract_running_account_sources(
             "advertisingAccountBalanceCny": _money(row.get("ad_balance_cny")),
             "mutualSettlementNetCny": _money(raw.get("net")),
             "eventId": row["event_hash"], "basis": "snapshot_not_cash_receipts"}
+        # Keep every dated observation for a prior report endpoint. The
+        # historical view must retain conflicting readings at the same instant
+        # when their source event IDs differ; the latest-only view below keeps
+        # its established semantics for existing consumers.
+        identity = (row["store_alias"], source, row["observed_at"], row["event_hash"])
+        prior = balance_history.get(identity)
+        if prior is not None and prior != snapshot:
+            raise ValueError(f"Conflicting raw balance identity: {identity}")
+        balance_history[identity] = snapshot
+        balances[(row["store_alias"], source)] = snapshot
     statistics, orders, returns = [], [], []
     for row in data["raw_sales"]:
         if row["store_alias"] not in scope:
@@ -302,7 +359,11 @@ def extract_running_account_sources(
             "stores": stores, "settlementSales": sorted(sales, key=lambda x: (x["occurredAt"], x["eventId"])),
             "settlementCharges": sorted(charges, key=lambda x: (x["occurredAt"], x["eventId"])),
             "advertisingReconciliation": advertising, "withdrawals": withdrawals, "excludedWithdrawals": excluded,
+            "cashReceipts": sorted(cash_receipts, key=lambda x: (x["receivedAt"], x["eventId"])),
+            "cashReceiptCoverage": sorted(cash_receipt_coverage, key=lambda x: (x["from"], x["through"], x["coverageId"])),
             "balanceSnapshots": list(balances.values()),
+            "balanceSnapshotHistory": [balance_history[key] for key in sorted(
+                balance_history, key=lambda identity: tuple(str(value) for value in identity))],
             "rawStatistics": statistics, "rawOrders": orders, "rawReturns": returns,
             "approvedCostVersions": [row for row in data["cost_versions"] if row.get("approved_by")],
             "managedOperationsPayments": [], "managedOperationsPaidCny": None,

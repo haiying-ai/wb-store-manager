@@ -2847,18 +2847,29 @@ class FinanceLedger:
         if lifecycle not in _WITHDRAWAL_RECORD_STATUSES:
             raise FinanceLedgerError(f"Unsupported withdrawal record status: {status}")
         found = self.connection.execute(
-            "SELECT 1 FROM withdrawal_records WHERE record_id=?", (identifier,)
+            "SELECT withdrawn_at, settled_at FROM withdrawal_records WHERE record_id=?", (identifier,)
         ).fetchone()
         if found is None:
             raise FinanceLedgerError(f"Unknown withdrawal record: {identifier}")
         occurred = normalize_iso(occurred_at or datetime.now(timezone.utc))
+        evidence_payload = dict(evidence or {})
+        settlement = evidence_payload.get("settledAt")
+        if settlement is not None:
+            if lifecycle != "readback_confirmed":
+                raise FinanceLedgerError("settledAt evidence requires readback_confirmed status")
+            settlement = normalize_iso(settlement)
+            if settlement < found["withdrawn_at"]:
+                raise FinanceLedgerError("settledAt cannot precede withdrawn_at")
+            evidence_payload["settledAt"] = settlement
+        if lifecycle == "readback_confirmed" and not (settlement or found["settled_at"]):
+            raise FinanceLedgerError("Confirmed withdrawal requires settledAt evidence")
         with self.connection:
             self._insert_withdrawal_record_event(
                 identifier,
                 lifecycle,
                 occurred,
                 external_reference=_optional_text(external_reference),
-                evidence=dict(evidence or {}),
+                evidence=evidence_payload,
             )
         self._allocate_unapplied_advertising_payments(
             str(
@@ -3046,6 +3057,10 @@ class FinanceLedger:
                 except json.JSONDecodeError:
                     latest["evidence"] = {}
             item["latest_status_event"] = latest or None
+            item["effective_settled_at"] = (
+                (latest or {}).get("evidence", {}).get("settledAt") or item["settled_at"]
+                if current_status == "readback_confirmed" else None
+            )
             item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
             item["advertising_fee_due_cny"] = _money_text(
                 _money_decimal(item["advertising_fee_due_cny"], "advertising_fee_due_cny", non_negative=True)

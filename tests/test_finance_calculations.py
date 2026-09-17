@@ -183,13 +183,13 @@ def test_reporting_policy_is_locked_by_order_creation_timestamp():
     old, new = sorted(report["orders"], key=lambda row: row["orderCreatedAt"])
     assert old["financialReportingPolicyVersionId"] == "finance-old-3pct"
     assert old["combinedPoolCny"] == "30.00"
-    assert old["strictOwnerProfitCny"] == "189.00"
+    assert old["strictOwnerProfitCny"] == "209.00"
     assert new["financialReportingPolicyVersionId"] == "finance-new-5pct"
     assert new["returnRiskReserveCny"] == "20.00"
     assert new["promotionReserveCny"] == "30.00"
     assert new["totalPolicyReserveCny"] == "50.00"
     assert new["advertisingProvisionCny"] == "30.00"
-    assert new["strictOwnerProfitCny"] == "169.00"
+    assert new["strictOwnerProfitCny"] == "189.00"
 
 
 def test_separate_return_reserve_only_charges_excess_and_never_reduces_promotion():
@@ -324,15 +324,17 @@ def test_completed_order_uses_actual_finance_components_and_decimal_contract():
     assert detail.actual_forward_logistics_cny == Decimal("8.00")
     assert detail.actual_storage_cny == Decimal("2.00")
     assert detail.actual_other_platform_fee_cny == Decimal("1.00")
-    assert detail.managed_operations_cny == Decimal("20.00")
+    assert detail.managed_operations_cny == Decimal("0")
+    assert detail.managed_operations_rate == Decimal("0")
+    assert detail.template_calculation["managedOperationsCny"] == Decimal("0")
     assert detail.combined_pool_cny == Decimal("30.00")
     assert detail.rule_withdrawable_cny == Decimal("812.00")
     assert detail.advertising_provision_cny == Decimal("30.00")
     assert detail.actual_advertising_spend_cny == Decimal("25.00")
     assert detail.advertising_reconciliation_variance_cny == Decimal("5.00")
-    assert detail.owner_profit_cny == Decimal("181.00")
-    assert detail.strict_owner_profit_cny == Decimal("181.00")
-    assert report.stores[0].owner_profit_cny == Decimal("181.00")
+    assert detail.owner_profit_cny == Decimal("201.00")
+    assert detail.strict_owner_profit_cny == Decimal("201.00")
+    assert report.stores[0].owner_profit_cny == Decimal("201.00")
     assert report.stores[0].confirmed_order_count == 1
     assert report.stores[0].open_item_order_count == 0
 
@@ -361,7 +363,7 @@ def test_advertising_cycle_deduction_is_reconciliation_only_in_all_languages(
     detail = report.orders[0]
     assert detail.advertising_settlement_deduction_cny == Decimal("30.00")
     assert detail.actual_other_platform_fee_cny == Decimal("0.00")
-    assert detail.strict_owner_profit_cny == Decimal("182.00")
+    assert detail.strict_owner_profit_cny == Decimal("202.00")
     assert detail.component_sources["advertisingSettlementDeduction"] == (
         "financeActualReconciliationOnly"
     )
@@ -379,7 +381,7 @@ def test_unmarked_deduction_remains_an_other_platform_cost():
     detail = report.orders[0]
     assert detail.advertising_settlement_deduction_cny == Decimal("0.00")
     assert detail.actual_other_platform_fee_cny == Decimal("31.00")
-    assert detail.strict_owner_profit_cny == Decimal("151.00")
+    assert detail.strict_owner_profit_cny == Decimal("171.00")
 
 
 @pytest.mark.parametrize(
@@ -520,9 +522,9 @@ def test_latest_template_recalculation_changes_template_not_actual_settlement():
     baseline = calculate([sale_finance()], policy=POLICY).orders[0]
     changed = calculate([sale_finance()], policy=changed_policy).orders[0]
 
-    assert baseline.owner_profit_cny == changed.owner_profit_cny == Decimal("181.00")
-    assert baseline.template_calculation["ownerProfitCny"] == Decimal("180.00")
-    assert changed.template_calculation["ownerProfitCny"] == Decimal("122.00")
+    assert baseline.owner_profit_cny == changed.owner_profit_cny == Decimal("201.00")
+    assert baseline.template_calculation["ownerProfitCny"] == Decimal("200.00")
+    assert changed.template_calculation["ownerProfitCny"] == Decimal("142.00")
 
 
 def test_partial_return_can_exceed_three_percent_pool_without_double_counting_ads():
@@ -561,7 +563,7 @@ def test_partial_return_can_exceed_three_percent_pool_without_double_counting_ad
     assert detail.advertising_provision_cny == Decimal("0.00")
     assert detail.excess_return_loss_cny == Decimal("5.00")
     profit_before_reconciliation = detail.owner_profit_cny
-    assert detail.strict_owner_profit_cny == Decimal("23.20")
+    assert detail.strict_owner_profit_cny == Decimal("25.20")
     assert detail.actual_advertising_spend_cny == Decimal("50.00")
     assert detail.owner_profit_cny == profit_before_reconciliation
 
@@ -613,7 +615,7 @@ def test_store_period_pool_aggregates_before_consuming_return_logistics():
     assert summary.excess_return_loss_cny == Decimal("10.00")
     # The excess return loss is consumed once at store/period scope, not once
     # for every order.
-    assert summary.strict_owner_profit_cny == Decimal("160.00")
+    assert summary.strict_owner_profit_cny == Decimal("180.00")
     assert report.to_dict()["totals"]["advertisingProvisionCny"] == "0.00"
 
 
@@ -703,7 +705,7 @@ def test_open_order_does_not_null_confirmed_settled_totals():
     assert summary.for_pay_cny == Decimal("842.00")
     assert summary.account_increment_cny == Decimal("842.00")
     assert summary.rule_withdrawable_cny == Decimal("812.00")
-    assert summary.strict_owner_profit_cny == Decimal("181.00")
+    assert summary.strict_owner_profit_cny == Decimal("201.00")
 
 
 def test_cash_reconciliation_mismatch_is_open_and_not_confirmed_cash():
@@ -774,10 +776,10 @@ def test_result_is_json_serializable_and_exposes_store_summary_and_anomalies():
     assert payload["orders"][0]["forPayCny"] == "842.00"
     assert payload["orders"][0]["accountIncrementCny"] == "842.00"
     assert payload["orders"][0]["ruleWithdrawableCny"] == "812.00"
-    assert payload["orders"][0]["strictOwnerProfitCny"] == "181.00"
+    assert payload["orders"][0]["strictOwnerProfitCny"] == "201.00"
     assert payload["orders"][0]["cashReconciliationStatus"] == "PASS"
     assert payload["stores"][0]["status"] == "FINAL"
     assert payload["stores"][0]["confirmedOrderCount"] == 1
     assert payload["stores"][0]["openItemOrderCount"] == 0
-    assert payload["totals"]["ownerProfitCny"] == "181.00"
+    assert payload["totals"]["ownerProfitCny"] == "201.00"
     assert payload["blockers"] == []

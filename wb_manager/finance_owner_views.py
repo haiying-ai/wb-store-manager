@@ -56,10 +56,10 @@ def _periods(cutoff: str, opened_at: str) -> list[dict[str, str]]:
     month_end = run_day.replace(day=1) - timedelta(days=1)
     week_end = run_day - timedelta(days=run_day.weekday() + 1)
     return [
-        {"key": "cumulative", "label": "累计（开店至截止）", "start": opened_at, "end": cutoff},
-        {"key": "last_month", "label": "上月", "start": month_end.replace(day=1).isoformat(), "end": month_end.isoformat()},
-        {"key": "last_week", "label": "上周", "start": (week_end - timedelta(days=6)).isoformat(), "end": week_end.isoformat()},
         {"key": "yesterday", "label": "昨日", "start": cutoff, "end": cutoff},
+        {"key": "last_week", "label": "上周", "start": (week_end - timedelta(days=6)).isoformat(), "end": week_end.isoformat()},
+        {"key": "last_month", "label": "上月", "start": month_end.replace(day=1).isoformat(), "end": month_end.isoformat()},
+        {"key": "cumulative", "label": "累计（开店至截止）", "start": opened_at, "end": cutoff},
     ]
 
 
@@ -172,7 +172,8 @@ def _kind_label(row: dict[str, Any]) -> str:
         return "退款冲回"
     amounts = row.get("amounts") or {}
     event_id = str(row.get("event_id") or "")
-    for metric, label in (("withdrawal_cancelled", "提现记录更正／取消"), ("withdrawal_completed", "提现到账"),
+    for metric, label in (("agency_accrued", "代运营费：提现到账×2%"),
+                          ("withdrawal_cancelled", "提现记录更正／取消"), ("withdrawal_completed", "提现到账"),
                           ("withdrawal_requested", "申请提现"), ("agency_paid", "代运营费实收"),
                           ("receipts_received", "店铺回款到账"), ("promo_credit_spend", "平台促销金消耗"),
                           ("cash_ad_spend", "现金广告消耗")):
@@ -195,7 +196,7 @@ def _store_level(row: dict[str, Any]) -> bool:
     if scope in {"store", "store_level"} and row.get("kind") not in {"sale", "refund"}:
         return True
     metrics = set((row.get("amounts") or {}).keys())
-    store_metrics = {"cash_ad_spend", "promo_credit_spend", "withdrawal_requested", "withdrawal_completed",
+    store_metrics = {"cash_ad_spend", "promo_credit_spend", "agency_accrued", "withdrawal_requested", "withdrawal_completed",
                      "withdrawal_cancelled", "agency_paid", "receipts_received"}
     # Campaign spend and store cash movements have no reliable order
     # attribution in these sources. A campaign's SKU is not an order linkage.

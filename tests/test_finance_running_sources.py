@@ -55,7 +55,8 @@ def test_original_settlement_once_with_locked_cost_and_policy(tmp_path):
     assert len(result["settlementSales"]) == 1
     sale = result["settlementSales"][0]
     assert sale["purchaseCostCny"] == "60.00"
-    assert sale["managedOperationsCny"] == "2.00"
+    assert sale["managedOperationsCny"] == "0.00"
+    assert sale["managedOperationsRate"] == "0"
     assert sale["promotionReserveCny"] == "3.00"
     assert sale["policyId"] == "historical-policy"
     assert sale["eventId"] == "finance:shop:rrd:1:sale"
@@ -105,6 +106,39 @@ def test_latest_withdrawal_status_and_cross_source_dedup(tmp_path):
     assert cancelled["cancelledAt"] == "2026-09-02"
     assert cancelled["amountCny"] == "50.00"
     assert cancelled["latestStatus"] == "voided"
+
+
+def test_historical_account_receipt_and_exact_coverage_are_separate_from_balance(tmp_path):
+    path = _db(tmp_path)
+    cash = tmp_path / "cash.json"
+    cash.write_text(json.dumps({
+        "events": [{
+            "eventType": "account_receipt", "eventId": "portal-payment-1",
+            "store": "shop", "receivedAt": "2026-09-01T09:00:00+03:00",
+            "status": "readback_confirmed", "amountCny": "900",
+            "sourceType": "WB settlement-account credit history",
+            "evidenceReference": "evidence/payment-1",
+        }],
+        "receiptCoverage": [{
+            "coverageId": "shop-august", "store": "shop",
+            "from": "2026-08-01", "through": "2026-09-03",
+            "complete": True, "evidence": "complete export range",
+        }],
+    }), encoding="utf-8")
+
+    result = _extract(path, "2026-09-02", historical_cash_path=cash)
+
+    assert result["cashReceipts"] == [{
+        "eventId": "portal-payment-1", "storeAlias": "shop",
+        "amountCny": "900.00", "receivedAt": "2026-09-01T09:00:00+03:00",
+        "externalReference": None,
+        "sourceType": "WB settlement-account credit history",
+        "evidenceReference": "evidence/payment-1",
+        "evidenceSource": str(cash),
+    }]
+    assert result["cashReceiptCoverage"][0]["from"] == "2026-08-01"
+    assert result["cashReceiptCoverage"][0]["through"] == "2026-09-02"
+    assert result["balanceSnapshots"] == []
 
 
 def test_voided_cash_registry_does_not_resurrect_cancelled_request(tmp_path):
@@ -171,6 +205,42 @@ def test_balances_have_raw_currency_evidence_and_never_relabel_rub(tmp_path):
     assert balances[0]["sourceCurrencyField"] == "raw_balance.payload_json.currency"
 
 
+def test_balance_history_keeps_prior_cny_snapshots_and_same_instant_conflicts(tmp_path):
+    path = _db(tmp_path)
+    with sqlite3.connect(path) as c:
+        c.execute("CREATE TABLE raw_balance(store_alias TEXT,event_hash TEXT,observed_at TEXT,payload_json TEXT,account_balance_cny TEXT,withdrawable_balance_cny TEXT,ad_balance_cny TEXT)")
+
+        def add(store, identity, observed, source, currency, amount):
+            payload = json.dumps({"source": source, "currency": currency})
+            c.execute("INSERT INTO raw_balance VALUES(?,?,?,?,?,?,?)",
+                      (store, identity, observed, payload, amount, "999999", None))
+
+        add("shop", "aug31", "2026-08-31T06:09:32Z", "seller_balance", "CNY", "1200.00")
+        add("shop", "sep13-a", "2026-09-13T01:38:38Z", "seller_balance", "CNY", "250.00")
+        add("shop", "sep13-b", "2026-09-13T01:38:38Z", "seller_balance", "CNY", "249.00")
+        add("shop", "sep13-a", "2026-09-13T01:38:38Z", "seller_balance", "CNY", "250.00")
+        add("shop", "ad", "2026-09-12T01:00:00Z", "advertising_balance", "CNY", None)
+        add("shop", "rub", "2026-08-30T01:00:00Z", "seller_balance", "RUB", "5000")
+        add("other", "other", "2026-08-30T01:00:00Z", "seller_balance", "CNY", "5000")
+        add("shop", "future", "2026-09-17T01:00:00Z", "seller_balance", "CNY", "999")
+        add("shop", "moscow-sep1", "2026-08-31T21:00:00Z", "seller_balance", "CNY", "777")
+
+    august = _extract(path, "2026-08-31")
+    assert [(row["eventId"], row["accountBalanceCny"]) for row in august["balanceSnapshotHistory"]] == [
+        ("aug31", "1200.00")]
+    assert [row["eventId"] for row in august["balanceSnapshots"]] == ["aug31"]
+
+    september = _extract(path, "2026-09-16")
+    history = september["balanceSnapshotHistory"]
+    assert {row["eventId"] for row in history} == {"aug31", "moscow-sep1", "sep13-a", "sep13-b", "ad"}
+    assert len(history) == 5  # Duplicate stable source identity is retained once.
+    assert {row["accountBalanceCny"] for row in history if row["observedAt"] == "2026-09-13T01:38:38Z"} == {
+        "250.00", "249.00"}  # Same-instant conflict is not collapsed.
+    latest = {row["source"]: row for row in september["balanceSnapshots"]}
+    assert set(latest) == {"seller_balance", "advertising_balance"}
+    assert latest["seller_balance"]["eventId"] in {"sep13-a", "sep13-b"}
+
+
 def test_row_specific_missing_policy_issue_has_business_date(tmp_path):
     path = _db(tmp_path)
     with sqlite3.connect(path) as c:
@@ -188,6 +258,59 @@ def test_withdrawal_request_date_not_settlement_date(tmp_path):
     after = _extract(path, "2026-08-30")["withdrawals"][0]
     assert before["settledByCutoff"] is False
     assert after["settledByCutoff"] is True
+
+
+def test_late_success_status_evidence_restates_settlement_day_without_duplicate_request(tmp_path):
+    path = _db(tmp_path)
+    with sqlite3.connect(path) as c:
+        c.execute("ALTER TABLE withdrawal_record_events ADD COLUMN evidence_json TEXT")
+        c.execute(
+            "INSERT INTO withdrawal_records VALUES(?,?,?,?,?,?,?)",
+            ("completed", "shop", "2026-09-01T00:00:00+03:00", "1200.00",
+             "reported", None, "payment-completed"),
+        )
+        c.execute(
+            "INSERT INTO withdrawal_record_events VALUES(?,?,?,?,?)",
+            ("completed", "requested", "reported", "2026-09-01T00:00:00+03:00", "{}"),
+        )
+        c.execute(
+            "INSERT INTO withdrawal_record_events VALUES(?,?,?,?,?)",
+            ("completed", "success-discovered", "readback_confirmed",
+             "2026-09-16T10:00:00+03:00",
+             json.dumps({"settledAt": "2026-09-10T00:00:00+03:00",
+                         "source": "user-provided portal payment record"})),
+        )
+        c.execute(
+            "INSERT INTO withdrawal_records VALUES(?,?,?,?,?,?,?)",
+            ("pending", "shop", "2026-09-08T00:00:00+03:00", "300.00",
+             "reported", None, "payment-pending"),
+        )
+        c.execute(
+            "INSERT INTO withdrawal_record_events VALUES(?,?,?,?,?)",
+            ("pending", "pending-request", "reported", "2026-09-08T00:00:00+03:00", "{}"),
+        )
+
+    before = _extract(path, "2026-09-09")["withdrawals"]
+    after = _extract(path, "2026-09-10")["withdrawals"]
+    restated = _extract(path, "2026-09-15")["withdrawals"]
+    for rows in (before, after, restated):
+        assert len(rows) == 2
+        assert {row["externalReference"] for row in rows} == {
+            "payment-completed", "payment-pending"
+        }
+        assert sum(Decimal(row["amountCny"]) for row in rows) == Decimal("1500.00")
+
+    before_by_id = {row["recordId"]: row for row in before}
+    after_by_id = {row["recordId"]: row for row in after}
+    assert before_by_id["completed"]["settledByCutoff"] is False
+    assert before_by_id["completed"]["settledAt"] is None
+    assert after_by_id["completed"]["requestedAt"] == "2026-09-01T00:00:00+03:00"
+    assert after_by_id["completed"]["settledAt"] == "2026-09-10T00:00:00+03:00"
+    assert after_by_id["completed"]["settledByCutoff"] is True
+    assert {row["recordId"] for row in after if row["settledByCutoff"]} == {"completed"}
+    assert after_by_id["pending"]["settledAt"] is None
+    assert after_by_id["pending"]["settledByCutoff"] is False
+    assert {row["recordId"] for row in restated if row["settledByCutoff"]} == {"completed"}
 
 
 def test_read_only_and_unknown_agency_payments(tmp_path):
