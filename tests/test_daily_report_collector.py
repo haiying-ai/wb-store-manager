@@ -56,6 +56,7 @@ def test_ad_count_failure_does_not_fabricate_zero_or_http_200(monkeypatch):
 
 
 def test_previous_snapshot_skips_newer_incomplete_capture(monkeypatch, tmp_path):
+    monkeypatch.delenv("WB_DAILY_STORE_ALIAS", raising=False)
     incomplete = {
         "generatedAt": "2026-08-02T09:00:00+08:00",
         "dataComplete": False,
@@ -81,3 +82,21 @@ def test_previous_snapshot_skips_newer_incomplete_capture(monkeypatch, tmp_path)
 
 def test_compare_value_does_not_subtract_null_baseline():
     assert daily.compare_value(5, {"orders": None}, "orders") == "5（—）"
+
+
+def test_previous_snapshot_isolates_store_and_skips_failed_capture(monkeypatch, tmp_path):
+    owner = tmp_path / "multi_store" / "owner-store"
+    owner.mkdir(parents=True)
+    def save(folder, stamp, cards, complete=True):
+        path = folder / f"wb_daily_snapshot_{stamp.replace(':', '')}.json"
+        path.write_text(json.dumps({"generatedAt": stamp, "dataComplete": complete, "cards": cards}), encoding="utf-8")
+    save(owner, "2026-09-07T09:35:40+08:00", 224)
+    save(owner, "2026-09-07T17:22:00+08:00", None, False)
+    save(tmp_path, "2026-09-07T09:36:19+08:00", 131)
+    monkeypatch.setattr(daily, "OUT_DIR", tmp_path)
+    monkeypatch.setenv("WB_DAILY_STORE_ALIAS", "owner-store")
+    result = daily.previous_daily_snapshot(datetime(2026, 9, 8).date())
+    assert result["cards"] == 224
+    assert str(owner) in result["_snapshotPath"]
+    monkeypatch.setenv("WB_DAILY_STORE_ALIAS", "new-store")
+    assert daily.previous_daily_snapshot(datetime(2026, 9, 8).date()) == {}

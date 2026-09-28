@@ -53,7 +53,14 @@ class ReadOnlyWbClient:
         else:
             self._opener = opener
 
-    def request(self, method: str, url: str, *, body: Any = None) -> ReadResult:
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        body: Any = None,
+        decode_response: bool = True,
+    ) -> ReadResult:
         rule = self.policy.authorize(method, url)
         if method.upper() == "GET" and body is not None:
             raise ValueError("GET requests cannot contain a body")
@@ -81,7 +88,7 @@ class ReadOnlyWbClient:
                     endpoint=rule.name,
                     status=response.status,
                     ok=200 <= response.status < 300,
-                    data=self._decode(raw),
+                    data=self._decode(raw) if decode_response else raw,
                     headers=dict(response.headers.items()),
                 )
         except urllib.error.HTTPError as exc:

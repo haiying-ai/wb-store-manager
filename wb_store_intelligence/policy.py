@@ -48,6 +48,25 @@ READ_ONLY_ENDPOINTS: tuple[EndpointRule, ...] = (
         r"/api/v3/warehouses",
     ),
     EndpointRule.create(
+        "marketplace-orders",
+        "GET",
+        "marketplace-api.wildberries.ru",
+        r"/api/v3/orders",
+    ),
+    # Official FBS read: https://dev.wildberries.ru/news/127
+    EndpointRule.create(
+        "marketplace-new-orders",
+        "GET",
+        "marketplace-api.wildberries.ru",
+        r"/api/v3/orders/new",
+    ),
+    EndpointRule.create(
+        "marketplace-order-statuses",
+        "POST",
+        "marketplace-api.wildberries.ru",
+        r"/api/v3/orders/status",
+    ),
+    EndpointRule.create(
         "stocks",
         "POST",
         "marketplace-api.wildberries.ru",
@@ -64,6 +83,24 @@ READ_ONLY_ENDPOINTS: tuple[EndpointRule, ...] = (
         "POST",
         "seller-analytics-api.wildberries.ru",
         r"/api/analytics/v3/sales-funnel/products/history",
+    ),
+    EndpointRule.create(
+        "analytics-report-create",
+        "POST",
+        "seller-analytics-api.wildberries.ru",
+        r"/api/v2/nm-report/downloads",
+    ),
+    EndpointRule.create(
+        "analytics-report-list",
+        "GET",
+        "seller-analytics-api.wildberries.ru",
+        r"/api/v2/nm-report/downloads",
+    ),
+    EndpointRule.create(
+        "analytics-report-file",
+        "GET",
+        "seller-analytics-api.wildberries.ru",
+        r"/api/v2/nm-report/downloads/file/[0-9a-fA-F-]{36}",
     ),
     EndpointRule.create(
         "orders",
@@ -125,6 +162,18 @@ READ_ONLY_ENDPOINTS: tuple[EndpointRule, ...] = (
         "advert-api.wildberries.ru",
         r"/adv/v3/fullstats",
     ),
+    # Official Promotion API query contracts verified 2026-09-09:
+    # https://dev.wildberries.ru/en/docs/openapi/promotion
+    # Never match budget/deposit, start/pause, or the bid mutation routes.
+    EndpointRule.create(
+        "advert-balance", "GET", "advert-api.wildberries.ru", r"/adv/v1/balance",
+    ),
+    EndpointRule.create(
+        "advert-campaign-budget", "GET", "advert-api.wildberries.ru", r"/adv/v1/budget",
+    ),
+    EndpointRule.create(
+        "advert-minimum-bids", "POST", "advert-api.wildberries.ru", r"/api/advert/v1/bids/min",
+    ),
     EndpointRule.create(
         "advert-search-cluster-stats",
         "POST",
@@ -136,6 +185,12 @@ READ_ONLY_ENDPOINTS: tuple[EndpointRule, ...] = (
         "GET",
         "dp-calendar-api.wildberries.ru",
         r"/api/v1/calendar/promotions",
+    ),
+    EndpointRule.create(
+        "promotion-details",
+        "GET",
+        "dp-calendar-api.wildberries.ru",
+        r"/api/v1/calendar/promotions/details",
     ),
     EndpointRule.create(
         "promotion-products",

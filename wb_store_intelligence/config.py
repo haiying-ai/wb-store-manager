@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-ENV_NAME = re.compile(r"^(?:WB_API_TOKEN|WB_INTEL_[A-Z0-9_]+_TOKEN)$")
+ENV_NAME = re.compile(r"^(?:WB_API_TOKEN|WB_NEW_STORE_API_TOKEN|WB_INTEL_[A-Z0-9_]+_TOKEN)$")
 ALLOWED_ROLES = {"owner_readonly", "benchmark_readonly"}
 TOKEN_PLACEHOLDER_PREFIX = "REPLACE_WITH_"
 
@@ -55,7 +55,10 @@ class StoreConfig:
         if self.role not in ALLOWED_ROLES:
             raise ValueError(f"Invalid read-only store role: {self.role!r}")
         if not ENV_NAME.fullmatch(self.token_env):
-            raise ValueError("token_env must be WB_API_TOKEN or WB_INTEL_*_TOKEN")
+            raise ValueError(
+                "token_env must be WB_API_TOKEN, WB_NEW_STORE_API_TOKEN, "
+                "or WB_INTEL_*_TOKEN"
+            )
 
     def load_token(self) -> str:
         token = os.environ.get(self.token_env, "").strip()

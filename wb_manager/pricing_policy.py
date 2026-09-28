@@ -245,6 +245,10 @@ def load_active_phone_online_price_formula(
         floor = row.get("minimumSafePriceCny")
         calibrated = row.get("calibratedFormulaPriceCny")
         source = row.get("priceSource")
+        no_historical_baseline = (
+            row.get("preRepriceBaselineKind")
+            == "NO_HISTORICAL_BASELINE_USER_APPROVED"
+        )
         if not key or key in model_prices:
             raise PricingPolicyError(f"Duplicate or missing model-capacity key in {policy_id}: {key}")
         if not isinstance(purchase_cost, (int, float)) or purchase_cost <= 0:
@@ -253,18 +257,26 @@ def load_active_phone_online_price_formula(
             float(row_fixed_cost), fixed_cost, abs_tol=1e-9
         ):
             raise PricingPolicyError(f"Row fixed cost does not match the financial gate for {key}")
-        if not all(isinstance(value, int) and value > 0 for value in (pre_reprice, floor, calibrated)):
+        if no_historical_baseline and (
+            "preRepriceBuyerPriceCny" not in row or pre_reprice is not None
+        ):
+            raise PricingPolicyError(
+                f"Approved no-history baseline must explicitly be null for {key} in {policy_id}"
+            )
+        integer_prices = (floor, calibrated) if no_historical_baseline else (pre_reprice, floor, calibrated)
+        if not all(isinstance(value, int) and value > 0 for value in integer_prices):
             raise PricingPolicyError(f"Invalid integer price for {key} in {policy_id}")
         expected_floor = math.ceil(
             (float(purchase_cost) + fixed_cost + target_profit) / retained
         )
         if floor != expected_floor:
             raise PricingPolicyError(f"Minimum safe price does not match the cost formula for {key}")
-        if calibrated != max(floor, pre_reprice):
+        expected_price = floor if no_historical_baseline else max(floor, pre_reprice)
+        if calibrated != expected_price:
             raise PricingPolicyError(
                 f"Calibrated price does not equal max(floor, pre-reprice price) for {key}"
             )
-        expected_source = "PROFIT_FLOOR" if floor >= pre_reprice else "CURRENT_PRICE"
+        expected_source = "PROFIT_FLOOR" if no_historical_baseline or floor >= pre_reprice else "CURRENT_PRICE"
         if source != expected_source:
             raise PricingPolicyError(f"Invalid price source for {key} in {policy_id}")
         owner_profit = calibrated * retained - float(purchase_cost) - fixed_cost

@@ -182,14 +182,27 @@ def load_active_phone_financial_policy(
         raise FinancialPolicyError(
             f"Legacy combined advertising-and-return pool rate must be 0.03, got {combined_rate}"
         )
-    if reserve_mode == SEPARATE_RETURN_AND_PROMOTION and (
-        return_risk_rate != Decimal("0.02")
-        or promotion_rate != Decimal("0.03")
-        or combined_rate != Decimal("0.05")
-    ):
-        raise FinancialPolicyError(
-            "Separate reserves must be return risk 0.02 + promotion 0.03 = total 0.05"
+    if reserve_mode == SEPARATE_RETURN_AND_PROMOTION:
+        pricing_rates = pricing.get("variableRates") or {}
+        if not isinstance(pricing_rates, dict):
+            raise FinancialPolicyError("Pricing policy variableRates must be an object")
+        pricing_return_rate = _rate(
+            pricing_rates.get("returnRiskReserve"),
+            "pricing.variableRates.returnRiskReserve",
         )
+        pricing_promotion_rate = _rate(
+            pricing_rates.get("advertisingReserve"),
+            "pricing.variableRates.advertisingReserve",
+        )
+        if (
+            return_risk_rate != pricing_return_rate
+            or promotion_rate != pricing_promotion_rate
+            or combined_rate != pricing_return_rate + pricing_promotion_rate
+        ):
+            raise FinancialPolicyError(
+                "Separate reserves must match the referenced pricing policy's "
+                "returnRiskReserve, advertisingReserve, and their total"
+            )
 
     _validate_return_logistics_contract(data, advertising_returns)
     _validate_advertising_contract(data)
@@ -383,15 +396,15 @@ def _reserve_policy(
         for key in ("returnRiskReserveRate", "promotionReserveRate", "totalReserveRate")
     )
     if mode == SEPARATE_RETURN_AND_PROMOTION or has_separate_rates:
-        return_rate = _decimal(
+        return_rate = _rate(
             advertising_returns.get("returnRiskReserveRate"),
             "advertisingAndReturns.returnRiskReserveRate",
         )
-        promotion_rate = _decimal(
+        promotion_rate = _rate(
             advertising_returns.get("promotionReserveRate"),
             "advertisingAndReturns.promotionReserveRate",
         )
-        total_rate = _decimal(
+        total_rate = _rate(
             advertising_returns.get("totalReserveRate"),
             "advertisingAndReturns.totalReserveRate",
         )
@@ -555,6 +568,13 @@ def _decimal(value: Any, label: str) -> Decimal:
         raise FinancialPolicyError(f"{label} must be a decimal number") from exc
     if not result.is_finite():
         raise FinancialPolicyError(f"{label} must be finite")
+    return result
+
+
+def _rate(value: Any, label: str) -> Decimal:
+    result = _decimal(value, label)
+    if not Decimal("0") <= result < Decimal("1"):
+        raise FinancialPolicyError(f"{label} must be a nonnegative rate less than 1")
     return result
 
 

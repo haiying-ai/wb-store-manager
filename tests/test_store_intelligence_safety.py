@@ -28,9 +28,34 @@ from wb_store_intelligence.policy import ReadOnlyPolicy, SafetyViolation
             "stocks",
         ),
         (
+            "GET",
+            "https://marketplace-api.wildberries.ru/api/v3/orders?limit=1000&next=0",
+            "marketplace-orders",
+        ),
+        (
+            "POST",
+            "https://marketplace-api.wildberries.ru/api/v3/orders/status",
+            "marketplace-order-statuses",
+        ),
+        (
             "POST",
             "https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products",
             "sales-funnel-products",
+        ),
+        (
+            "POST",
+            "https://seller-analytics-api.wildberries.ru/api/v2/nm-report/downloads",
+            "analytics-report-create",
+        ),
+        (
+            "GET",
+            "https://seller-analytics-api.wildberries.ru/api/v2/nm-report/downloads?filter%5BdownloadIds%5D=06eae887-9d9f-491f-b16a-bb1766fcb8d2",
+            "analytics-report-list",
+        ),
+        (
+            "GET",
+            "https://seller-analytics-api.wildberries.ru/api/v2/nm-report/downloads/file/06eae887-9d9f-491f-b16a-bb1766fcb8d2",
+            "analytics-report-file",
         ),
         (
             "POST",
@@ -84,6 +109,11 @@ from wb_store_intelligence.policy import ReadOnlyPolicy, SafetyViolation
         ),
         (
             "GET",
+            "https://dp-calendar-api.wildberries.ru/api/v1/calendar/promotions/details?promotionIDs=1",
+            "promotion-details",
+        ),
+        (
+            "GET",
             "https://dp-calendar-api.wildberries.ru/api/v1/calendar/promotions/nomenclatures",
             "promotion-products",
         ),
@@ -102,21 +132,58 @@ from wb_store_intelligence.policy import ReadOnlyPolicy, SafetyViolation
             "https://feedbacks-api.wildberries.ru/api/common/v1/rating",
             "seller-rating",
         ),
+        (
+            "GET",
+            "https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom=2026-05-05&flag=0",
+            "orders",
+        ),
     ],
 )
 def test_allows_only_declared_reads(method: str, url: str, endpoint: str) -> None:
     assert ReadOnlyPolicy().authorize(method, url).name == endpoint
 
 
+@pytest.mark.parametrize(('method', 'path', 'name'), [
+    ('GET', '/adv/v1/balance', 'advert-balance'),
+    ('GET', '/adv/v1/budget?id=39907863', 'advert-campaign-budget'),
+    ('POST', '/api/advert/v1/bids/min', 'advert-minimum-bids'),
+])
+def test_ad_funding_preflight_exact_reads(method, path, name):
+    assert ReadOnlyPolicy().authorize(method, 'https://advert-api.wildberries.ru'+path).name == name
+
+
+@pytest.mark.parametrize(('method', 'path'), [
+    ('POST', '/adv/v1/balance'), ('POST', '/adv/v1/budget'),
+    ('POST', '/adv/v1/budget/deposit?id=39907863'),
+    ('GET', '/adv/v1/budget/deposit?id=39907863'),
+    ('GET', '/adv/v0/start?id=39907863'), ('GET', '/adv/v0/pause?id=39907863'),
+    ('PATCH', '/api/advert/v1/bids'), ('POST', '/api/advert/v1/bids'),
+    ('GET', '/api/advert/v1/bids/min'), ('POST', '/api/advert/v1/bids/min/extra'),
+    ('POST', '/adv/v0/normquery/bids'), ('POST', '/adv/v0/normquery/set-minus'),
+])
+def test_ad_funding_preflight_never_allows_mutations_or_nearby_routes(method, path):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError('Network must not be reached')
+    client = ReadOnlyWbClient(StoreConfig('owner-store', 'owner_readonly', 'WB_API_TOKEN'), opener=fail_if_called)
+    with pytest.raises(SafetyViolation):
+        client.request(method, 'https://advert-api.wildberries.ru'+path)
+
+
 @pytest.mark.parametrize(
     ("method", "url"),
     [
         ("PUT", "https://marketplace-api.wildberries.ru/api/v3/stocks/123"),
+        ("PATCH", "https://marketplace-api.wildberries.ru/api/v3/orders/123/cancel"),
+        ("POST", "https://marketplace-api.wildberries.ru/api/v3/orders"),
+        ("GET", "https://marketplace-api.wildberries.ru/api/v3/orders/status"),
+        ("POST", "https://marketplace-api.wildberries.ru/api/v3/orders/stickers"),
         ("PATCH", "https://content-api.wildberries.ru/content/v2/cards/update"),
         ("POST", "https://content-api.wildberries.ru/content/v2/cards/update"),
         ("POST", "https://discounts-prices-api.wildberries.ru/api/v2/upload/task"),
         ("POST", "https://dp-calendar-api.wildberries.ru/api/v1/calendar/promotions/upload"),
         ("POST", "https://advert-api.wildberries.ru/adv/v1/save-ad"),
+        ("POST", "https://seller-analytics-api.wildberries.ru/api/v2/nm-report/downloads/retry"),
+        ("GET", "https://seller-analytics-api.wildberries.ru/api/v2/nm-report/downloads/file/not-a-uuid"),
         ("GET", "https://statistics-api.wildberries.ru/api/v1/supplier/stocks"),
         ("GET", "https://evil.example/api/v1/supplier/orders"),
         ("GET", "http://statistics-api.wildberries.ru/api/v1/supplier/orders"),
@@ -263,3 +330,21 @@ def test_accepts_existing_owner_token_variable(
         token_env="WB_API_TOKEN",
     ).load_token() == "owner-token"
     monkeypatch.delenv("WB_API_TOKEN")
+
+
+def test_accepts_secondary_owner_store_token_variable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token_file = tmp_path / "new-owner.env"
+    token_file.write_text(
+        "WB_NEW_STORE_API_TOKEN=new-owner-token\n", encoding="utf-8"
+    )
+    assert load_token_file(token_file, override=True) == (
+        "WB_NEW_STORE_API_TOKEN",
+    )
+    assert StoreConfig(
+        alias="new-store",
+        role="owner_readonly",
+        token_env="WB_NEW_STORE_API_TOKEN",
+    ).load_token() == "new-owner-token"
+    monkeypatch.delenv("WB_NEW_STORE_API_TOKEN")

@@ -14,6 +14,7 @@ from wb_manager.finance_policy import (
     ADVERTISING_FUNDING_SOURCE,
     ADVERTISING_REQUEST_TYPE,
     FinancialPolicyError,
+    SEPARATE_RETURN_AND_PROMOTION,
     load_active_phone_financial_policy,
     load_phone_financial_policy_timeline,
 )
@@ -72,19 +73,25 @@ def valid_reporting_policy() -> dict:
     }
 
 
-def write_policies(tmp_path: Path, reporting: dict) -> tuple[Path, Path]:
+def write_policies(
+    tmp_path: Path, reporting: dict, pricing: dict | None = None
+) -> tuple[Path, Path]:
     reporting_path = tmp_path / "reporting.json"
     pricing_path = tmp_path / "pricing.json"
     reporting_path.write_text(json.dumps(reporting), encoding="utf-8")
     pricing_path.write_text(
-        json.dumps({"status": "active", "policyId": "pricing-test-v1"}),
+        json.dumps(
+            pricing
+            if pricing is not None
+            else {"status": "active", "policyId": "pricing-test-v1"}
+        ),
         encoding="utf-8",
     )
     return reporting_path, pricing_path
 
 
-def load(tmp_path: Path, reporting: dict):
-    reporting_path, pricing_path = write_policies(tmp_path, reporting)
+def load(tmp_path: Path, reporting: dict, pricing: dict | None = None):
+    reporting_path, pricing_path = write_policies(tmp_path, reporting, pricing)
     return load_active_phone_financial_policy(
         reporting_path, pricing_policy_path=pricing_path
     )
@@ -120,11 +127,11 @@ def test_repository_active_policy_satisfies_the_finance_contract():
 def test_repository_policy_timeline_uses_exact_readback_boundary():
     timeline = load_phone_financial_policy_timeline()
 
-    assert timeline.predecessor_policy.reporting_policy_id.endswith("20260905-v6")
-    assert timeline.active_policy.reporting_policy_id.endswith("20260906-v7")
-    assert timeline.active_policy.return_risk_reserve_rate == Decimal("0.02")
-    assert timeline.active_policy.promotion_reserve_rate == Decimal("0.03")
-    assert timeline.active_policy.total_reserve_rate == Decimal("0.05")
+    # Preserve these historical boundaries even after a new policy is activated.
+    historical_separate = timeline.select("2026-09-06T13:08:38+03:00")
+    assert historical_separate.return_risk_reserve_rate == Decimal("0.02")
+    assert historical_separate.promotion_reserve_rate == Decimal("0.03")
+    assert historical_separate.total_reserve_rate == Decimal("0.05")
     assert timeline.select(
         "2026-09-06T13:08:37+03:00"
     ).reporting_policy_id.endswith("20260905-v6")
@@ -137,6 +144,127 @@ def test_repository_policy_timeline_uses_exact_readback_boundary():
         ]
         == "2026-09-05"
     )
+
+
+def separate_policy_pair(promotion: str = "0.03") -> tuple[dict, dict]:
+    reporting = valid_reporting_policy()
+    reserve = reporting["costs"]["advertisingAndReturns"]
+    reserve.pop("combinedPoolRate")
+    reserve.update(
+        reserveAllocationMode=SEPARATE_RETURN_AND_PROMOTION,
+        returnRiskReserveRate="0.02",
+        promotionReserveRate=promotion,
+        totalReserveRate=str(Decimal("0.02") + Decimal(promotion)),
+    )
+    pricing = {
+        "status": "active",
+        "policyId": "pricing-test-v1",
+        "variableRates": {
+            "returnRiskReserve": "0.02",
+            "advertisingReserve": promotion,
+        },
+    }
+    return reporting, pricing
+
+
+@pytest.mark.parametrize("promotion", ["0.03", "0.02", "0"])
+def test_separate_reserves_follow_referenced_pricing_policy(tmp_path, promotion):
+    reporting, pricing = separate_policy_pair(promotion)
+    policy = load(tmp_path, reporting, pricing)
+
+    assert policy.return_risk_reserve_rate == Decimal("0.02")
+    assert policy.promotion_reserve_rate == Decimal(promotion)
+    assert policy.total_reserve_rate == Decimal("0.02") + Decimal(promotion)
+    assert policy.promotion_reserve_amount(Decimal("100")) == Decimal(promotion) * 100
+
+
+@pytest.mark.parametrize(
+    "return_rate,promotion_rate", [("0.01", "0.03"), ("0.02", "0.03")]
+)
+def test_separate_components_must_match_not_just_total(
+    tmp_path, return_rate, promotion_rate
+):
+    reporting, pricing = separate_policy_pair("0.02")
+    pricing["variableRates"].update(
+        returnRiskReserve=return_rate, advertisingReserve=promotion_rate
+    )
+    with pytest.raises(FinancialPolicyError, match="referenced pricing policy"):
+        load(tmp_path, reporting, pricing)
+
+
+def test_separate_reserve_total_must_equal_components(tmp_path):
+    reporting, pricing = separate_policy_pair("0.02")
+    reporting["costs"]["advertisingAndReturns"]["totalReserveRate"] = "0.05"
+    with pytest.raises(FinancialPolicyError, match="add to totalReserveRate"):
+        load(tmp_path, reporting, pricing)
+
+
+@pytest.mark.parametrize(
+    "source,key",
+    [
+        ("reporting", "returnRiskReserveRate"),
+        ("reporting", "promotionReserveRate"),
+        ("reporting", "totalReserveRate"),
+        ("pricing", "returnRiskReserve"),
+        ("pricing", "advertisingReserve"),
+    ],
+)
+@pytest.mark.parametrize("value", [None, "NaN", "Infinity", "-0.01", "1", True])
+def test_separate_rates_are_valid_finite_nonnegative_rates(
+    tmp_path, source, key, value
+):
+    reporting, pricing = separate_policy_pair("0.02")
+    target = (
+        reporting["costs"]["advertisingAndReturns"]
+        if source == "reporting"
+        else pricing["variableRates"]
+    )
+    target[key] = value
+    with pytest.raises(FinancialPolicyError):
+        load(tmp_path, reporting, pricing)
+
+
+def test_separate_rates_require_referenced_pricing_components(tmp_path):
+    reporting, pricing = separate_policy_pair("0.02")
+    pricing.pop("variableRates")
+    with pytest.raises(FinancialPolicyError, match="pricing.variableRates"):
+        load(tmp_path, reporting, pricing)
+
+
+def test_new_promotion_rate_does_not_rewrite_historical_orders(tmp_path):
+    old_reporting, _ = separate_policy_pair("0.03")
+    new_reporting, new_pricing = separate_policy_pair("0.02")
+    boundary = "2026-09-15T14:00:00+03:00"
+    old_reporting.update(status="historical", effectiveTo=boundary)
+    new_reporting.update(
+        policyId="reporting-test-v2",
+        effectiveFrom=boundary,
+        supersedes=old_reporting["policyId"],
+    )
+    new_reporting["pricingReferences"]["reportingPolicyId"] = "reporting-test-v2"
+    new_reporting["pricingReferences"]["activePricingPolicyId"] = "pricing-test-v2"
+    new_pricing["policyId"] = "pricing-test-v2"
+    reporting_path, pricing_path = write_policies(tmp_path, new_reporting, new_pricing)
+    archive = tmp_path / "policies"
+    archive.mkdir()
+    (archive / "reporting-test-v1.json").write_text(
+        json.dumps(old_reporting), encoding="utf-8"
+    )
+
+    timeline = load_phone_financial_policy_timeline(
+        reporting_path, pricing_policy_path=pricing_path
+    )
+    old_order = timeline.select("2026-09-15T13:59:59+03:00")
+    new_order = timeline.select(boundary)
+    assert old_order.reporting_policy_id == "reporting-test-v1"
+    assert old_order.promotion_reserve_rate == Decimal("0.03")
+    assert old_order.total_reserve_rate == Decimal("0.05")
+    assert new_order.reporting_policy_id == "reporting-test-v2"
+    assert new_order.promotion_reserve_rate == Decimal("0.02")
+    assert new_order.total_reserve_rate == Decimal("0.04")
+    assert old_order.promotion_reserve_amount(Decimal("100")) == Decimal("3")
+    assert new_order.promotion_reserve_amount(Decimal("100")) == Decimal("2")
+    assert json.loads((archive / "reporting-test-v1.json").read_text("utf-8")) == old_reporting
 
 
 @pytest.mark.parametrize(

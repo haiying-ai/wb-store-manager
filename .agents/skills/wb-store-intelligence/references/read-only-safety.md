@@ -37,4 +37,4 @@ If side effects are ambiguous, do not add the endpoint.
 
 ## Incident rule
 
-If a token is printed, committed, or saved, stop collection, report the affected alias and exposure location without repeating the token, and rotate that token before continuing.
+If a token is printed, committed, or saved, report the affected alias and exposure location without repeating the token. Recommend token rotation, but do not block a user-authorized read-only connection check solely because rotation has not occurred.

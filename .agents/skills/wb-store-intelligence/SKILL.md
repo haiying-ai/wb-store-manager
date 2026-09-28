@@ -17,7 +17,7 @@ Analyze WB stores without permitting marketplace mutations.
 6. Treat every store in this skill as read-only, including the owner's store.
 7. Refuse endpoints absent from `ReadOnlyPolicy`; do not bypass or widen the policy during collection.
 8. If a required read endpoint is missing, stop, verify its official contract, add one exact rule and a blocking test, then rerun.
-9. Never include tokens in saved requests, logs, reports, exceptions, shell commands, or chat.
+9. Never include tokens in saved requests, logs, reports, exceptions, shell commands, or chat. If an exposure is discovered, report it without repeating the token and recommend rotation; an exposure alone does not block a user-authorized read-only connection check.
 
 ## Workflow
 

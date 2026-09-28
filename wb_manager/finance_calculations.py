@@ -1812,12 +1812,11 @@ def _policy_view(policy: Any) -> _PolicyView:
         raise FinanceCalculationError(f"Legacy shared pool must be 0.03; got {pool}")
     if mode == "SEPARATE_RETURN_AND_PROMOTION" and (
         return_risk != Decimal("0.02")
-        or promotion != Decimal("0.03")
-        or pool != Decimal("0.05")
+        or promotion not in {Decimal("0.02"), Decimal("0.03")}
         or return_risk + promotion != pool
     ):
         raise FinanceCalculationError(
-            "Separate reserve policy must be return 0.02 + promotion 0.03 = total 0.05"
+            "Separate reserve policy must be return 0.02 + promotion 0.02 or 0.03, with total equal to their sum"
         )
     return _PolicyView(
         reporting_policy_id=str(

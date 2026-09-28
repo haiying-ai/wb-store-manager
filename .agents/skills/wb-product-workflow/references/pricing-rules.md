@@ -38,7 +38,7 @@ Use account-specific portal tariffs and actual settlement reports over generic A
 
 The current phone model is owner-profit accounting for WB FBS smartphones under the Hong Kong seller account.
 
-Active policy ID: `phone-hk-fbs-20260906-v6`
+Active policy ID: `phone-hk-fbs-20260915-v7`
 
 Canonical machine-readable source: `config/pricing/active_phone_pricing_policy.json`.
 
@@ -55,10 +55,10 @@ Variable costs based on buyer-paid price:
 - WB FBS smartphone commission: 15%
 - managed-operations commission: 2%
 - return-loss reserve: 2%
-- promotion reserve: 3%
+- promotion reserve: 2%
 - payment/withdrawal reserve: 0.8%
-- total variable rate: 22.8%
-- retained-price factor: 77.2% (`0.772`)
+- total variable rate: 21.8%
+- retained-price factor: 78.2% (`0.782`)
 
 Fixed cost:
 
@@ -66,7 +66,7 @@ Fixed cost:
 
 Promotion and return-loss allocation:
 
-- reserve 2% of buyer-paid price for return loss and 3% for promotion as separate planning lines;
+- reserve 2% of buyer-paid price for return loss and 2% for promotion as separate planning lines;
 - read actual return logistics from WB finance rows for reconciliation; never assume a fixed 8 or 16 CNY charge;
 - do not deduct actual return logistics a second time from planning profit after the 2% return-loss reserve has already been included;
 - report any difference between the 2% reserve and actual return cost as reconciliation variance.
@@ -79,15 +79,15 @@ Explicit exclusions:
 
 Profit target:
 
-- at least 100 CNY per unit for the product owner;
+- at least 85 CNY per unit for the product owner;
 - the 2% managed-operations commission is separately retained as operator service revenue.
 
 Final phone equations:
 
-- `ownerNetProfitCny = buyerPriceCny * 0.772 - purchaseCostCny - 12`
-- `minimumBuyerPriceCny = (purchaseCostCny + 12 + 100) / 0.772`
-- current direct-price strategy: `wbUploadPriceCny = ceil(minimumBuyerPriceCny)` and `discountPercent = 0`
+- `ownerNetProfitCny = buyerPriceCny * 0.782 - purchaseCostCny - 12`
+- `minimumBuyerPriceCny = (purchaseCostCny + 12 + 85) / 0.782`
+- current direct-price strategy: `wbUploadPriceCny = max(ceil(minimumBuyerPriceCny), realHistoricalBuyerPriceCny)` and `discountPercent = 0`; explicitly approved SKUs without a real historical baseline use `ceil(minimumBuyerPriceCny)` only.
 
 The 15% smartphone commission took effect in the confirmed 2026-07-22 repricing plan and supersedes the 5% / 0.892 policy from 2026-07-19. Recalibrate these values from live commission, settlement, advertising, return, and logistics data by publishing a new versioned policy file; never edit historical policy evidence in place.
 
-The 2026-09-06 v6 policy supersedes v5. It separates a 2% return-loss reserve from the 3% promotion reserve, retains the 2% managed-operations commission, 15% WB commission, 0.8% payment/withdrawal reserve, and 12 CNY freight, and raises the owner's minimum profit target to 100 CNY. Total variable rate is 22.8% and the retained-price factor is 0.772. This policy activation does not itself authorize a live price write; refresh purchase costs, benchmark A, and both stores, then obtain joint approval before repricing.
+The 2026-09-15 v7 policy supersedes v6. It retains 2% return-loss reserve, 2% managed operations, 15% WB commission, 0.8% payment/withdrawal reserve and 12 CNY freight, reduces promotion reserve from 3% to 2%, and changes the owner's minimum profit target from 100 to 85 CNY. Total variable rate is 21.8%, with retained-price factor 0.782. Existing purchase costs are unchanged. All phone SKUs including iPhone 12 mini and HONOR/Redmi are included; only real historical price floors are retained. Explicitly approved new SKUs without a historical floor use the minimum safe price. Price writes still require exact two-store approval and independent readback. Historical orders retain their effective-dated prior financial policy.

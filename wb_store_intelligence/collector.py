@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ class BaselineCollector:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.statuses: list[CollectionStatus] = []
+
 
     def collect(self, *, days: int = 7) -> list[CollectionStatus]:
         cards = self._collect_cards()
@@ -264,3 +266,67 @@ class BaselineCollector:
                         if isinstance(nested_value, list):
                             return len(nested_value)
         return None
+
+
+class OrdersCollector:
+    """Export the complete order window exposed by WB's read-only statistics API."""
+
+    def __init__(self, store: StoreConfig, output_dir: Path):
+        self.store = store
+        self.client = ReadOnlyWbClient(store)
+        self.output_dir = output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def collect(self, *, date_from: str, max_pages: int = 20) -> CollectionStatus:
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        cursor = date_from
+        statuses: list[int] = []
+        error: str | None = None
+        for page in range(max_pages):
+            url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders?" + urlencode(
+                {"dateFrom": cursor, "flag": 0}
+            )
+            result = self.client.request("GET", url)
+            statuses.append(result.status)
+            if not result.ok or not isinstance(result.data, list):
+                error = f"http-{result.status}"
+                break
+            if not result.data:
+                break
+            added = 0
+            for row in result.data:
+                if not isinstance(row, dict):
+                    continue
+                key = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                if key not in seen:
+                    seen.add(key)
+                    rows.append(row)
+                    added += 1
+            if len(result.data) < 80_000:
+                break
+            next_cursor = result.data[-1].get("lastChangeDate")
+            if not next_cursor or (next_cursor == cursor and added == 0):
+                error = "pagination-stalled"
+                break
+            cursor = str(next_cursor)
+            if page + 1 < max_pages:
+                time.sleep(61)
+        else:
+            error = "max-pages-reached"
+        ok = bool(statuses) and all(200 <= status < 300 for status in statuses) and error is None
+        payload = {
+            "store": self.store.alias,
+            "source": "orders",
+            "collectedAt": datetime.now(timezone.utc).isoformat(),
+            "dateFrom": date_from,
+            "statuses": statuses,
+            "ok": ok,
+            "records": len(rows),
+            "error": error,
+            "data": rows,
+        }
+        (self.output_dir / "orders.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return CollectionStatus("orders", statuses[-1] if statuses else None, ok, len(rows), error)
