@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "policyId": "reporting-policy-example-v1",
+  "status": "example",
+  "effectiveFrom": "2026-01-01T00:00:00Z",
+  "purpose": "示例：周期性财报口径。复制为 config/finance/active_wb_periodic_reporting_standard.json 后按自己的口径填写真实值。",
+  "scope": {
+    "platform": "WB",
+    "storeRegistry": "config/finance/stores.json",
+    "reportingCurrency": "CNY",
+    "financialTimezone": "Europe/Moscow"
+  },
+  "costs": {
+    "_comment": "各成本项的口径说明见 docs/wb-finance-daily-report-contract.md；此处仅示意结构",
+    "purchaseCost": {
+      "source": "approved cost version effective at order creation",
+      "missingBehavior": "fail-closed"
+    },
+    "platformCommission": {
+      "source": "actual platform deduction"
+    },
+    "operationsFee": {
+      "rate": 0.0,
+      "base": "signed sales amount"
+    },
+    "returnReserve": {
+      "rate": 0.0,
+      "base": "signed sales amount",
+      "absorbs": "actual return logistics"
+    },
+    "promotionReserve": {
+      "rate": 0.0,
+      "base": "signed sales amount"
+    },
+    "paymentWithdrawalReserve": {
+      "rate": 0.0,
+      "base": "signed sales amount"
+    },
+    "fixedOperationsCostCny": 0
+  },
+  "reportStatuses": {
+    "incomplete": "PENDING_DATA",
+    "complete": "FINAL",
+    "correctedComplete": "RESTATED",
+    "restatedRequiresCompleteEvidence": true
+  },
+  "governance": {
+    "noFallback": true,
+    "failClosedOnMissingOrInvalid": true
+  }
+}

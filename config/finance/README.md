@@ -4,10 +4,11 @@
 
 The owner-approved agency fee correction is recorded separately in
 `agency_withdrawal_fee_policy.json`. For restated owner running reports, the
-2% fee is calculated on each independently confirmed bank-credited withdrawal,
-rounded to cents per withdrawal, and posted on its settlement date as a
-store-level event. Orders, balances, withdrawal requests, and cancelled or
-unconfirmed withdrawals do not create this fee. Historical order-policy files
+configured fee rate is calculated on each independently confirmed
+bank-credited withdrawal, rounded to cents per withdrawal, and posted on its
+settlement date as a store-level event. Orders, balances, withdrawal requests,
+and cancelled or unconfirmed withdrawals do not create this fee. Historical
+order-policy files
 remain unchanged for audit; their former sale-based management-fee formula is
 superseded for this component only. Prior published workbooks remain immutable.
 
@@ -15,7 +16,7 @@ It does not control WB live prices. Live price strategy remains governed by `con
 
 The order-time signed sale amount `G` and all platform deductions come from matched platform settlement evidence. Purchase cost, selling-price policy, and reporting-policy versions are selected using the order creation timestamp and are locked on the order row. A later quotation or price-policy change creates a new effective-dated version and never silently rewrites older orders.
 
-Return logistics has no 8/16 CNY fallback. A final report requires the actual signed platform deduction linked by store plus `orderId`, `shkId`, or `srid`. Orders created before `2026-09-06T13:08:38+03:00` retain their historical shared 3% reserve. Orders created at or after that boundary use a separate 2% return-risk reserve and 3% promotion reserve. Actual return logistics does not consume the promotion reserve; only the amount above the 2% return-risk reserve becomes additional return loss. Actual advertising spend is reconciliation evidence only and is never deducted a second time.
+Return logistics has no fixed fallback. A final report requires the actual signed platform deduction linked by store plus `orderId`, `shkId`, or `srid`. Orders follow the reserve model in effect at their creation time: the historical shared reserve applies to older orders, while newer orders use a separate return-risk reserve and a promotion reserve. Actual return logistics does not consume the promotion reserve; only the amount above the return-risk reserve becomes additional return loss. Actual advertising spend is reconciliation evidence only and is never deducted a second time. Concrete rates come from the local active policy file and are never committed.
 
 Scheduled publication and evidence completeness are separate. The same canonical Excel workbook is published on time even when auxiliary evidence is incomplete; missing evidence is shown as an open item and unsettled orders stay outside confirmed cash allocation. `PENDING_DATA` therefore describes evidence status only, not permission to withhold the weekly or monthly report. `FINAL` means the evidence is complete, and `RESTATED` is a later auditable replacement caused by a late settlement, refund, correction, or recovered historical version. A restatement never overwrites the earlier report.
 

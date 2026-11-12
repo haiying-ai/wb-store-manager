@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "versionId": "purchase-costs-example-v1",
+  "status": "example",
+  "effectiveFrom": "2026-01-01",
+  "_note": "示例：采购成本版本。真实成本表按生效日期追加，不覆盖历史；成本是利润计算与定价的下界依据。",
+  "currency": "CNY",
+  "skus": [
+    {
+      "sku": "EXAMPLE-SKU-001",
+      "article": "000000000000",
+      "purchaseCostCny": 0,
+      "note": "示例行：请填写真实采购成本"
+    }
+  ]
+}

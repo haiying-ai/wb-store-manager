@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "registryId": "wb-finance-stores-example-v1",
+  "status": "active",
+  "platform": "WB",
+  "reportingCurrency": "CNY",
+  "financialTimezone": "Europe/Moscow",
+  "schedulerTimezone": "Asia/Shanghai",
+  "officialHistoryStart": "2026-01-01",
+  "_note": "示例文件：复制为 stores.json 后按自己的店铺填写。真实文件已被 .gitignore 忽略，切勿提交。",
+  "fundingActivationRule": {
+    "mode": "first_completed_or_return_event",
+    "source": "platform_finance_and_returns",
+    "selection": "earliest per enabled store of a completed-order or return/cancellation event",
+    "unresolvedBehavior": "PENDING_DATA"
+  },
+  "stores": [
+    {
+      "alias": "store-a",
+      "displayName": "示例店铺 A",
+      "enabled": true,
+      "openedAt": "2026-01-01",
+      "tokenEnv": "WB_API_TOKEN",
+      "promotionTokenEnv": "WB_API_TOKEN",
+      "tokenFile": ".env.local",
+      "currency": "CNY"
+    },
+    {
+      "alias": "store-b",
+      "displayName": "示例店铺 B",
+      "enabled": false,
+      "openedAt": "2026-01-01",
+      "tokenEnv": "WB_STORE_B_API_TOKEN",
+      "promotionTokenEnv": "WB_STORE_B_API_TOKEN",
+      "tokenFile": "config/wb-store-b.local.env",
+      "currency": "CNY"
+    }
+  ],
+  "governance": {
+    "autoIncludeEnabledStores": true,
+    "noCredentialValuesInRegistry": true,
+    "failClosedOnMissingStoreCredential": true,
+    "keepRawEvidenceLocal": true
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "policyId": "phone-financial-reporting-example-v1",
+  "status": "example",
+  "effectiveFrom": "2026-01-01T00:00:00Z",
+  "purpose": "示例：手机品类订单级利润口径。费率与成本字段必须按自己的经营实际情况填写，示例中的 0 不能用于生产。",
+  "doesNotControlLivePricing": true,
+  "scope": {
+    "platform": "WB",
+    "category": "smartphones",
+    "storeRegistry": "config/finance/stores.json",
+    "reportingCurrency": "CNY",
+    "financialTimezone": "Europe/Moscow"
+  },
+  "accountingMode": "platform-actuals-with-effective-dated-overrides",
+  "reportStatuses": {
+    "incomplete": "PENDING_DATA",
+    "complete": "FINAL",
+    "correctedComplete": "RESTATED",
+    "restatedRequiresCompleteEvidence": true,
+    "incompleteIsEvidenceStatusOnly": true
+  },
+  "costs": {
+    "purchaseCost": {
+      "source": "cost version effective at order creation",
+      "missingBehavior": "fail-closed"
+    },
+    "platformCommission": {
+      "source": "actual platform deduction",
+      "fallback": null
+    },
+    "operationsFee": {
+      "rate": 0.0,
+      "base": "signed sales amount"
+    },
+    "returnReserve": {
+      "rate": 0.0,
+      "base": "signed sales amount"
+    },
+    "promotionReserve": {
+      "rate": 0.0,
+      "base": "signed sales amount"
+    },
+    "paymentWithdrawalReserve": {
+      "rate": 0.0,
+      "base": "signed sales amount"
+    },
+    "fixedOperationsCostCny": 0
+  },
+  "formulas": {
+    "_comment": "公式以字段名描述，具体系数来自上方 costs 中的 rate",
+    "salesAmountCny": "signed order-time platform retail price",
+    "netTurnoverCny": "signed sales amount minus confirmed cancellations",
+    "operationsFeeCny": "max(0, salesAmountCny) * operationsFee.rate",
+    "returnReserveCny": "max(0, salesAmountCny) * returnReserve.rate",
+    "promotionReserveCny": "max(0, salesAmountCny) * promotionReserve.rate",
+    "totalPolicyReserveCny": "returnReserveCny + promotionReserveCny",
+    "withdrawalReserveCny": "max(0, salesAmountCny) * paymentWithdrawalReserve.rate",
+    "strictOwnerProfitCny": "accountIncrementCny - purchaseCostCny - operationsFeeCny - totalPolicyReserveCny - withdrawalReserveCny - fixedOperationsCostCny",
+    "excessReturnLossCny": "max(0, actualReturnLogisticsCny - returnReserveCny)"
+  },
+  "governance": {
+    "noFallback": true,
+    "noReturnLogisticsFallback": true,
+    "failClosedOnMissingOrInvalid": true,
+    "requiredFor": [
+      "daily-report",
+      "weekly-report",
+      "monthly-report",
+      "funds-plan",
+      "ads-deposit-plan"
+    ]
+  }
+}

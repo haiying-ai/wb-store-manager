@@ -52,42 +52,28 @@ Before any phone profit calculation, recommendation, dry-run, or live write, run
 
 Variable costs based on buyer-paid price:
 
-- WB FBS smartphone commission: 15%
-- managed-operations commission: 2%
-- return-loss reserve: 2%
-- promotion reserve: 2%
-- payment/withdrawal reserve: 0.8%
-- total variable rate: 21.8%
-- retained-price factor: 78.2% (`0.782`)
+Variable costs are read from the active policy file at `config/pricing/active_phone_pricing_policy.json` — never from this document. The policy declares, as named fields:
 
-Fixed cost:
-
-- freight: 12 CNY per unit, represented as 138 RUB at the template rate of 11.5 RUB/CNY.
+- the platform commission rate for the category;
+- the managed-operations rate;
+- the return-loss reserve rate;
+- the promotion reserve rate;
+- the payment/withdrawal reserve rate;
+- the derived total variable rate and retained-price factor;
+- a fixed per-unit cost (freight and other consolidated fixed charges);
+- a minimum owner profit target per unit.
 
 Promotion and return-loss allocation:
 
-- reserve 2% of buyer-paid price for return loss and 2% for promotion as separate planning lines;
-- read actual return logistics from WB finance rows for reconciliation; never assume a fixed 8 or 16 CNY charge;
-- do not deduct actual return logistics a second time from planning profit after the 2% return-loss reserve has already been included;
-- report any difference between the 2% reserve and actual return cost as reconciliation variance.
+- keep the return-loss reserve and the promotion reserve as separate planning lines;
+- read actual return logistics from WB finance rows for reconciliation; never assume a fixed per-shipment charge;
+- do not deduct actual return logistics a second time from planning profit after the return-loss reserve has already been included;
+- report any difference between the reserve and the actual return cost as reconciliation variance.
 
-Explicit exclusions:
+Final phone equations (symbolic):
 
-- no 6% tax reserve;
-- no 3% exchange-loss reserve;
-- no separate logistics, storage, packaging, or inspection charges in addition to the consolidated 12 CNY fixed cost.
+- `ownerNetProfitCny = buyerPriceCny * retainedPriceFactor - purchaseCostCny - fixedCostCny`
+- `minimumBuyerPriceCny = (purchaseCostCny + fixedCostCny + targetOwnerProfitCny) / retainedPriceFactor`
+- current direct-price strategy: `wbUploadPriceCny = max(ceil(minimumBuyerPriceCny), realHistoricalBuyerPriceCny)` with `discountPercent = 0`; explicitly approved SKUs without a real historical baseline use `ceil(minimumBuyerPriceCny)` only.
 
-Profit target:
-
-- at least 85 CNY per unit for the product owner;
-- the 2% managed-operations commission is separately retained as operator service revenue.
-
-Final phone equations:
-
-- `ownerNetProfitCny = buyerPriceCny * 0.782 - purchaseCostCny - 12`
-- `minimumBuyerPriceCny = (purchaseCostCny + 12 + 85) / 0.782`
-- current direct-price strategy: `wbUploadPriceCny = max(ceil(minimumBuyerPriceCny), realHistoricalBuyerPriceCny)` and `discountPercent = 0`; explicitly approved SKUs without a real historical baseline use `ceil(minimumBuyerPriceCny)` only.
-
-The 15% smartphone commission took effect in the confirmed 2026-07-22 repricing plan and supersedes the 5% / 0.892 policy from 2026-07-19. Recalibrate these values from live commission, settlement, advertising, return, and logistics data by publishing a new versioned policy file; never edit historical policy evidence in place.
-
-The 2026-09-15 v7 policy supersedes v6. It retains 2% return-loss reserve, 2% managed operations, 15% WB commission, 0.8% payment/withdrawal reserve and 12 CNY freight, reduces promotion reserve from 3% to 2%, and changes the owner's minimum profit target from 100 to 85 CNY. Total variable rate is 21.8%, with retained-price factor 0.782. Existing purchase costs are unchanged. All phone SKUs including iPhone 12 mini and HONOR/Redmi are included; only real historical price floors are retained. Explicitly approved new SKUs without a historical floor use the minimum safe price. Price writes still require exact two-store approval and independent readback. Historical orders retain their effective-dated prior financial policy.
+Recalibrate only by publishing a new effective-dated policy version file; never edit historical policy evidence in place. Historical orders always retain their effective-dated prior policy.

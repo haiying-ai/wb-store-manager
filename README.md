@@ -124,10 +124,15 @@ git clone git@github.com:haiying-ai/wb-store-manager.git
 cd wb-store-manager
 python -m pip install -e .
 $env:WB_API_TOKEN = "your-rotated-token"
+# 真实策略与成本数据不进仓库，先按示例生成本地配置
+Copy-Item config/finance/stores.example.json config/finance/stores.json
+Copy-Item config/pricing/active_phone_pricing_policy.example.json config/pricing/active_phone_pricing_policy.json
 python -m wb_manager ping
 python -m wb_manager snapshot
 python -m wb_manager summary
 ```
+
+> 仓库只提供框架、安全模型与示例配置。`config/finance/*.json`、`config/pricing/*.json` 与采购成本表都在 `.gitignore` 中，需各自在本地维护；示例里的费率与成本是 0，不能直接用于生产。
 
 See [WB API Token configuration](docs/wb-token-setup.md) for permission selection, Windows storage, validity, and rotation. Never place a token in a command committed to Git, a report, or a Skill file.
 
@@ -154,7 +159,7 @@ Live write commands must be reviewed as dry runs and approved for exact SKUs/nmI
 
 ## Completed-order finance
 
-The finance module maintains one local, append-only ledger for every enabled owner store. Its credential-free registry is [`config/finance/stores.json`](config/finance/stores.json): the current `owner-store` and `new-store` entries are both enabled, and every future store is included automatically after adding a unique `alias`, opening date, credential **variable names**, local token-file path, and currency. Never put a token value in the registry or Git.
+The finance module maintains one local, append-only ledger for every enabled owner store. Its credential-free registry is `config/finance/stores.json`, which is **not committed**; start from [`config/finance/stores.example.json`](config/finance/stores.example.json) and copy it into place. Every store is included automatically after adding a unique `alias`, opening date, credential **variable names**, local token-file path, and currency. Never put a token value in the registry or Git.
 
 The seven finance commands are:
 
@@ -190,12 +195,12 @@ The 09:30 daily run backfills missed dates before syncing yesterday. Ordinary da
 Financial calculation is fail-closed:
 
 - purchase cost uses the cost version effective when the order was created;
-- return logistics comes from actual linked WB finance rows—there is no fixed 8/16 CNY fallback;
-- the managed-operations fee is 2%; orders before `2026-09-06T13:08:38+03:00` retain the historical shared 3% advertising-and-return reserve, while later orders use a separate 2% return-risk reserve and 3% promotion reserve; actual return logistics reconciles only the applicable return reserve and campaign spend is never deducted a second time;
+- return logistics comes from actual linked WB finance rows—there is no fixed fallback amount;
+- the managed-operations fee, the advertising/return reserves and the payment/withdrawal reserve are read from the local active policy file; each order follows the reserve model in effect at its creation time, actual return logistics reconciles only the applicable return reserve, and campaign spend is never deducted a second time;
 - the first cumulative history is informational and creates no retroactive funding obligation; afterward `suggested withdrawal = max(0, platform available balance - post-activation unallocated advertising accrual - approved/executing unread advertising deposits - other locked funds)`;
 - withdrawal is a plan-only amount and remains a manual seller-portal action because WB has no supported public withdrawal API;
 - campaign-budget allocation is the only supported money write. It uses the same store's WB mutual-settlement `balance` (`net`, `type=1`); no separate withdrawal or external cash recharge is required. The immutable plan freezes store, campaign, CNY amount, source balance and evidence time, the ledger-derived advertising reserve, approver, approval time, and expiry. `policyCapCny` is not self-declared: it must exactly equal that current ledger-derived reserve under the active finance policy;
-- `ads-deposit-plan` accepts one store and one campaign, forces `balance` (`type=1`), rejects non-integer CNY or any amount above the current ledger reserve, and performs only campaign/budget/currency/balance GET requests. Promotional bonuses and cashback are never selected. WB later nets advertising charges from future sales on its settlement cycle; those deductions reconcile the 3% pool and are not charged again as other platform cost;
+- `ads-deposit-plan` accepts one store and one campaign, forces `balance` (`type=1`), rejects non-integer CNY or any amount above the current ledger reserve, and performs only campaign/budget/currency/balance GET requests. Promotional bonuses and cashback are never selected. WB later nets advertising charges from future sales on its settlement cycle; those deductions reconcile the advertising reserve and are not charged again as other platform cost;
 - the first command records a `proposed` ledger event and never writes to WB. `--confirm-live` requires that exact prior proposal, records the approval transition under the store funds lock, then rechecks campaign ownership/status, campaign budget, same-token seller-balance currency, source balance, policy cap, and reserve before the single non-retried POST;
 - an unknown POST outcome triggers one immediate read-only campaign-budget check. Later calls with the same fingerprint remain readback-only—never another POST—until the expected budget delta is confirmed or the action remains `unknown`.
 

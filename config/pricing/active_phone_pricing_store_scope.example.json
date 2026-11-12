@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "scopeId": "pricing-store-scope-example-v1",
+  "status": "example",
+  "_note": "示例：定价生效的店铺范围。所有必需店铺必须同时参与，单店回退会被阻断。",
+  "requiredStores": ["store-a", "store-b"],
+  "optionalStores": [],
+  "singleStoreFallbackAllowed": false
+}

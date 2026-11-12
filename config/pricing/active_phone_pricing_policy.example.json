@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "policyId": "pricing-policy-example-v1",
+  "status": "example",
+  "effectiveFrom": "2026-01-01",
+  "supersedes": null,
+  "_note": "示例：定价策略。variableRates 与 fixedCostCny 必须按自己的实际经营成本填写，示例中的 0 不能用于生产。",
+  "scope": {
+    "platform": "WB",
+    "account": "示例卖家账户",
+    "category": "smartphones",
+    "fulfillment": "FBS",
+    "settlementCurrency": "CNY"
+  },
+  "variableRates": {
+    "wbCommission": 0.0,
+    "managedOperations": 0.0,
+    "advertisingReserve": 0.0,
+    "returnRiskReserve": 0.0,
+    "paymentWithdrawalReserve": 0.0,
+    "total": 0.0
+  },
+  "retainedPriceFactor": 1.0,
+  "fixedCostCny": 0,
+  "targetOwnerProfitCny": 0,
+  "actualEventCosts": {
+    "returnLogisticsSource": "WB finance rows linked by store plus order identifiers",
+    "noFixedReturnLogisticsFallback": true
+  },
+  "formula": {
+    "ownerNetProfitCny": "buyerPriceCny * retainedPriceFactor - purchaseCostCny - fixedCostCny",
+    "minimumBuyerPriceCny": "(purchaseCostCny + fixedCostCny + targetOwnerProfitCny) / retainedPriceFactor"
+  },
+  "evidence": {
+    "source": "operator-confirmed",
+    "verifiedAt": "2026-01-01T00:00:00+08:00"
+  },
+  "governance": {
+    "noFallback": true,
+    "noReturnLogisticsFallback": true,
+    "failClosedOnMissingOrInvalid": true
+  }
+}

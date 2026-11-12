@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "owner-report-template-example-v1",
+  "status": "example",
+  "_note": "示例：报告模板发布清单。真实清单需记录 builder 路径与批准 SHA-256，生产环境必须为 LOCKED。",
+  "builder": {
+    "path": "tools/build_owner_report.py",
+    "approvedSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "lockState": "LEGACY_UNLOCKED"
+  },
+  "release": {
+    "version": "example-v1",
+    "releasedAt": "2026-01-01T00:00:00Z",
+    "approvedBy": "operator-name"
+  }
+}

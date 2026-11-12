@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "formulaId": "online-price-formula-example-v1",
+  "status": "example",
+  "effectiveFrom": "2026-01-01",
+  "_note": "示例：线上标价计算公式。financialGate 中的字段必须与激活的定价策略一致，否则阻断使用。",
+  "financialGate": {
+    "policyId": "pricing-policy-example-v1",
+    "retainedPriceFactor": 1.0,
+    "fixedCostCny": 0,
+    "targetOwnerProfitCny": 0
+  },
+  "rules": {
+    "normalizeCapacity": true,
+    "directPriceRoundUp": true,
+    "discountRate": 0.0,
+    "baseline": "max(minimumSafePriceCny, preRepriceBuyerPriceCny)",
+    "nullBaselineMarker": "NO_HISTORICAL_BASELINE_USER_APPROVED"
+  },
+  "modelCapacityRows": [
+    {
+      "model": "example-model-128gb",
+      "capacityGb": 128,
+      "note": "示例行，真实表由校验过的型号容量数据填充"
+    }
+  ]
+}

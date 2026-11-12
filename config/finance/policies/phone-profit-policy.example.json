@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "policyId": "phone-profit-policy-example-v1",
+  "status": "example",
+  "effectiveFrom": "2026-01-01T00:00:00Z",
+  "supersedes": null,
+  "scope": {
+    "platform": "WB",
+    "category": "smartphones",
+    "fulfillment": "FBS",
+    "settlementCurrency": "CNY"
+  },
+  "_note": "示例：一个带生效日期的利润策略版本。真实版本按日期追加，不覆盖历史。",
+  "variableRates": {
+    "wbCommission": 0.0,
+    "managedOperations": 0.0,
+    "advertisingReserve": 0.0,
+    "returnRiskReserve": 0.0,
+    "paymentWithdrawalReserve": 0.0
+  },
+  "fixedCostCny": 0,
+  "targetOwnerProfitCny": 0,
+  "evidence": {
+    "source": "operator-confirmed",
+    "verifiedAt": "2026-01-01T00:00:00+08:00"
+  },
+  "governance": {
+    "noFallback": true,
+    "failClosedOnMissingOrInvalid": true
+  }
+}
