@@ -1,0 +1,46 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先搜索已有 Issue，避免重复。
+        安全问题请勿在公开 Issue 中讨论，见 [SECURITY.md](https://github.com/haiying-ai/wb-store-manager/blob/main/SECURITY.md)。
+
+        **请勿在 Issue 中粘贴真实店铺数据、成本表、令牌或订单信息。** 用占位值描述即可。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 发生了什么？预期是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 说明在哪条工作流的哪一步，以及当时的输入形态（脱敏后）
+      placeholder: |
+        1. 执行 ……
+        2. 在「干跑」阶段看到……
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境信息
+      placeholder: |
+        OS: Windows 11 / macOS 15
+        Python: 3.12.x
+        工作流: 采集 / 分析 / 干跑 / 执行 / 回读 / 归档
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图
+      description: 请粘贴关键报错；**务必删除令牌、店铺名、真实金额**
+      render: shell
+    validations:
+      required: false
