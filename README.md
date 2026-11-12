@@ -247,4 +247,8 @@ WB category folders live under `E:/电商运营/01平台资料/01WB/<category>`:
 python -m pytest -q
 ```
 
-Reusable WB workflow changes must also be reflected in [`haiying-ai/store-manager-ru`](https://github.com/haiying-ai/store-manager-ru), which provides the multi-platform and multi-store wrapper.
+Reusable WB workflow changes should also be reflected in the multi-platform / multi-store wrapper, which is maintained in a separate private repository and is not distributed with this one.
+
+## License
+
+[Apache-2.0](./LICENSE)
