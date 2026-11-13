@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: 安装
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest pillow openpyxl
+
+      - name: 仓库内不含真实费率与成本表
+        run: |
+          found=$(git ls-files | grep -iE '^config/(finance|pricing)/[^/]+\.json$' || true)
+          if [ -n "$found" ]; then
+            echo "发现疑似真实配置（应只提交 *.example.json）："
+            echo "$found"
+            exit 1
+          fi
+
+      - name: 测试
+        run: pytest -q
