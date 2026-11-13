@@ -5,7 +5,7 @@ description: Run end-to-end Wildberries/WB product and store operations through 
 
 # WB Product Workflow
 
-Use this skill for Wildberries/WB product work rooted at `E:\电商运营\01平台资料\01WB\<category>` and implemented by `E:\CodexWorks\WB`.
+Use this skill for Wildberries/WB product work rooted at `E:\电商运营\01平台资料\01WB\<category>` and implemented by `%WORKSPACE%`.
 
 ## Fixed Workflow Router
 
@@ -47,7 +47,7 @@ Read `references/directory-protocol.md` before changing folder behavior.
 Read `references/live-state-sync.md` before or immediately after any WB live write, readback, or follow-up operation that depends on live identifiers.
 For this workspace's GitHub publication, read `references/github-ssh.md` before committing or pushing.
 Before publishing any reusable WB platform-logic change, read `references/dual-repository-sync.md` and update both `wb-store-manager` and `store-manager-ru` in the same work session.
-For every change to this Skill package, also mirror the complete project package to `C:\Users\孙兵\.agents\skills\wb-product-workflow`, run `scripts/sync_wb_skill_layers.py check`, and require zero missing or hash-mismatched project files before Git publication.
+For every change to this Skill package, also mirror the complete project package to `%USERPROFILE%\.agents\skills\wb-product-workflow`, run `scripts/sync_wb_skill_layers.py check`, and require zero missing or hash-mismatched project files before Git publication.
 
 ## Default Workflow
 
@@ -111,7 +111,7 @@ For every change to this Skill package, also mirror the complete project package
    - Treat a video as a separate marketing asset: it must use approved final product images and verified product facts; it does not replace the WB image package or its validation gates.
    - Use Dreamina/即梦 only when the user explicitly asks for it. Follow the `dreamina-cli` skill for login, credit-consuming submissions, task IDs, polling, and downloads.
    - For a multi-beat product story, default to short independently generated clips (about 4–6 seconds each), inspect each clip, then concatenate approved clips locally. Do not attempt the whole story as one long multi-image generation unless the user explicitly requests it.
-   - Keep generated clips, review frames, prompts, and the final render under `E:\CodexWorks\WB\videos\<product-slug>\` or the category's video work folder. Never overwrite an approved final render.
+   - Keep generated clips, review frames, prompts, and the final render under `%WORKSPACE%\videos\<product-slug>\` or the category's video work folder. Never overwrite an approved final render.
 
 9. Publish or discover live WB card.
    - Prefer dry-run until the user explicitly approves live writes.

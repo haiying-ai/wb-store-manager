@@ -10,7 +10,8 @@ import shutil
 from pathlib import Path
 
 
-DEFAULT_PROJECT = Path(r"E:\CodexWorks\WB\.agents\skills\wb-product-workflow")
+# 默认指向本仓库内的 Skill 包；也可用 --project 覆盖。
+DEFAULT_PROJECT = Path(__file__).resolve().parents[4] / ".agents" / "skills" / "wb-product-workflow"
 DEFAULT_USER = Path.home() / ".agents" / "skills" / "wb-product-workflow"
 IGNORED_PARTS = {"__pycache__", ".pytest_cache"}
 

@@ -16,7 +16,7 @@ Apply to new phone sellable identities that reuse a live source SKU's non-media 
 
 ## Locked V2 visual system
 
-1. Resolve the template through the V2 template registry before generating any SKU. The registry lives at `E:\CodexWorks\WB\data\template_registry\phone_v2\current\template_manifest.json`; its protected mirror belongs under the phone category's `00知识库\template_registry\phone_v2`. Do not rely on an unrecorded online card as the only template source.
+1. Resolve the template through the V2 template registry before generating any SKU. The registry lives at `%WORKSPACE%\data\template_registry\phone_v2\current\template_manifest.json`; its protected mirror belongs under the phone category's `00知识库\template_registry\phone_v2`. Do not rely on an unrecorded online card as the only template source.
 2. The manifest must record: V2 version, approved timestamp, all anchor `nmID`/vendorCode values, all eight intended image positions, local snapshot paths, SHA-256 hashes, dimensions, visual-review status, and the user approval that made the version active.
 3. Prefer the current live V2 anchor cards only after confirming the returned eight-image set is complete and agrees with the active manifest. Do not select a visually similar SKU, an earlier local folder, or a different image position merely because an anchor is unavailable.
 4. If every required live anchor is unavailable, deleted, or has incomplete media, use the complete locally stored snapshot from the active manifest and explicitly report `templateSource=fallback_snapshot`. This is a valid continuation path, not a failure.

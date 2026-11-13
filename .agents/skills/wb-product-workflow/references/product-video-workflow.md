@@ -61,7 +61,7 @@ Do not regenerate a complete multi-clip video because one segment failed; revise
 
 ## 6. Deliverables and resumability
 
-Use a versioned folder such as `E:\CodexWorks\WB\videos\<product-slug>\`:
+Use a versioned folder such as `%WORKSPACE%\videos\<product-slug>\`:
 
 ```text
 assets/reference/                 approved final references

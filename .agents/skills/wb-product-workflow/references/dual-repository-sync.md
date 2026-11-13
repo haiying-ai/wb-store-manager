@@ -7,8 +7,8 @@ Reusable WB platform logic is maintained in two GitHub repositories:
 
 Whenever changing WB authentication, permissions, directory contracts, category onboarding gates, listing/media/price/stock workflows, financial reporting, scheduled financial ingestion, money-moving actions, safety requirements or readback/completion rules:
 
-1. update the project-level package at `E:\CodexWorks\WB\.agents\skills\wb-product-workflow`;
-2. mirror that complete package to `C:\Users\孙兵\.agents\skills\wb-product-workflow` and run `python .agents/skills/wb-product-workflow/scripts/sync_wb_skill_layers.py check`; zero missing or hash-mismatched project files is a release gate;
+1. update the project-level package at `%WORKSPACE%\.agents\skills\wb-product-workflow`;
+2. mirror that complete package to `%USERPROFILE%\.agents\skills\wb-product-workflow` and run `python .agents/skills/wb-product-workflow/scripts/sync_wb_skill_layers.py check`; zero missing or hash-mismatched project files is a release gate;
 3. identify and update the corresponding documentation/Skill surface in both GitHub repositories, adapting detail rather than copying incompatible code;
 4. validate both repository Skills and run relevant tests;
 5. review and commit only task-related files in each repository;

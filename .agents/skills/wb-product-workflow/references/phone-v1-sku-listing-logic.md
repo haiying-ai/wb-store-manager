@@ -10,7 +10,7 @@ Use this reference only for a request explicitly invoking the **V1 SKU logic**. 
 
 ## V1 template registry and fallback
 
-1. Resolve V1 media through `E:\CodexWorks\WB\data\template_registry\phone_v1\<template-family>\current\template_manifest.json`; mirror the full version under the phone category's `00知识库\template_registry\phone_v1\<template-family>\`.
+1. Resolve V1 media through `%WORKSPACE%\data\template_registry\phone_v1\<template-family>\current\template_manifest.json`; mirror the full version under the phone category's `00知识库\template_registry\phone_v1\<template-family>\`.
 2. Store every active version as an immutable snapshot: anchor `nmID`/vendorCode, source configuration, live capture time, image count and positions, image files, source URLs, SHA-256 hashes, dimensions, visual-review result, approval record, and previous-version link.
 3. Prefer the live anchor only after verifying that every expected position exists and hashes/count/order agree with the active template manifest.
 4. If the live anchor is deleted, unavailable, or has incomplete media, use the complete approved snapshot for that same V1 template family and report `templateSource=fallback_snapshot`. This keeps V1 generation running without substituting another design.
