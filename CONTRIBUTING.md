@@ -5,13 +5,18 @@ Wildberries 店铺运营工具包：财务核算、广告、日报、选品与�
 ## 环境
 
 - Python `>=3.12`
-- 依赖为空，`pip install -e .` 即可获得 `wbm` 与 `wb-intel` 两个命令
+- 运行时依赖为空，`pip install -e .` 即可获得 `wbm` 与 `wb-intel` 两个命令
+- 跑测试还要装 `pytest`、`pillow`、`openpyxl`（Excel 渲染断言用）
 - 真实店铺凭证放在 `config/` 下的本地文件，仓库里只有 `*.example.json`
 
 ```bash
-pip install -e .
-python -m pytest
+pip install -e . pytest pillow openpyxl
+python -m pytest -q
 ```
+
+**关于测试套件的重要说明**：这套用例是针对作者本地完整运营配置写的，而那些配置不在仓库里。干净克隆下会有一大块用例失败或无法收集（缺少 `config/finance/*.json`、以及 `tests/` 里引用了未入库的 `tools/` 脚本）。这是本仓库的已知缺陷，不是你改动引入的问题。
+
+实用的做法是：只跑与你改动相关的文件（`python -m pytest tests/test_finance_calculations.py -q`），并保证它通过。想让全量通过，需要自备配置——`tests/conftest.py` 里的 `synthetic_agency_fee_policy` 是可参照的合成 fixture 写法。
 
 ## 仓库里的数字都是示例
 

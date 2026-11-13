@@ -2,6 +2,10 @@
 
 > A local-first Wildberries operations toolkit and Codex Skill that turns seller APIs, product files, media, and operating evidence into safe, resumable workflows.
 
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![Python](https://img.shields.io/badge/python-%E2%89%A53.12-3776AB?logo=python&logoColor=white)
+![Runtime](https://img.shields.io/badge/dependencies-none-success)
+
 WB Store Manager helps an operator move from scattered scripts to a controlled operating loop:
 
 `collect facts -> analyze -> prepare dry run -> approve -> execute -> read back -> audit -> archive`
@@ -249,8 +253,17 @@ WB category folders live under `E:/电商运营/01平台资料/01WB/<category>`:
 ## Development
 
 ```powershell
+pip install -e . pytest pillow openpyxl
 python -m pytest -q
 ```
+
+**The test suite is written against the author's full operating configuration, which is not published.** This repository ships `config/**/*.example.json` only, and `tools/` holds five of the automation scripts but not all of them. On a clean clone you should expect a large block of tests to fail or fail to collect — that is a gap in this repository, not a bug introduced by your change.
+
+Practical guidance:
+
+- Run the subset that matches what you changed, and make sure it passes, e.g. `python -m pytest tests/test_finance_calculations.py -q`
+- Do not "fix" a failing test by relaxing its numbers; the assertions encode settlement rules (tax basis, refund handling, fee rounding)
+- If you want the full suite green, you need your own `config/finance/*.json` and `config/pricing/*.json` — see `tests/conftest.py` for the synthetic-policy pattern to copy
 
 Reusable WB workflow changes should also be reflected in the multi-platform / multi-store wrapper, which is maintained in a separate private repository and is not distributed with this one.
 
