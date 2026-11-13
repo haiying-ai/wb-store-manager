@@ -10,7 +10,7 @@ Wildberries 店铺运营工具包：财务核算、广告、日报、选品与�
 
 ```bash
 pip install -e .
-pytest
+python -m pytest
 ```
 
 ## 仓库里的数字都是示例
