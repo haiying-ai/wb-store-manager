@@ -11,3 +11,8 @@ wb-intel = "wb_store_intelligence.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools]
+# 仓库根目录同时有 data/、config/、tests/ 等非包目录，flat-layout 自动发现会报
+# "Multiple top-level packages discovered"，必须显式声明要打包的两个模块。
+packages = ["wb_manager", "wb_store_intelligence"]
