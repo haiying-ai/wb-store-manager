@@ -28,7 +28,8 @@ jobs:
 
       - name: 仓库内不含真实费率与成本表
         run: |
-          found=$(git ls-files | grep -iE '^config/(finance|pricing)/[^/]+\.json$' || true)
+          found=$(git ls-files 'config/finance/**' 'config/pricing/**' \
+            | grep -iE '\.json$' | grep -vE '\.example\.json$' || true)
           if [ -n "$found" ]; then
             echo "发现疑似真实配置（应只提交 *.example.json）："
             echo "$found"
